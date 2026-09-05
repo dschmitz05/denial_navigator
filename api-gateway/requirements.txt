@@ -1,0 +1,12 @@
+fastapi==0.115.6
+uvicorn==0.34.0
+pydantic==2.10.4
+asyncpg==0.30.0
+httpx==0.28.1
+orjson==3.10.12
+python-dotenv==1.0.1
+alembic==1.14.0
+python-multipart==0.0.20
+PyJWT==2.10.1
+bcrypt==4.3.0
+pypdf==5.1.0

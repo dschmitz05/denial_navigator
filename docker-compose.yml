@@ -1,0 +1,152 @@
+version: "3.9"
+
+x-common-env: &common-env
+  POSTGRES_USER: ${POSTGRES_USER:-denial_nav}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-denial_nav_pass}
+  POSTGRES_DB: ${POSTGRES_DB:-denial_navigator}
+  PGVECTOR_ENABLE: "true"
+
+services:
+  # ─────────────────────────────────────────────
+  # Database — PostgreSQL + pgvector
+  # ─────────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: denial-navigator-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-denial_nav}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-denial_nav_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-denial_navigator}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/000-init.sql
+      - ./database/migrations:/docker-entrypoint-initdb.d/100-migrations
+      - ./database/seed:/docker-entrypoint-initdb.d/200-seed
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ─────────────────────────────────────────────
+  # EDI Parser Service
+  # ─────────────────────────────────────────────
+  ediparser:
+    build:
+      context: ./ediparser
+      dockerfile: Dockerfile
+    container_name: denial-navigator-ediparser
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+    volumes:
+      - dropzone:/app/dropzone
+      - ./ediparser/output:/app/output
+    environment:
+      <<: *common-env
+      DATABASE_URL: postgresql://${POSTGRES_USER:-denial_nav}:${POSTGRES_PASSWORD:-denial_nav_pass}@postgres:5432/${POSTGRES_DB:-denial_navigator}
+      DROPZONE_PATH: /app/dropzone
+      OUTPUT_PATH: /app/output
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ─────────────────────────────────────────────
+  # RAG Engine Service
+  # ─────────────────────────────────────────────
+  rag-engine:
+    build:
+      context: ./rag-engine
+      dockerfile: Dockerfile
+    container_name: denial-navigator-rag
+    restart: unless-stopped
+    ports:
+      - "8002:8000"
+    environment:
+      <<: *common-env
+      DATABASE_URL: postgresql://${POSTGRES_USER:-denial_nav}:${POSTGRES_PASSWORD:-denial_nav_pass}@postgres:5432/${POSTGRES_DB:-denial_navigator}
+      LLAMA_BASE_URL: http://10.10.10.98:8080
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
+      # Embeddings come from Ollama, not the chat llama-server on :8080 -
+      # that one answers /v1/embeddings with 501 "does not support embeddings".
+      EMBED_BASE_URL: ${EMBED_BASE_URL:-http://10.10.10.98:11434}
+      API_BASE: http://api:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ─────────────────────────────────────────────
+  # LLM Service
+  # ─────────────────────────────────────────────
+  llm-service:
+    build:
+      context: ./llm-service
+      dockerfile: Dockerfile
+    container_name: denial-navigator-llm
+    restart: unless-stopped
+    ports:
+      - "8003:8000"
+    environment:
+      <<: *common-env
+      DATABASE_URL: postgresql://${POSTGRES_USER:-denial_nav}:${POSTGRES_PASSWORD:-denial_nav_pass}@postgres:5432/${POSTGRES_DB:-denial_navigator}
+      LLAMA_BASE_URL: http://10.10.10.98:8080
+      LLM_MODEL: ${LLM_MODEL:-qwen2.5:7b}
+      API_BASE: http://api:8000
+      LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-2048}
+      LLM_DISABLE_THINKING: ${LLM_DISABLE_THINKING:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ─────────────────────────────────────────────
+  # API Gateway
+  # ─────────────────────────────────────────────
+  api:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    container_name: denial-navigator-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *common-env
+      DATABASE_URL: postgresql://${POSTGRES_USER:-denial_nav}:${POSTGRES_PASSWORD:-denial_nav_pass}@postgres:5432/${POSTGRES_DB:-denial_navigator}
+      EDIPARSER_SERVICE_URL: http://ediparser:8000
+      RAG_ENGINE_URL: http://rag-engine:8000
+      LLM_SERVICE_URL: http://llm-service:8000
+      LLAMA_BASE_URL: http://10.10.10.98:8080
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:3000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ediparser:
+        condition: service_started
+      rag-engine:
+        condition: service_started
+      llm-service:
+        condition: service_started
+
+  # ─────────────────────────────────────────────
+  # Frontend — React + Vite
+  # ─────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: http://localhost:8000
+    container_name: denial-navigator-frontend
+    restart: unless-stopped
+    ports:
+      - "3081:80"
+    depends_on:
+      api:
+        condition: service_started
+
+volumes:
+  pgdata:
+  dropzone:

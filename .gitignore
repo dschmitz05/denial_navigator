@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+
+# Node
+node_modules/
+dist/
+build/
+*.log
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes
+pgdata/
+ollama_data/
+
+# Dropzone files
+dropzone/*.835
+dropzone/*.txt
+
+# ── Added 2026-09-05 ──
+
+# Local working backups taken during development
+*.bak
+*.bak.*
+*.pre-fix
+*.pre-rewrite
+*.pre-init
+*.pre-colfix
+*.invalid
+
+# Parsed EDI output contains claim and patient data. The directory itself is a
+# bind mount that must exist, so keep it and ignore its contents.
+ediparser/output/
+# (Docker recreates this bind mount on `docker compose up`.)
+
+# Database dumps contain claims and denials, including patient names and dates
+# of birth. Never commit these.
+database/backups/
+
+# Dropzone holds uploaded remittances
+ediparser/dropzone/
+dropzone/

@@ -1,0 +1,191 @@
+"""API Gateway — Claims routes"""
+
+import logging
+from typing import Optional
+
+from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
+
+from api_gateway.services.db import get_connection
+
+logger = logging.getLogger("api_gateway.claims")
+
+router = APIRouter()
+
+
+class ClaimCreate(BaseModel):
+    claim_number: str
+    patient_id: str
+    payer_name: str
+    total_charge: float
+    icd_10_codes: list[str] = []
+
+
+class ClaimUpdate(BaseModel):
+    status: Optional[str] = None
+    total_paid: Optional[float] = None
+    total_adjustment: Optional[float] = None
+
+
+@router.get("/claims", response_model=list[dict])
+async def list_claims(
+    status: str = Query(None, description="Filter by claim status"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """List claims with optional status filter"""
+    async with get_connection() as conn:
+        query = """
+            SELECT c.*, COUNT(d.id) as denial_count
+            FROM claims c
+            LEFT JOIN denials d ON d.claim_id = c.id
+        """
+        params = []
+        where_count = 0
+
+        if status:
+            query += " WHERE c.status = $1"
+            params.append(status)
+            where_count = 1
+
+        query += " GROUP BY c.id ORDER BY c.created_at DESC LIMIT $%d OFFSET $%d" % (where_count + 1, where_count + 2)
+        params.extend([limit, offset])
+
+        rows = await conn.fetch(query, *params)
+        return [dict(r) for r in rows]
+
+
+@router.get("/claims/{claim_id}", response_model=dict)
+async def get_claim(claim_id: str):
+    """Get a single claim with its denials"""
+    async with get_connection() as conn:
+        row = await conn.fetchrow("SELECT * FROM claims WHERE id = $1", claim_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Claim not found")
+
+        denials = await conn.fetch(
+            "SELECT * FROM denials WHERE claim_id = $1 ORDER BY service_line_number", claim_id
+        )
+        analyses = await conn.fetch(
+            "SELECT * FROM ai_analyses WHERE claim_id = $1 ORDER BY created_at DESC", claim_id
+        )
+
+        result = dict(row)
+        result["denials"] = [dict(d) for d in denials]
+        result["analyses"] = [dict(a) for a in analyses]
+        return result
+
+
+@router.post("/claims", response_model=dict, status_code=201)
+async def create_claim(claim: ClaimCreate):
+    """Create a new claim"""
+    async with get_connection() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO claims (claim_number, patient_id, payer_name, total_charge, icd_10_codes, status)
+            VALUES ($1, $2, $3, $4, $5, 'ingested')
+            RETURNING *
+            """,
+            claim.claim_number, claim.patient_id, claim.payer_name,
+            claim.total_charge, claim.icd_10_codes,
+        )
+        return dict(row)
+
+
+@router.patch("/claims/{claim_id}", response_model=dict)
+async def update_claim(claim_id: str, claim: ClaimUpdate):
+    """Update a claim"""
+    async with get_connection() as conn:
+        updates = []
+        params = []
+        param_idx = 1
+
+        if claim.status:
+            updates.append(f"status = ${param_idx}")
+            params.append(claim.status)
+            param_idx += 1
+        if claim.total_paid is not None:
+            updates.append(f"total_paid = ${param_idx}")
+            params.append(claim.total_paid)
+            param_idx += 1
+        if claim.total_adjustment is not None:
+            updates.append(f"total_adjustment = ${param_idx}")
+            params.append(claim.total_adjustment)
+            param_idx += 1
+
+        if not updates:
+            raise HTTPException(status_code=400, detail="No updates provided")
+
+        updates.append("updated_at = NOW()")
+        params.append(claim_id)
+
+        row = await conn.fetchrow(
+            f"UPDATE claims SET {', '.join(updates)} WHERE id = ${param_idx} RETURNING *",
+            *params,
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Claim not found")
+        return dict(row)
+
+
+@router.get("/claims/dashboard/stats")
+async def dashboard_stats():
+    """Get dashboard statistics"""
+    async with get_connection() as conn:
+        total_claims = await conn.fetchval("SELECT COUNT(*) FROM claims")
+
+        # A claim is denied if it actually carries denial lines. This used to
+        # count `claims.status = 'denied'`, but ingestion writes 'parsed' and
+        # nothing ever set 'denied', so the card read 0 forever.
+        denied_claims = await conn.fetchval(
+            "SELECT COUNT(DISTINCT claim_id) FROM denials"
+        )
+
+        total_denials = await conn.fetchval(
+            "SELECT COUNT(*) FROM denials WHERE status = 'open'"
+        )
+
+        # "Pending" is anything not yet in a terminal state - including rows
+        # with a NULL outcome_status. Counting only 'queued' missed every
+        # appeal a biller had started working.
+        pending_appeals = await conn.fetchval(
+            """
+            SELECT COUNT(*) FROM appeals_queue
+            WHERE outcome_status IS NULL
+               OR outcome_status NOT IN ('approved', 'overruled', 'resolved', 'cancelled')
+            """
+        )
+
+        # Financial impact is the money actually adjusted off on denial lines.
+        # The old query summed claims.total_adjustment filtered on the same
+        # never-set status, so it was always 0.00.
+        total_denied = await conn.fetchval(
+            "SELECT COALESCE(SUM(adjustment_amount), 0) FROM denials"
+        ) or 0
+
+        open_denied = await conn.fetchval(
+            "SELECT COALESCE(SUM(adjustment_amount), 0) FROM denials WHERE status = 'open'"
+        ) or 0
+
+        financial = await conn.fetchrow(
+            """
+            SELECT
+                COALESCE(SUM(total_charge), 0)     as total_charges,
+                COALESCE(SUM(total_paid), 0)       as total_paid,
+                COALESCE(SUM(total_adjustment), 0) as total_adjustments
+            FROM claims
+            WHERE id IN (SELECT DISTINCT claim_id FROM denials)
+            """
+        )
+
+        return {
+            "total_claims": total_claims,
+            "denied_claims": denied_claims,
+            "pending_denials": total_denials,
+            "pending_appeals": pending_appeals,
+            "total_denied": float(total_denied),
+            "open_denied": float(open_denied),
+            "total_charges": float(financial["total_charges"] or 0),
+            "total_paid": float(financial["total_paid"] or 0),
+            "total_adjustments": float(financial["total_adjustments"] or 0),
+        }
