@@ -128,6 +128,10 @@ Enforced today:
   be missed.
 - **bcrypt password hashes** (cost 12, unique per-password salt); self-service
   change requires the current password.
+- **Recommendation consistency checks.** A denial the payer explained how to
+  fix is never offered as a write-off, and a PR (patient responsibility)
+  balance is never offered as one either — both are collectible. The analysis
+  is stored as written; the disagreement is shown, not applied silently.
 - **Optional TOTP two-factor**, per account, controlled by an administrator.
   Secrets are encrypted at rest, codes are single-use, and an admin can reset a
   lost device without ever seeing the secret.
@@ -197,6 +201,25 @@ simplification — but not across a network segment.
 
 Everyone can read claims, denials and policy documents; the differences are in
 what they can change. Defined in `api-gateway/services/access.py`.
+
+## Appeal filing windows
+
+The dashboard's Priority Denials panel warns about claims approaching their
+filing deadline. An 835 does not carry that deadline — a remittance states the
+payer's adjudication, not your window to contest it — so the window is
+configuration.
+
+`payer_appeal_policies` holds one row per payer plus a `*` default of **90
+days**, and `appeal_deadline_for()` applies it to the remittance date the
+parser derives. Ingestion, the backfill and the recompute all call that one
+function, so they cannot drift apart.
+
+Edit them under **Settings → Appeal filing windows** (managers and above).
+Saving re-dates the *open* denials that payer governs and reports how many
+moved; closed denials are never re-dated.
+
+Payers vary from 60 to 365 days, so any payer showing *"using the default"* is
+being governed by a number nobody chose for it.
 
 ## Database migrations
 
