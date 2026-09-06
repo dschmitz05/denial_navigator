@@ -242,8 +242,31 @@ async def login(http_request: Request, credentials: LoginRequest):
 
 @router.get("/auth/me", response_model=dict)
 async def get_me(current_user = Depends(get_current_user)):
-    """Get current user info"""
-    return current_user
+    """The signed-in user's account.
+
+    This used to return the JWT payload, which carries only sub, username,
+    role and the timestamps - so anything else the interface needed, like the
+    person's name or email, was simply absent. It showed correctly right after
+    signing in, because the login response carries the full record, and then
+    disappeared on the next page refresh when the app re-read it from here.
+
+    Read from the database instead, so what the token asserts and what the
+    account actually says cannot drift apart either.
+    """
+    async with get_connection() as conn:
+        row = await conn.fetchrow(
+            """SELECT id, username, email, full_name, role, is_active, last_login,
+                      totp_required, (totp_confirmed_at IS NOT NULL) AS totp_enrolled
+                 FROM users WHERE id = $1""",
+            current_user["sub"],
+        )
+    if not row:
+        raise HTTPException(status_code=401, detail="Account no longer exists")
+
+    user = dict(row)
+    user["id"] = str(user["id"])
+    user["last_login"] = user["last_login"].isoformat() if user["last_login"] else None
+    return user
 
 
 @router.post("/auth/register", status_code=201)
@@ -479,10 +502,18 @@ async def _complete_totp(http_request: Request, body: TotpCode, confirming: bool
         details={"username": user["username"], "role": user["role"], "second_factor": "totp"},
         ip_address=ip, user_agent=user_agent,
     )
+    async with get_connection() as conn:
+        full = await conn.fetchrow(
+            """SELECT id, username, email, full_name, role, is_active
+                 FROM users WHERE id = $1""",
+            user["id"],
+        )
+    account = dict(full)
+    account["id"] = str(account["id"])
     return {
         "access_token": create_token(str(user["id"]), user["username"], user["role"]),
         "token_type": "bearer",
-        "user": {"id": str(user["id"]), "username": user["username"], "role": user["role"]},
+        "user": account,
     }
 
 

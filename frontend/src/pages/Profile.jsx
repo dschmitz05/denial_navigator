@@ -75,6 +75,10 @@ export default function Profile() {
                 <div className="detail-value">{user?.full_name || '—'}</div>
               </div>
               <div className="detail-item">
+                <div className="detail-label">Email</div>
+                <div className="detail-value">{user?.email || '—'}</div>
+              </div>
+              <div className="detail-item">
                 <div className="detail-label">Role</div>
                 <div className="detail-value">
                   <span className="badge">{user?.role?.replace(/_/g, ' ')}</span>
