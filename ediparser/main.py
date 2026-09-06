@@ -192,7 +192,10 @@ async def health():
 @app.post("/ingest", response_model=IngestResponse)
 async def ingest_file(request: Request, file: UploadFile = File(...)):
     """Upload and parse an 835 or 837 file directly"""
-    _rate_limiter.check(request.client.host if request.client else "unknown")
+    # Only the gateway calls this service, so every request shares one address.
+    # The gateway already limits per user upstream; this is a backstop against
+    # a runaway loop, not a per-user control.
+    _rate_limiter.check("gateway")
     if file.filename is None:
         raise HTTPException(status_code=400, detail="No file name provided")
     ext = "." + file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""

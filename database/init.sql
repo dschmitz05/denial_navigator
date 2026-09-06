@@ -296,7 +296,10 @@ CREATE TABLE users (
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
-    last_login TIMESTAMPTZ
+    last_login TIMESTAMPTZ,
+    -- Tokens issued before this moment are refused. Bumped on password change
+    -- so a credential reset actually ends the sessions using the old one.
+    sessions_valid_from TIMESTAMPTZ NOT NULL DEFAULT date_trunc('second', NOW())
 );
 
 CREATE INDEX idx_users_role ON users(role);

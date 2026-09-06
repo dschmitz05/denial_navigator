@@ -3,8 +3,6 @@
 import hashlib
 import json
 import logging
-import time
-from collections import defaultdict
 from datetime import date, datetime
 from typing import Optional
 import uuid
@@ -14,6 +12,8 @@ from pydantic import BaseModel
 
 from api_gateway.services.db import get_connection
 from api_gateway.services import EDIParserClient
+from api_gateway.services.ratelimit import SlidingWindowLimiter
+from api_gateway.services.audit import _client_ip
 
 logger = logging.getLogger("api_gateway.ingestion")
 
@@ -26,25 +26,33 @@ RATE_LIMIT = 30  # requests
 RATE_WINDOW = 60  # seconds
 
 
-class _RateLimiter:
-    def __init__(self, limit: int, window: int):
-        self.limit = limit
-        self.window = window
-        self._buckets: dict[str, list[float]] = defaultdict(list)
-
-    def check(self, key: str) -> None:
-        now = time.monotonic()
-        bucket = self._buckets[key]
-        bucket[:] = [t for t in bucket if now - t < self.window]
-        if len(bucket) >= self.limit:
-            raise HTTPException(
-                status_code=429,
-                detail=f"Rate limit exceeded: {self.limit} requests per {self.window}s",
-            )
-        bucket.append(now)
+_rate_limiter = SlidingWindowLimiter(RATE_LIMIT, RATE_WINDOW, "ingestion")
 
 
-_rate_limiter = _RateLimiter(RATE_LIMIT, RATE_WINDOW)
+def _limit_key(request: Request) -> str:
+    """Who this upload is charged to.
+
+    It used to be request.client.host, which behind nginx is the proxy's
+    address on every single request - so all users shared one 30/minute
+    bucket and any one of them could lock out everybody else. Charging the
+    authenticated user makes the limit mean what it says.
+    """
+    who = getattr(request.state, "principal", None)
+    if who is not None and getattr(who, "user_id", None):
+        return f"user:{who.user_id}"
+    if who is not None and getattr(who, "username", None):
+        return f"svc:{who.username}"
+    return f"ip:{_client_ip(request) or 'unknown'}"
+
+
+def _check_rate(request: Request) -> None:
+    key = _limit_key(request)
+    if not _rate_limiter.allow(key):
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded: {RATE_LIMIT} uploads per {RATE_WINDOW}s",
+            headers={"Retry-After": str(_rate_limiter.retry_after(key))},
+        )
 
 
 def _validate_upload(file: UploadFile) -> None:
@@ -224,7 +232,7 @@ class StoreIngestion(BaseModel):
 @router.post("/ingestion/upload", response_model=dict)
 async def upload_file(request: Request, file: UploadFile = File(...)):
     """Upload an 835 file for parsing"""
-    _rate_limiter.check(request.client.host if request.client else "unknown")
+    _check_rate(request)
     _validate_upload(file)
     content = await file.read()
     if len(content) > MAX_FILE_SIZE:
@@ -250,7 +258,7 @@ async def upload_file(request: Request, file: UploadFile = File(...)):
 @router.post("/ingestion/ingest", response_model=dict, status_code=201)
 async def ingest_file(request: Request, file: UploadFile = File(...)):
     """Upload and parse an 835/837 file, storing results in one step"""
-    _rate_limiter.check(request.client.host if request.client else "unknown")
+    _check_rate(request)
     _validate_upload(file)
     content = await file.read()
     if len(content) > MAX_FILE_SIZE:

@@ -254,7 +254,15 @@ async def reset_user_password(
             raise HTTPException(status_code=404, detail="User not found")
 
         hashed = hash_password(pwd.password)
-        await conn.execute("UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2", hashed, user_id)
+        # Same reasoning as the self-service change: an admin resetting a
+        # password is usually responding to a compromise, so the sessions
+        # opened with the old one must end too.
+        await conn.execute(
+            """UPDATE users
+                  SET password_hash = $1, sessions_valid_from = date_trunc('second', NOW()), updated_at = NOW()
+                WHERE id = $2""",
+            hashed, user_id,
+        )
 
         # Log the action
         await conn.execute(

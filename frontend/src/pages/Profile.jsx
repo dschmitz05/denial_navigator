@@ -42,7 +42,14 @@ export default function Profile() {
       })
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.detail || `Could not change password (HTTP ${resp.status})`)
-      setNotice({ error: false, text: 'Password changed. It applies the next time you sign in.' })
+      // The server invalidates every session opened before this change and
+      // returns a replacement for this one; storing it keeps you signed in
+      // here while signing out anywhere the old password was used.
+      if (data.access_token) localStorage.setItem('auth_token', data.access_token)
+      setNotice({
+        error: false,
+        text: 'Password changed. Any other session using the old password has been signed out.',
+      })
       setForm({ current_password: '', new_password: '', confirm: '' })
     } catch (err) {
       setNotice({ error: true, text: err.message })

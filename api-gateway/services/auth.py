@@ -21,11 +21,16 @@ def verify_password(password: str, hashed: str) -> bool:
 
 
 def create_token(user_id: str, username: str, role: str) -> str:
+    now = datetime.now(timezone.utc)
     payload = {
         "sub": user_id,
         "username": username,
         "role": role,
-        "exp": datetime.now(timezone.utc) + timedelta(minutes=TOKEN_EXPIRY_MINUTES),
+        # Issued-at is what makes revocation possible: a password change moves
+        # users.sessions_valid_from forward, and every token minted before it
+        # stops being accepted.
+        "iat": now,
+        "exp": now + timedelta(minutes=TOKEN_EXPIRY_MINUTES),
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 

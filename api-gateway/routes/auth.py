@@ -15,6 +15,57 @@ logger = logging.getLogger("api_gateway.auth")
 
 router = APIRouter()
 
+# Login was unauthenticated and unlimited: 12 guesses took 2.3 seconds, and
+# every one costs ~170ms of bcrypt, so it doubled as a way to burn the server's
+# CPU without an account.
+#
+# Counted out of audit_log rather than in memory. uvicorn runs four workers,
+# and an in-process counter gives each of them a separate budget - the stated
+# limit of 6 was really 24, and a 10-attempt test did not trip it at all. The
+# database is the only state all four workers already share.
+#
+# Two limits, because they stop different attacks: per-account defeats guessing
+# one password list against one user, per-address defeats spraying one password
+# across every account.
+LOGIN_USER_LIMIT = 6        # failures per account
+LOGIN_IP_LIMIT = 20         # failures per source address
+LOGIN_WINDOW_MINUTES = 5
+
+
+async def _recent_failures(conn, username: str, ip: Optional[str]) -> tuple[int, int]:
+    """(failures for this account, failures from this address) in the window.
+
+    Only failures since that account last signed in successfully are counted,
+    which gives the reset for free: someone who mistypes twice and then gets in
+    is not left near the limit for the next five minutes.
+    """
+    by_user = await conn.fetchval(
+        f"""
+        SELECT COUNT(*) FROM audit_log
+         WHERE action = 'login_failed'
+           AND lower(details->>'username') = lower($1)
+           AND created_at > NOW() - INTERVAL '{LOGIN_WINDOW_MINUTES} minutes'
+           AND created_at > COALESCE((
+                 SELECT MAX(created_at) FROM audit_log
+                  WHERE action = 'login'
+                    AND lower(details->>'username') = lower($1)
+               ), 'epoch'::timestamptz)
+        """,
+        username or "",
+    )
+    by_ip = 0
+    if ip:
+        by_ip = await conn.fetchval(
+            f"""
+            SELECT COUNT(*) FROM audit_log
+             WHERE action = 'login_failed'
+               AND ip_address = $1::inet
+               AND created_at > NOW() - INTERVAL '{LOGIN_WINDOW_MINUTES} minutes'
+            """,
+            ip,
+        )
+    return int(by_user or 0), int(by_ip or 0)
+
 # ── Pydantic Models ──
 
 class LoginRequest(BaseModel):
@@ -83,6 +134,34 @@ async def login(http_request: Request, credentials: LoginRequest):
     user_agent = http_request.headers.get("user-agent")
 
     async with get_connection() as conn:
+        # Checked BEFORE the password is verified, so a blocked attempt costs
+        # no bcrypt - which is what closes the CPU-exhaustion side of this.
+        fails_user, fails_ip = await _recent_failures(conn, credentials.username, ip)
+        over = ("account" if fails_user >= LOGIN_USER_LIMIT
+                else "address" if fails_ip >= LOGIN_IP_LIMIT else None)
+        if over:
+            await audit_record(
+                action="login_blocked",
+                resource_type="user",
+                details={
+                    "username": credentials.username,
+                    "reason": "rate_limited",
+                    "limit": over,
+                    "failures_account": fails_user,
+                    "failures_address": fails_ip,
+                },
+                ip_address=ip,
+                user_agent=user_agent,
+            )
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "Too many failed sign-in attempts. "
+                    f"Try again in {LOGIN_WINDOW_MINUTES} minutes."
+                ),
+                headers={"Retry-After": str(LOGIN_WINDOW_MINUTES * 60)},
+            )
+
         user = await conn.fetchrow(
             "SELECT * FROM users WHERE username = $1 AND is_active = TRUE",
             credentials.username,
@@ -236,8 +315,13 @@ async def change_password(
             )
             raise HTTPException(status_code=401, detail="Current password is incorrect")
 
+        # Moving sessions_valid_from is what evicts every other session. If
+        # the old password was known to someone else, changing it has to end
+        # the access it bought them, not just stop it being reusable.
         await conn.execute(
-            "UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2",
+            """UPDATE users
+                  SET password_hash = $1, sessions_valid_from = date_trunc('second', NOW()), updated_at = NOW()
+                WHERE id = $2""",
             hash_password(body.new_password), user["id"],
         )
 
@@ -250,4 +334,12 @@ async def change_password(
         ip_address=ip,
         user_agent=user_agent,
     )
-    return {"status": "password_changed"}
+
+    # Every session opened before this moment is now refused - including the
+    # one making this request. Hand back a fresh token so changing your own
+    # password does not log you out, while still evicting everyone else.
+    return {
+        "status": "password_changed",
+        "access_token": create_token(str(user["id"]), user["username"], current_user["role"]),
+        "token_type": "bearer",
+    }

@@ -42,14 +42,16 @@ PUBLIC_EXACT = {
 class Principal:
     """Who is making this request."""
 
-    __slots__ = ("kind", "user_id", "username", "role", "reason")
+    __slots__ = ("kind", "user_id", "username", "role", "reason", "issued_at")
 
-    def __init__(self, kind: str, user_id=None, username=None, role=None, reason=None):
+    def __init__(self, kind: str, user_id=None, username=None, role=None,
+                 reason=None, issued_at=None):
         self.kind = kind            # 'user' | 'service' | 'anonymous'
         self.user_id = user_id      # UUID string, users only
         self.username = username
         self.role = role            # RBAC role, users only
         self.reason = reason        # why authentication failed, if it did
+        self.issued_at = issued_at  # JWT iat, epoch seconds
 
     @property
     def authenticated(self) -> bool:
@@ -89,6 +91,7 @@ def principal(request) -> Principal:
         user_id=str(user_id),
         username=payload.get("username"),
         role=payload.get("role"),
+        issued_at=payload.get("iat"),
     )
 
 
@@ -228,6 +231,51 @@ def is_public(path: str, method: str) -> bool:
     return not path.startswith("/api/")
 
 
+async def account_is_current(who: "Principal") -> tuple[bool, str]:
+    """Is the account behind this token still entitled to use it?
+
+    A signature and an expiry only prove the token was minted by us and has not
+    aged out. They say nothing about whether the account still exists, is still
+    enabled, or has had its password changed since - so without this check a
+    dismissed employee kept working access for the rest of the token's life,
+    and resetting a stolen password did not evict whoever stole it.
+
+    One indexed primary-key lookup per request. Deliberately not cached: a
+    cache TTL is exactly the window in which a revoked session still works,
+    and the point of this function is that there is no such window.
+    """
+    from api_gateway.services.db import get_connection
+
+    try:
+        async with get_connection() as conn:
+            row = await conn.fetchrow(
+                "SELECT is_active, sessions_valid_from FROM users WHERE id = $1::uuid",
+                who.user_id,
+            )
+    except Exception as e:
+        # Fail closed. If the account cannot be confirmed, the request is not
+        # authorised - an outage must not become an authentication bypass.
+        logger.error(f"account check failed for {who.username}: {e}")
+        return False, "account_check_unavailable"
+
+    if row is None:
+        return False, "account_deleted"
+    if not row["is_active"]:
+        return False, "account_deactivated"
+
+    valid_from = row["sessions_valid_from"]
+    if valid_from is not None and who.issued_at is not None:
+        # Compared exactly. An earlier version allowed a one-second grace to
+        # avoid rejecting a token minted in the same second as the bump - but
+        # that grace IS a bypass window, and it was wide enough that a password
+        # reset failed to evict the old session at all. The self-service change
+        # returns a fresh token instead, so nothing legitimate needs the slack.
+        if float(who.issued_at) < valid_from.timestamp():
+            return False, "credentials_changed"
+
+    return True, ""
+
+
 class AccessControlMiddleware(BaseHTTPMiddleware):
     """Reject unauthenticated API requests before the handler sees them."""
 
@@ -237,6 +285,14 @@ class AccessControlMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         who = principal(request)
+
+        # A valid signature is not enough; the account behind it must still be
+        # entitled to it. Services hold no account, so they skip this.
+        if who.kind == "user":
+            current, why = await account_is_current(who)
+            if not current:
+                who = Principal("anonymous", username=who.username, reason=why)
+
         if not who.authenticated:
             # The audit middleware sits outside this one, so the rejection is
             # still recorded - a refused access is exactly what a reviewer
