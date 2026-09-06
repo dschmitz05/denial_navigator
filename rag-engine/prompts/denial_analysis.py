@@ -45,6 +45,17 @@ CRITICAL: Your response MUST be valid JSON with these exact fields:
   - no_action_required: correctly adjudicated and NOT collectible from anyone - a
     contractual write-off the provider absorbs under the payer agreement.
 
+The category and the action must agree. If you have identified something the
+provider can act on, the action cannot be "nothing to do":
+  - coding_error, missing_info, bundled_service -> coding_correction
+  - lack_of_preauth, medical_necessity          -> clinical_documentation or appeal
+  - patient_responsibility                      -> bill_patient
+Reserve no_action_required for a denial where nothing is recoverable by anyone:
+a contractual write-off, or a confirmed duplicate. A denial that says
+information is missing is telling you what to supply - recommending a write-off
+there tells a billing team to abandon a claim the payer has just explained how
+to fix.
+
 CRITICAL distinction: a PR (Patient Responsibility) adjustment is NOT a write-off. PR
 means the payer has assigned that balance to the patient, so required_action MUST be
 bill_patient. Reserve no_action_required for CO (Contractual Obligation) adjustments,

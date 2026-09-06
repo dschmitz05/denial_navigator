@@ -31,22 +31,56 @@ RESOLUTION_FOR_ACTION = {
 }
 
 
-def recommended_resolution(cagc: Optional[str], required_action: Optional[str]) -> Optional[str]:
-    """Which queue action to offer for a denial.
+# Categories where the payer has told you what is wrong, so something CAN be
+# done. "No action required" against any of these contradicts itself: the
+# denial reason is the instruction.
+RECOVERABLE_CATEGORIES = {
+    "coding_error": "corrected_claim",
+    "missing_info": "corrected_claim",
+    "bundled_service": "corrected_claim",
+    "lack_of_preauth": "clinical_docs",
+    "medical_necessity": "clinical_docs",
+    "patient_responsibility": "bill_patient",
+}
 
-    X12 defines PR as Patient Responsibility: the payer has assigned that
-    balance to the PATIENT. It is money the practice is still entitled to
-    collect, so it can never be a write-off - a deductible recommended as
-    "write off" tells the billing team to abandon collectible revenue.
 
-    Older analyses have no bill_patient value to give, because the prompt only
-    offered no_action_required for both a patient balance and a contractual
-    write-off. This rule corrects those without re-running the model, and acts
-    as a guard on future ones.
+def recommended_resolution(
+    cagc: Optional[str],
+    required_action: Optional[str],
+    denial_category: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    """Which queue action to offer, and why if it differs from the model's.
+
+    Two corrections are applied to what the model said, both because the same
+    mistake costs real money:
+
+    X12 defines PR as Patient Responsibility - the payer assigned that balance
+    to the PATIENT. It is collectible, so it can never be a write-off.
+
+    And a category that names a fixable problem cannot also mean "nothing to
+    do". A denial categorised as missing information, with a recommendation to
+    write it off, tells a biller to abandon a claim the payer has just
+    explained how to fix. The model produced exactly that pairing on a CARC 16
+    denial; the analysis is kept as written, but the recommendation offered is
+    the consistent one.
     """
-    if cagc == "PR" and required_action in (None, "", "no_action_required"):
-        return "bill_patient"
-    return RESOLUTION_FOR_ACTION.get(required_action or "")
+    action = required_action or ""
+
+    if cagc == "PR" and action in ("", "no_action_required"):
+        return "bill_patient", (
+            "This is a PR (patient responsibility) adjustment, so the balance is "
+            "collectible from the patient rather than written off."
+        )
+
+    if action == "no_action_required" and denial_category in RECOVERABLE_CATEGORIES:
+        target = RECOVERABLE_CATEGORIES[denial_category]
+        return target, (
+            f"The analysis calls this “{denial_category.replace('_', ' ')}”, which is "
+            "something you can act on, so writing it off would contradict its own "
+            "explanation."
+        )
+
+    return RESOLUTION_FOR_ACTION.get(action), None
 
 
 class DenialUpdate(BaseModel):
@@ -80,7 +114,16 @@ async def list_denials(
             JOIN claims c ON c.id = d.claim_id
             LEFT JOIN carc_codes cc ON cc.code = d.carc_code
             LEFT JOIN rarc_codes rc ON rc.code = d.rarc_code
-            LEFT JOIN ai_analyses aa ON aa.denial_id = d.id
+            -- The LATEST analysis, not an arbitrary one. A denial can be
+            -- re-analysed, and a plain join returns a row per analysis; with
+            -- four of them on one denial the advice shown changed between
+            -- refreshes.
+            LEFT JOIN LATERAL (
+                SELECT * FROM ai_analyses a
+                 WHERE a.denial_id = d.id
+                 ORDER BY a.created_at DESC
+                 LIMIT 1
+            ) aa ON TRUE
             LEFT JOIN appeals_queue aq ON aq.denial_id = d.id
                AND (aq.outcome_status IS NULL
                     OR aq.outcome_status NOT IN ('approved', 'overruled', 'resolved', 'denied_again', 'cancelled'))
@@ -324,7 +367,16 @@ async def get_denial(denial_id: str):
             JOIN claims c ON c.id = d.claim_id
             LEFT JOIN carc_codes cc ON cc.code = d.carc_code
             LEFT JOIN rarc_codes rc ON rc.code = d.rarc_code
-            LEFT JOIN ai_analyses aa ON aa.denial_id = d.id
+            -- The LATEST analysis, not an arbitrary one. A denial can be
+            -- re-analysed, and a plain join returns a row per analysis; with
+            -- four of them on one denial the advice shown changed between
+            -- refreshes.
+            LEFT JOIN LATERAL (
+                SELECT * FROM ai_analyses a
+                 WHERE a.denial_id = d.id
+                 ORDER BY a.created_at DESC
+                 LIMIT 1
+            ) aa ON TRUE
             LEFT JOIN appeals_queue aq ON aq.denial_id = d.id
                AND (aq.outcome_status IS NULL
                     OR aq.outcome_status NOT IN ('approved', 'overruled', 'resolved', 'denied_again', 'cancelled'))
@@ -335,9 +387,14 @@ async def get_denial(denial_id: str):
         if not row:
             raise HTTPException(status_code=404, detail="Denial not found")
         denial = dict(row)
-        denial["recommended_resolution"] = recommended_resolution(
-            denial.get("cagc"), denial.get("required_action")
+        resolution, note = recommended_resolution(
+            denial.get("cagc"), denial.get("required_action"), denial.get("denial_category")
         )
+        denial["recommended_resolution"] = resolution
+        # Non-null when the offered action differs from what the model said.
+        # Shown to the user rather than applied silently: overruling the
+        # analysis without saying so would be its own kind of wrong.
+        denial["recommendation_note"] = note
         return denial
 
 

@@ -329,6 +329,19 @@ export default function Denials() {
                           {' '}— it will go to the {destinationFor(recommended)} tab.
                         </p>
                       )}
+                      {/* The offered action differs from what the analysis
+                          literally said. Say so rather than quietly overruling
+                          it — the biller should know the two disagree. */}
+                      {selectedDenial.recommendation_note && (
+                        <div className="callout callout-warning" style={{ marginBottom: 10, fontSize: '0.85rem' }}>
+                          {selectedDenial.recommendation_note}
+                          {selectedDenial.required_action && (
+                            <div style={{ marginTop: 6, opacity: 0.85 }}>
+                              The analysis said: <em>{selectedDenial.required_action.replace(/_/g, ' ')}</em>.
+                            </div>
+                          )}
+                        </div>
+                      )}
                       {selectedDenial.cagc === 'PR' && (
                         <p style={{ color: 'var(--warning-text)', marginBottom: 10, fontSize: '0.9rem' }}>
                           🧾 This is a <strong>PR (Patient Responsibility)</strong> adjustment —
