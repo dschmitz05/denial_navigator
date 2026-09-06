@@ -35,16 +35,16 @@ export default function Login({ onLogin }) {
       }}>
         <div className="card-body" style={{ textAlign: 'center', padding: '40px 32px' }}>
           <h1 style={{ fontSize: '1.8rem', marginBottom: 8 }}>🧭 Denial Navigator</h1>
-          <p style={{ color: '#6b7280', marginBottom: 32 }}>Healthcare Denial Management</p>
+          <p style={{ color: 'var(--gray-500)', marginBottom: 32 }}>Healthcare Denial Management</p>
 
           <form onSubmit={handleSubmit}>
             {error && (
               <div className="card" style={{
-                background: '#fef2f2',
+                background: 'var(--danger-light)', color: 'var(--danger-text)',
                 border: '1px solid #fca5a5',
                 marginBottom: 20,
                 fontSize: '0.85rem',
-                color: '#dc2626',
+                color: 'var(--danger)',
               }}>
                 {error}
               </div>
@@ -87,7 +87,7 @@ export default function Login({ onLogin }) {
             </button>
           </form>
 
-          <p style={{ marginTop: 24, fontSize: '0.8rem', color: '#6b7280' }}>
+          <p style={{ marginTop: 24, fontSize: '0.8rem', color: 'var(--gray-500)' }}>
             Default: admin / admin123
           </p>
         </div>

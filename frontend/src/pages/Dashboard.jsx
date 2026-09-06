@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 
 const API_BASE = '/api/v1'
 
@@ -21,7 +22,34 @@ function formatDate(dateStr) {
   return new Date(dateStr).toLocaleDateString('en-US')
 }
 
+/**
+ * A stat card that navigates to the tab it summarises.
+ *
+ * Rendered as a real button so it is keyboard reachable and announced as
+ * clickable, rather than a div with an onClick that only a mouse can find.
+ */
+function StatCard({ label, value, subtitle, to, tone, navigate }) {
+  const clickable = Boolean(to)
+  return (
+    <div
+      className={`stat-card${tone ? ' ' + tone : ''}${clickable ? ' stat-card-link' : ''}`}
+      role={clickable ? 'button' : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      onClick={clickable ? () => navigate(to) : undefined}
+      onKeyDown={clickable ? (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigate(to) }
+      } : undefined}
+      title={clickable ? `View ${label}` : undefined}
+    >
+      <div className="stat-label">{label}</div>
+      <div className="stat-value">{value}</div>
+      <div className="stat-subtitle">{subtitle}</div>
+    </div>
+  )
+}
+
 export default function Dashboard() {
+  const navigate = useNavigate()
   const [stats, setStats] = useState(null)
   const [priorityDenials, setPriorityDenials] = useState([])
   const [carcSummary, setCarcSummary] = useState([])
@@ -53,28 +81,34 @@ export default function Dashboard() {
   return (
     <div className="page-body">
       <div className="stats-grid">
-        <div className="stat-card">
-          <div className="stat-label">Total Claims</div>
-          <div className="stat-value">{stats?.total_claims || 0}</div>
-          <div className="stat-subtitle">All time</div>
-        </div>
-        <div className="stat-card danger">
-          <div className="stat-label">Denied Claims</div>
-          <div className="stat-value">{stats?.denied_claims || 0}</div>
-          <div className="stat-subtitle">{stats?.pending_denials || 0} denial lines open</div>
-        </div>
-        <div className="stat-card warning">
-          <div className="stat-label">Pending Appeals</div>
-          <div className="stat-value">{stats?.pending_appeals || 0}</div>
-          <div className="stat-subtitle">In queue</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-label">Total Denied</div>
-          <div className="stat-value">{formatCurrency(stats?.total_denied || 0)}</div>
-          <div className="stat-subtitle">
-            {formatCurrency(stats?.open_denied || 0)} still open
-          </div>
-        </div>
+        <StatCard
+          label="Total Claims"
+          value={stats?.total_claims || 0}
+          subtitle="All time"
+          to="/claims"
+          navigate={navigate}
+        />
+        <StatCard
+          label="Denied Claims"
+          value={stats?.denied_claims || 0}
+          subtitle={`${stats?.pending_denials || 0} denial lines open`}
+          tone="danger"
+          to="/denials"
+          navigate={navigate}
+        />
+        <StatCard
+          label="Pending Appeals"
+          value={stats?.pending_appeals || 0}
+          subtitle={`${stats?.pending_worklist || 0} also in worklist`}
+          tone="warning"
+          to="/appeals"
+          navigate={navigate}
+        />
+        <StatCard
+          label="Total Denied"
+          value={formatCurrency(stats?.total_denied || 0)}
+          subtitle={`${formatCurrency(stats?.open_denied || 0)} still open`}
+        />
       </div>
 
       {/* Priority Denials */}
@@ -127,7 +161,7 @@ export default function Dashboard() {
         </div>
         <div className="card-body">
           {!feedback || feedback.total_feedback === 0 ? (
-            <p style={{ color: '#6b7280' }}>
+            <p style={{ color: 'var(--gray-500)' }}>
               No feedback recorded yet. Ratings and outcomes are captured when an appeal is
               resolved on the Appeals page — {feedback?.total_analyses ?? 0} analyses so far
               have no outcome logged against them.

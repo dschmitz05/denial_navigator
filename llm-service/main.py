@@ -22,6 +22,10 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "qwen2.5:7b")
 # which is llm-service itself, so every /analyses/store POST 404'd and
 # no analysis was ever persisted - while the response still said stored.
 API_BASE = os.environ.get("API_BASE", "http://api:8000")
+# The gateway refuses unauthenticated requests; this service authenticates
+# with the shared service credential rather than as a person.
+SERVICE_API_KEY = os.environ.get("SERVICE_API_KEY", "")
+SERVICE_HEADERS = {"X-Service-Key": SERVICE_API_KEY, "X-Service-Name": "llm-service"}
 LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "2048"))
 # The llama.cpp server behind LLAMA_BASE_URL runs a REASONING model
 # (Qwen3.6-35B-A3B). Left alone it spends the whole token budget on
@@ -159,9 +163,11 @@ async def store_analysis(denial_id: str, claim_id: str, raw_prompt: str,
     }
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(f"{API_BASE}/api/v1/analyses/store", json=payload)
+            resp = await client.post(
+                f"{API_BASE}/api/v1/analyses/store", json=payload, headers=SERVICE_HEADERS
+            )
             if resp.status_code != 200:
-                logger.error(f"Failed to store analysis: {resp.text}")
+                logger.error(f"Failed to store analysis: HTTP {resp.status_code} {resp.text}")
                 return False
             return True
     except Exception as e:

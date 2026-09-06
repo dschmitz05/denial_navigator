@@ -45,12 +45,19 @@ export default function Denials() {
 
   // The CARC list is built from the codes actually present in the data.
   // It used to be hard-coded to five codes that mostly never occur.
+  //
+  // It also has to follow the status filter: the counts are a promise about
+  // how many rows picking that code will show, so they have to be counted
+  // over the same denials the table is listing. Counting denials already sent
+  // to Appeals or the Worklist made every count read high.
   useEffect(() => {
-    fetch(`${API_BASE}/denials/carc-options`)
+    const params = new URLSearchParams()
+    if (statusFilter) params.set('status', statusFilter)
+    fetch(`${API_BASE}/denials/carc-options?${params}`)
       .then(r => r.json())
-      .then(setCarcOptions)
+      .then(data => setCarcOptions(Array.isArray(data) ? data : []))
       .catch(err => console.error('CARC options failed:', err))
-  }, [])
+  }, [statusFilter])
 
   const handleGenerateAnalysis = async (denialId) => {
     // Track the specific row: a single `generating` flag disabled every AI
@@ -80,13 +87,30 @@ export default function Denials() {
     setGeneratingId(null)
   }
 
-  // Map the AI's required_action onto the resolution types the appeals queue
-  // accepts, so the recommendation becomes a unit of work rather than advice.
+  // Map the AI's required_action onto the resolution types the queue accepts,
+  // so the recommendation becomes a unit of work rather than advice. This is a
+  // fallback: the server sends `recommended_resolution`, which also applies the
+  // PR rule (a patient-responsibility balance is billed, never written off).
   const RESOLUTION_FOR = {
     appeal: 'appeal_letter',
     coding_correction: 'corrected_claim',
     clinical_documentation: 'clinical_docs',
+    bill_patient: 'bill_patient',
     no_action_required: 'write_off',
+  }
+
+  // Which tab a queued item lands on. Mirrors APPEAL_RESOLUTION_TYPES in
+  // api-gateway/routes/appeals.py — only a letter to the payer is an appeal.
+  const APPEAL_TYPES = ['appeal_letter']
+  const WORKLIST_TYPES = ['corrected_claim', 'clinical_docs', 'payer_contact', 'bill_patient', 'write_off']
+  const destinationFor = (t) => (APPEAL_TYPES.includes(t) ? 'Appeals' : 'Worklist')
+  const LABELS = {
+    appeal_letter: '⚖️ Appeal letter',
+    corrected_claim: '✏️ Corrected claim',
+    clinical_docs: '📄 Clinical documentation',
+    payer_contact: '📞 Payer contact',
+    bill_patient: '🧾 Bill patient',
+    write_off: '🗑️ Write-off',
   }
 
   const handleQueueAppeal = async (denial, resolutionType) => {
@@ -104,7 +128,7 @@ export default function Denials() {
       })
       const data = await resp.json()
       setNotice(resp.ok
-        ? { error: false, text: `Queued as ${resolutionType.replace(/_/g, ' ')}. Track it on the Appeals page.` }
+        ? { error: false, text: `Queued as ${resolutionType.replace(/_/g, ' ')}. Track it on the ${destinationFor(resolutionType)} page.` }
         : { error: true, text: data?.detail || `Could not queue (HTTP ${resp.status})` })
       if (resp.ok) {
         loadDenials({ status: statusFilter, carc_code: carcFilter })
@@ -123,17 +147,27 @@ export default function Denials() {
     setShowDetail(true)
   }
 
+  const carcChoices = carcFilter && !carcOptions.some(o => o.carc_code === carcFilter)
+    ? [...carcOptions, { carc_code: carcFilter, description: 'No matches under this status filter', denial_count: 0 }]
+    : carcOptions
+
+  const recommended = selectedDenial?.recommended_resolution
+    || (selectedDenial?.required_action ? RESOLUTION_FOR[selectedDenial.required_action] : null)
+
   return (
     <div className="page-body">
       <div className="filters-bar">
         <select className="form-select" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
-          <option value="">All Statuses</option>
+          <option value="">Active Only</option>
           <option value="open">Open</option>
           <option value="analyzed">Analyzed</option>
+          <option value="in_progress">In Progress (worklist)</option>
+          <option value="in_appeal">In Appeal</option>
+          <option value="appealed">Appealed/Resolved</option>
         </select>
         <select className="form-select" value={carcFilter} onChange={e => setCarcFilter(e.target.value)}>
-          <option value="">All CARC Codes ({carcOptions.length})</option>
-          {carcOptions.map(o => (
+          <option value="">All CARC Codes ({carcChoices.length})</option>
+          {carcChoices.map(o => (
             <option key={o.carc_code} value={o.carc_code}>
               {o.carc_code} — {o.description} ({o.denial_count})
             </option>
@@ -143,14 +177,14 @@ export default function Denials() {
       </div>
 
       {notice && (
-        <div className="card" style={{ marginBottom: 12, borderLeft: `4px solid ${notice.error ? '#dc2626' : '#16a34a'}` }}>
-          <div className="card-body" style={{ color: notice.error ? '#dc2626' : '#166534' }}>{notice.text}</div>
+        <div className="card" style={{ marginBottom: 12, borderLeft: `4px solid ${notice.error ? 'var(--danger)' : 'var(--success)'}` }}>
+          <div className="card-body" style={{ color: notice.error ? 'var(--danger)' : 'var(--success-text)' }}>{notice.text}</div>
         </div>
       )}
 
       {error && (
         <div className="card" style={{ marginBottom: 12, borderLeft: '4px solid #dc2626' }}>
-          <div className="card-body" style={{ color: '#dc2626' }}>
+          <div className="card-body" style={{ color: 'var(--danger)' }}>
             <strong>AI analysis failed:</strong> {error}
           </div>
         </div>
@@ -274,32 +308,64 @@ export default function Denials() {
                 </div>
               )}
 
-              {/* Queue this denial as work */}
+              {/* Queue this denial as work. Appeals and everything else are
+                  offered separately, because they go to different tabs. */}
               {selectedDenial.ai_analysis_id && (
                 <div style={{ marginBottom: 20 }}>
-                  <h4 style={{ marginBottom: 8 }}>📋 Send to appeals queue</h4>
+                  <h4 style={{ marginBottom: 8 }}>📋 Queue this denial as work</h4>
                   {selectedDenial.appeal_id ? (
-                    <p style={{ color: '#6b7280' }}>
-                      Already queued — status{' '}
+                    <p style={{ color: 'var(--gray-500)' }}>
+                      Already queued as{' '}
+                      <strong>{(selectedDenial.appeal_resolution_type || 'work').replace(/_/g, ' ')}</strong>
+                      {' '}— status{' '}
                       <span className="badge">{selectedDenial.appeal_status || 'queued'}</span>.
-                      Track it on the Appeals page.
+                      Track it on the {destinationFor(selectedDenial.appeal_resolution_type)} page.
                     </p>
                   ) : (
-                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                      {selectedDenial.required_action && RESOLUTION_FOR[selectedDenial.required_action] && (
-                        <button className="btn btn-primary btn-sm" disabled={queueing}
-                                onClick={() => handleQueueAppeal(selectedDenial, RESOLUTION_FOR[selectedDenial.required_action])}>
-                          {queueing ? 'Queueing…' : `Queue as ${RESOLUTION_FOR[selectedDenial.required_action].replace(/_/g, ' ')} (recommended)`}
-                        </button>
+                    <div>
+                      {recommended && (
+                        <p style={{ color: 'var(--gray-500)', marginBottom: 10 }}>
+                          Recommended: <strong>{LABELS[recommended] || recommended}</strong>
+                          {' '}— it will go to the {destinationFor(recommended)} tab.
+                        </p>
                       )}
-                      {['appeal_letter', 'corrected_claim', 'clinical_docs', 'payer_contact', 'write_off']
-                        .filter(t => t !== RESOLUTION_FOR[selectedDenial.required_action])
-                        .map(t => (
-                          <button key={t} className="btn btn-sm" disabled={queueing}
-                                  onClick={() => handleQueueAppeal(selectedDenial, t)}>
-                            {t.replace(/_/g, ' ')}
-                          </button>
-                        ))}
+                      {selectedDenial.cagc === 'PR' && (
+                        <p style={{ color: 'var(--warning-text)', marginBottom: 10, fontSize: '0.9rem' }}>
+                          🧾 This is a <strong>PR (Patient Responsibility)</strong> adjustment —
+                          {' '}{selectedDenial.carc_description || 'the payer assigned this balance to the patient'}.
+                          {' '}The balance is collectible and belongs on the patient's statement, not written off.
+                        </p>
+                      )}
+
+                      <div style={{ marginBottom: 12 }}>
+                        <div style={{ fontSize: '0.8rem', textTransform: 'uppercase', letterSpacing: 1, color: 'var(--gray-500)', marginBottom: 6 }}>
+                          Appeal the payer's decision → Appeals tab
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                          {APPEAL_TYPES.map(t => (
+                            <button key={t} className={`btn btn-sm ${t === recommended ? 'btn-primary' : ''}`}
+                                    disabled={queueing}
+                                    onClick={() => handleQueueAppeal(selectedDenial, t)}>
+                              {queueing ? 'Queueing…' : LABELS[t]}{t === recommended ? ' (recommended)' : ''}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div>
+                        <div style={{ fontSize: '0.8rem', textTransform: 'uppercase', letterSpacing: 1, color: 'var(--gray-500)', marginBottom: 6 }}>
+                          Work the denial without appealing → Worklist tab
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                          {WORKLIST_TYPES.map(t => (
+                            <button key={t} className={`btn btn-sm ${t === recommended ? 'btn-primary' : ''}`}
+                                    disabled={queueing}
+                                    onClick={() => handleQueueAppeal(selectedDenial, t)}>
+                              {queueing ? 'Queueing…' : LABELS[t]}{t === recommended ? ' (recommended)' : ''}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
                     </div>
                   )}
                 </div>

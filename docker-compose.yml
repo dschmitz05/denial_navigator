@@ -50,6 +50,7 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-denial_nav}:${POSTGRES_PASSWORD:-denial_nav_pass}@postgres:5432/${POSTGRES_DB:-denial_navigator}
       DROPZONE_PATH: /app/dropzone
       OUTPUT_PATH: /app/output
+      SERVICE_API_KEY: ${SERVICE_API_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -97,6 +98,7 @@ services:
       API_BASE: http://api:8000
       LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-2048}
       LLM_DISABLE_THINKING: ${LLM_DISABLE_THINKING:-true}
+      SERVICE_API_KEY: ${SERVICE_API_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -119,7 +121,12 @@ services:
       RAG_ENGINE_URL: http://rag-engine:8000
       LLM_SERVICE_URL: http://llm-service:8000
       LLAMA_BASE_URL: http://10.10.10.98:8080
+      # Health checks probe the embedding backend too; it is a separate
+      # server from the chat one (see the rag-engine comment above).
+      EMBED_BASE_URL: ${EMBED_BASE_URL:-http://10.10.10.98:11434}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:3000}
+      JWT_SECRET: ${JWT_SECRET:-change_me_in_production}
+      SERVICE_API_KEY: ${SERVICE_API_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy

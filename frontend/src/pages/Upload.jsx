@@ -83,7 +83,7 @@ export default function Upload() {
       <div className="card">
         <div className="card-header">
           <h3>📁 Upload EDI 835 / 837 Files</h3>
-          <p style={{ fontSize: '0.85rem', color: '#6b7280', marginTop: 4 }}>
+          <p style={{ fontSize: '0.85rem', color: 'var(--gray-500)', marginTop: 4 }}>
             Upload EDI 835 ERA or EDI 837 claim files for parsing and analysis. Supports .txt, .835, .837 formats.
           </p>
         </div>
@@ -95,7 +95,7 @@ export default function Upload() {
             onDragLeave={handleDrag}
             onDrop={handleDrop}
             style={{
-              border: `2px dashed ${dragActive ? '#3b82f6' : '#d1d5db'}`,
+              border: `2px dashed ${dragActive ? '#3b82f6' : 'var(--gray-300)'}`,
               borderRadius: 12,
               padding: '40px 20px',
               textAlign: 'center',
@@ -110,7 +110,7 @@ export default function Upload() {
             <p style={{ fontWeight: 600, marginBottom: 4 }}>
               Drag & drop files here, or click to browse
             </p>
-            <p style={{ fontSize: '0.85rem', color: '#6b7280' }}>
+            <p style={{ fontSize: '0.85rem', color: 'var(--gray-500)' }}>
               Supports .txt, .835, .837 files (max 10 at once)
             </p>
             <input
@@ -135,14 +135,14 @@ export default function Upload() {
                   alignItems: 'center',
                   gap: 12,
                   padding: '8px 12px',
-                  background: '#f3f4f6',
+                  background: 'var(--gray-100)',
                   borderRadius: 6,
                   marginBottom: 6,
                   fontSize: '0.85rem',
                 }}>
                   <span>📄</span>
                   <span style={{ flex: 1 }}>{file.name}</span>
-                  <span style={{ color: '#6b7280', fontSize: '0.8rem' }}>
+                  <span style={{ color: 'var(--gray-500)', fontSize: '0.8rem' }}>
                     {(file.size / 1024).toFixed(1)} KB
                   </span>
                   <button
@@ -197,12 +197,12 @@ export default function Upload() {
                   <div style={{ flex: 1 }}>
                     <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>{r.file}</div>
                     {r.status === 'success' && (
-                      <div style={{ fontSize: '0.8rem', color: '#166534' }}>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--success-text)' }}>
                         {r.claims_stored} claims, {r.denials_stored} denials stored
                       </div>
                     )}
                     {r.status === 'error' && (
-                      <div style={{ fontSize: '0.8rem', color: '#dc2626' }}>{r.error}</div>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--danger)' }}>{r.error}</div>
                     )}
                   </div>
                 </div>
@@ -213,10 +213,10 @@ export default function Upload() {
           {/* Error */}
           {error && (
             <div className="card" style={{
-              background: '#fef2f2',
+              background: 'var(--danger-light)', color: 'var(--danger-text)',
               border: '1px solid #fca5a5',
               marginTop: 20,
-              color: '#dc2626',
+              color: 'var(--danger)',
               fontSize: '0.85rem',
             }}>
               {error}
@@ -251,7 +251,7 @@ function IngestionHistory() {
       </div>
       <div className="card-body" style={{ padding: 0 }}>
         {history.length === 0 ? (
-          <p style={{ textAlign: 'center', padding: 20, color: '#6b7280' }}>No uploads yet</p>
+          <p style={{ textAlign: 'center', padding: 20, color: 'var(--gray-500)' }}>No uploads yet</p>
         ) : (
           <table>
             <thead>

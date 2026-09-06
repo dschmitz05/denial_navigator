@@ -69,8 +69,12 @@ CREATE TABLE denials (
     denial_reason_code VARCHAR(50),
     adjustment_reason VARCHAR(500),
     denial_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    -- 'in_progress' is denial work that is NOT an appeal: a corrected claim,
+    -- a records request, a payer call. Keeping it distinct from 'in_appeal'
+    -- is what keeps the Appeals tab to actual appeals.
     status VARCHAR(50) NOT NULL DEFAULT 'open'
-        CHECK (status IN ('open', 'analyzed', 'in_appeal', 'appealed', 'overruled', 'resolved', 'written_off')),
+        CHECK (status IN ('open', 'analyzed', 'in_progress', 'in_appeal',
+                          'appealed', 'overruled', 'resolved', 'written_off')),
     appeal_deadline DATE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -131,7 +135,10 @@ CREATE TABLE appeals_queue (
     ai_analysis_id UUID REFERENCES ai_analyses(id) ON DELETE SET NULL,
     assigned_user_id UUID,
     resolution_type VARCHAR(100),
-    -- 'appeal_letter', 'corrected_claim', 'clinical_docs', 'payer_contact', 'write_off'
+    -- 'appeal_letter'  -> Appeals tab; everything below -> Worklist tab.
+    -- 'corrected_claim', 'clinical_docs', 'payer_contact', 'bill_patient', 'write_off'
+    -- 'bill_patient' and 'write_off' are NOT interchangeable: a PR balance is
+    -- billed to the patient and collected; a CO write-off is absorbed.
     outcome_status VARCHAR(50)
         CHECK (outcome_status IN ('queued', 'in_progress', 'submitted', 'approved',
                                   'denied_again', 'overruled', 'resolved', 'cancelled')),

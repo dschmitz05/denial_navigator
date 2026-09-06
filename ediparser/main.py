@@ -9,13 +9,15 @@ import json
 import logging
 import os
 import hashlib
+import time
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 import httpx
 import orjson
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -28,6 +30,10 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://denial_nav:denial_na
 DROPZONE_PATH = os.environ.get("DROPZONE_PATH", "/app/dropzone")
 OUTPUT_PATH = os.environ.get("OUTPUT_PATH", "/app/output")
 API_BASE = os.environ.get("API_BASE", "http://api:8000")
+# The gateway refuses unauthenticated requests. This service has no user to
+# log in as, so it presents the shared service credential instead.
+SERVICE_API_KEY = os.environ.get("SERVICE_API_KEY", "")
+SERVICE_HEADERS = {"X-Service-Key": SERVICE_API_KEY, "X-Service-Name": "ediparser"}
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ediparser")
@@ -79,6 +85,27 @@ class FileInfo(BaseModel):
 parser = X12Parser()
 watcher: Optional[FileWatcher] = None
 
+ALLOWED_EXTENSIONS = {".835", ".837", ".edi"}
+MAX_FILE_SIZE = 25 * 1024 * 1024
+RATE_LIMIT = 60
+RATE_WINDOW = 60
+
+
+class _RateLimiter:
+    def __init__(self, limit: int, window: int):
+        self.limit = limit
+        self.window = window
+        self._buckets: dict[str, list[float]] = defaultdict(list)
+    def check(self, key: str) -> None:
+        now = time.monotonic()
+        bucket = self._buckets[key]
+        bucket[:] = [t for t in bucket if now - t < self.window]
+        if len(bucket) >= self.limit:
+            raise HTTPException(status_code=429, detail=f"Rate limit exceeded: {self.limit} requests per {self.window}s")
+        bucket.append(now)
+
+_rate_limiter = _RateLimiter(RATE_LIMIT, RATE_WINDOW)
+
 # ── Database Helper (lightweight asyncpg-style via http to API) ──
 async def store_parsed_data(parsed: Parsed835Response, file_hash: str, file_name: str, file_size: int = 0) -> dict:
     """Store parsed results via the API gateway"""
@@ -94,9 +121,11 @@ async def store_parsed_data(parsed: Parsed835Response, file_hash: str, file_name
         "denials": [d.model_dump() for d in parsed.denials],
     }
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(f"{API_BASE}/api/v1/ingestion/store", json=payload)
+        resp = await client.post(
+            f"{API_BASE}/api/v1/ingestion/store", json=payload, headers=SERVICE_HEADERS
+        )
         if resp.status_code != 200:
-            logger.error(f"Failed to store parsed data: {resp.text}")
+            logger.error(f"Failed to store parsed data: HTTP {resp.status_code} {resp.text}")
         return resp.json()
 
 # ── EDI File Processing ──
@@ -161,24 +190,23 @@ async def health():
     )
 
 @app.post("/ingest", response_model=IngestResponse)
-async def ingest_file(file: UploadFile = File(...)):
+async def ingest_file(request: Request, file: UploadFile = File(...)):
     """Upload and parse an 835 or 837 file directly"""
+    _rate_limiter.check(request.client.host if request.client else "unknown")
+    if file.filename is None:
+        raise HTTPException(status_code=400, detail="No file name provided")
+    ext = "." + file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Invalid file type. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}")
     content = await file.read()
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail=f"File too large: max {MAX_FILE_SIZE} bytes")
+    if not content.startswith(b"ISA"):
+        raise HTTPException(status_code=400, detail="File does not appear to be a valid X12 file (missing ISA segment)")
     file_name_base = file.filename or "uploaded_file.835"
     file_hash = hashlib.sha256(content).hexdigest()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     stamped_name = f"ingest_{stamp}_{file_name_base}"
-
-    # This endpoint PARSES ONLY - it deliberately does not persist, and does
-    # not drop a copy in the dropzone.
-    #
-    # The api-gateway calls this and then stores the result itself. When this
-    # endpoint also stored, and also wrote a dropzone copy that the watcher
-    # then picked up, a single upload produced THREE sets of rows. Claims hid
-    # it behind ON CONFLICT (claim_number); denials have no unique constraint,
-    # so they triplicated. The gateway owns the database; this service owns
-    # parsing. The watcher path (process_file) still stores, because no
-    # gateway request exists to do it there.
     try:
         parsed = parser.parse(content.decode("utf-8", errors="replace"))
     except ValueError as e:

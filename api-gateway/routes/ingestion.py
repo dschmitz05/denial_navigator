@@ -3,12 +3,13 @@
 import hashlib
 import json
 import logging
-import re
+import time
+from collections import defaultdict
 from datetime import date, datetime
 from typing import Optional
 import uuid
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Query, Depends
+from fastapi import APIRouter, HTTPException, UploadFile, File, Query, Depends, Request
 from pydantic import BaseModel
 
 from api_gateway.services.db import get_connection
@@ -18,6 +19,46 @@ logger = logging.getLogger("api_gateway.ingestion")
 
 router = APIRouter()
 edi_client = EDIParserClient()
+
+ALLOWED_EXTENSIONS = {".835", ".837", ".edi"}
+MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB
+RATE_LIMIT = 30  # requests
+RATE_WINDOW = 60  # seconds
+
+
+class _RateLimiter:
+    def __init__(self, limit: int, window: int):
+        self.limit = limit
+        self.window = window
+        self._buckets: dict[str, list[float]] = defaultdict(list)
+
+    def check(self, key: str) -> None:
+        now = time.monotonic()
+        bucket = self._buckets[key]
+        bucket[:] = [t for t in bucket if now - t < self.window]
+        if len(bucket) >= self.limit:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Rate limit exceeded: {self.limit} requests per {self.window}s",
+            )
+        bucket.append(now)
+
+
+_rate_limiter = _RateLimiter(RATE_LIMIT, RATE_WINDOW)
+
+
+def _validate_upload(file: UploadFile) -> None:
+    if file.filename is None:
+        raise HTTPException(status_code=400, detail="No file name provided")
+    ext = "." + file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid file type '{file.filename}'. "
+                f"Allowed extensions: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+            ),
+        )
 
 
 def _parse_date(val) -> Optional[date]:
@@ -181,9 +222,15 @@ class StoreIngestion(BaseModel):
 
 
 @router.post("/ingestion/upload", response_model=dict)
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(request: Request, file: UploadFile = File(...)):
     """Upload an 835 file for parsing"""
+    _rate_limiter.check(request.client.host if request.client else "unknown")
+    _validate_upload(file)
     content = await file.read()
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail=f"File too large: max {MAX_FILE_SIZE} bytes")
+    if not content.startswith(b"ISA"):
+        raise HTTPException(status_code=400, detail="File does not appear to be a valid X12 file (missing ISA segment)")
     file_hash = hashlib.sha256(content).hexdigest()
 
     try:
@@ -201,9 +248,15 @@ async def upload_file(file: UploadFile = File(...)):
 
 
 @router.post("/ingestion/ingest", response_model=dict, status_code=201)
-async def ingest_file(file: UploadFile = File(...)):
+async def ingest_file(request: Request, file: UploadFile = File(...)):
     """Upload and parse an 835/837 file, storing results in one step"""
+    _rate_limiter.check(request.client.host if request.client else "unknown")
+    _validate_upload(file)
     content = await file.read()
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail=f"File too large: max {MAX_FILE_SIZE} bytes")
+    if not content.startswith(b"ISA"):
+        raise HTTPException(status_code=400, detail="File does not appear to be a valid X12 file (missing ISA segment)")
     file_hash = hashlib.sha256(content).hexdigest()
     file_size = len(content)
 

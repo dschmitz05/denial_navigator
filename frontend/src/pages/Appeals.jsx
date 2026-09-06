@@ -1,4 +1,6 @@
 import React, { useState, useEffect } from 'react'
+import { useAuth } from '../contexts/AuthContext'
+import AssigneeCell, { useAssignableUsers } from '../components/AssigneeCell'
 
 const API_BASE = '/api/v1'
 
@@ -21,9 +23,17 @@ export default function Appeals() {
   const [updating, setUpdating] = useState(false)
   const [feedback, setFeedback] = useState({ rating: 0, was_paid_on_resubmit: null, feedback_text: '' })
   const [notice, setNotice] = useState(null)
+  const [generating, setGenerating] = useState(false)
+
+  const { can } = useAuth()
+  // Only managers can assign, so only they need the user list.
+  const assignableUsers = useAssignableUsers(can.assignWork())
 
   const loadAppeals = (filters = {}) => {
-    const params = new URLSearchParams({ limit: 50 })
+    // category=appeal keeps this tab to work that actually challenges the
+    // payer. Corrected claims, records requests, payer calls and write-offs
+    // are denial work, not appeals, and live on the Worklist tab.
+    const params = new URLSearchParams({ limit: 50, category: 'appeal' })
     if (filters.outcome_status) params.set('outcome_status', filters.outcome_status)
 
     fetch(`${API_BASE}/appeals?${params}`)
@@ -92,6 +102,31 @@ export default function Appeals() {
     setLetterData(data)
   }
 
+  const handleGenerateAnalysis = async (appeal) => {
+    setGenerating(true)
+    setNotice(null)
+    try {
+      const resp = await fetch(`${API_BASE}/analyses/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ denial_id: appeal.denial_id, temperature: 0.3 }),
+      })
+      const data = await resp.json()
+      if (!resp.ok) {
+        throw new Error(data.detail || 'Analysis failed')
+      }
+      if (data.stored) {
+        setNotice({ error: false, text: 'Analysis generated. Refreshing letter...' })
+        await handleViewLetter(appeal.id)
+      } else {
+        setNotice({ error: true, text: `Analysis failed: ${data.parsed_json?.error || 'Unknown error'}` })
+      }
+    } catch (err) {
+      setNotice({ error: true, text: `Analysis failed: ${err.message}` })
+    }
+    setGenerating(false)
+  }
+
   return (
     <div className="page-body">
       <div className="filters-bar">
@@ -102,13 +137,14 @@ export default function Appeals() {
           <option value="submitted">Submitted</option>
           <option value="resolved">Resolved</option>
           <option value="denied_again">Denied Again</option>
+          <option value="cancelled">Cancelled</option>
         </select>
         <button className="btn" onClick={() => setOutcomeFilter('')}>Clear</button>
       </div>
 
       {notice && (
-        <div className="card" style={{ marginBottom: 12, borderLeft: `4px solid ${notice.error ? '#dc2626' : '#16a34a'}` }}>
-          <div className="card-body" style={{ color: notice.error ? '#dc2626' : '#166534' }}>{notice.text}</div>
+        <div className="card" style={{ marginBottom: 12, borderLeft: `4px solid ${notice.error ? 'var(--danger)' : 'var(--success)'}` }}>
+          <div className="card-body" style={{ color: notice.error ? 'var(--danger)' : 'var(--success-text)' }}>{notice.text}</div>
         </div>
       )}
 
@@ -122,6 +158,8 @@ export default function Appeals() {
                 <th>Payer</th>
                 <th>CPT</th>
                 <th>Resolution</th>
+                <th>Owner</th>
+                <th>AI Says</th>
                 <th>Amount</th>
                 <th>Status</th>
                 <th>Actions</th>
@@ -129,7 +167,10 @@ export default function Appeals() {
             </thead>
             <tbody>
               {appeals.length === 0 ? (
-                <tr><td colSpan="8" style={{ textAlign: 'center', padding: 20 }}>No appeals found</td></tr>
+                <tr><td colSpan="10" style={{ textAlign: 'center', padding: 20, color: 'var(--gray-500)' }}>
+                  No appeals in the queue. Denials queued as a corrected claim, clinical
+                  documentation, a payer call or a write-off are on the Worklist tab.
+                </td></tr>
               ) : (
                 appeals.map(a => (
                   <tr key={a.id}>
@@ -138,8 +179,11 @@ export default function Appeals() {
                     <td>{a.payer_name}</td>
                     <td>{a.cpt_code || '—'}</td>
                     <td>{a.resolution_type?.replace(/_/g, ' ')}</td>
+                      <AssigneeCell item={a} users={assignableUsers}
+                                    onAssigned={() => loadAppeals({ outcome_status: outcomeFilter })} />
+                    <td><span style={{ color: a.needs_appeal ? 'var(--success)' : 'var(--danger)', fontSize: '0.85rem' }}>{a.needs_appeal ? '✅ Yes' : '❌ No'}</span></td>
                     <td>{formatCurrency(a.charge_amount)}</td>
-                    <td><span className={`badge badge-${(a.outcome_status || 'queued').replace(/ /g, '-')}`}>{a.outcome_status || 'queued'}</span></td>
+                    <td><span className={`badge badge-${(a.outcome_status || 'queued').replace(/_/g, '-')}`}>{a.outcome_status || 'queued'}</span></td>
                     <td>
                       <button className="btn btn-sm" onClick={() => { setSelectedAppeal(a); setShowDetail(true); handleViewLetter(a.id) }}>
                         👁️ View
@@ -188,10 +232,17 @@ export default function Appeals() {
                     </button>
                   </>
                 )}
-                <button className="btn btn-sm" disabled={updating}
-                        onClick={() => handleResolve(selectedAppeal, 'cancelled')}>
-                  🚫 Cancel
-                </button>
+                {selectedAppeal.outcome_status === 'cancelled' && (
+                  <div style={{ color: 'var(--gray-500)', fontSize: '0.9rem', display: 'flex', alignItems: 'center' }}>
+                    ⚠️ This appeal was cancelled. The denial is now back in your denials queue.
+                  </div>
+                )}
+                {selectedAppeal.outcome_status && !['approved', 'overruled', 'resolved', 'denied_again', 'cancelled'].includes(selectedAppeal.outcome_status) && (
+                  <button className="btn btn-sm" disabled={updating}
+                          onClick={() => handleResolve(selectedAppeal, 'cancelled')}>
+                    🚫 Cancel
+                  </button>
+                )}
               </div>
 
               {/* Feedback — closes the loop the schema was built for */}
@@ -207,7 +258,7 @@ export default function Appeals() {
                           {n}
                         </button>
                       ))}
-                      <span style={{ alignSelf: 'center', color: '#6b7280', fontSize: '0.85rem' }}>
+                      <span style={{ alignSelf: 'center', color: 'var(--gray-500)', fontSize: '0.85rem' }}>
                         1 = unusable, 5 = resolved it
                       </span>
                     </div>
@@ -215,7 +266,7 @@ export default function Appeals() {
                               placeholder="What did you change, and what actually worked?"
                               value={feedback.feedback_text}
                               onChange={e => setFeedback({ ...feedback, feedback_text: e.target.value })} />
-                    <p style={{ fontSize: '0.8rem', color: '#6b7280', marginTop: 6 }}>
+                    <p style={{ fontSize: '0.8rem', color: 'var(--gray-500)', marginTop: 6 }}>
                       Recorded when you mark the outcome above.
                     </p>
                   </div>
@@ -226,7 +277,26 @@ export default function Appeals() {
               {letterData && (
                 <div>
                   <h4 style={{ marginBottom: 8 }}>📝 Appeal Letter Preview</h4>
-                  <div className="appeal-letter" style={{ whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '0.85rem' }}>
+                  {!letterData.draft_appeal_letter && !letterData.needs_appeal && letterData.explanation ? (
+                    <div className="callout callout-info">
+                      <p style={{ fontWeight: 600, marginBottom: 8 }}>⚠️ This denial does not require an appeal.</p>
+                      {/* Inherits the callout's foreground rather than naming a
+                          colour that only works on a pale background. */}
+                      <p style={{ lineHeight: 1.6 }}>{letterData.explanation}</p>
+                      <p style={{ color: 'var(--gray-500)', fontSize: '0.85rem', marginTop: 12 }}>
+                        This is a corrected-claim situation. Fix the billing/coding error and resubmit.
+                      </p>
+                    </div>
+                  ) : !letterData.draft_appeal_letter ? (
+                    <div style={{ padding: 16, background: 'var(--gray-50)', borderRadius: 8, textAlign: 'center' }}>
+                      <p style={{ color: 'var(--gray-500)', marginBottom: 12 }}>No appeal letter has been generated yet. Run AI analysis to create one.</p>
+                      <button className="btn btn-primary btn-sm" disabled={generating}
+                              onClick={() => handleGenerateAnalysis(selectedAppeal)}>
+                        {generating ? '⏳ Generating...' : '🤖 Generate AI Analysis'}
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="appeal-letter" style={{ whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '0.85rem' }}>
 {`RE: Appeal for Claim ${letterData.claim_number}
 
 Patient: ${letterData.patient_name}
@@ -239,12 +309,13 @@ Diagnosis: ${letterData.icd_10_codes?.join(', ')}
 
 ---
 
-${letterData.draft_appeal_letter || 'No appeal letter generated. Generate AI analysis first.'}
+${letterData.draft_appeal_letter}
 
 ---
 
 ${letterData.explanation ? `AI Analysis: ${letterData.explanation}` : ''}`}
-                  </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

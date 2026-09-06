@@ -333,3 +333,41 @@ async def search_knowledge(request: SearchRequest):
         "query": request.query,
         "top_k": request.top_k,
     }
+
+
+@router.get("/knowledge/documents/{document_id}", response_model=dict)
+async def get_document(document_id: str):
+    """Get a knowledge document and its full text content (all chunks)."""
+    async with get_connection() as conn:
+        doc = await conn.fetchrow(
+            """
+            SELECT kd.*,
+                   (SELECT COUNT(*) FROM knowledge_chunks kc
+                     WHERE kc.knowledge_document_id = kd.id) AS chunk_count
+            FROM knowledge_documents kd WHERE kd.id = $1
+            """,
+            document_id,
+        )
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        chunks = await conn.fetch(
+            """
+            SELECT chunk_index, content, token_count
+            FROM knowledge_chunks
+            WHERE knowledge_document_id = $1
+            ORDER BY chunk_index
+            """,
+            document_id,
+        )
+
+    return {
+        "id": str(doc["id"]),
+        "title": doc["title"],
+        "source_type": doc["source_type"],
+        "status": doc["status"],
+        "chunk_count": doc["chunk_count"],
+        "created_at": doc["created_at"].isoformat() if doc["created_at"] else None,
+        "content": "\n\n".join(r["content"] for r in chunks) if chunks else "(no content — indexing may still be in progress)",
+        "chunks": [dict(r) for r in chunks],
+    }

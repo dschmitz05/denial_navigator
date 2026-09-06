@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from api_gateway.services.db import get_connection
 from api_gateway.services.auth import hash_password, verify_password, create_token, decode_token
+from api_gateway.services.audit import _client_ip, record as audit_record
 
 logger = logging.getLogger("api_gateway.auth")
 
@@ -70,36 +71,36 @@ def get_current_user(request: Request, x_api_key: str = Header(None)):
 # ── Routes ──
 
 @router.post("/auth/login", response_model=dict)
-async def login(request: LoginRequest):
-    """Authenticate a user and return a JWT token"""
+async def login(http_request: Request, credentials: LoginRequest):
+    """Authenticate a user and return a JWT token.
+
+    Both outcomes are audited with the caller's address. A failed login with
+    no IP and no user agent records that someone, somewhere, guessed wrong -
+    which is not an access record. Repeated failures from one address are the
+    signal worth having.
+    """
+    ip = _client_ip(http_request)
+    user_agent = http_request.headers.get("user-agent")
+
     async with get_connection() as conn:
         user = await conn.fetchrow(
             "SELECT * FROM users WHERE username = $1 AND is_active = TRUE",
-            request.username,
+            credentials.username,
         )
 
-        if not user:
-            # Log failed attempt
-            await conn.execute(
-                """INSERT INTO audit_log (action, resource_type, details, ip_address, user_agent)
-                   VALUES ($1, $2, $3, $4, $5)""",
-                "login_failed",
-                "user",
-                json.dumps({"username": request.username}),
-                None,
-                None,
-            )
-            raise HTTPException(status_code=401, detail="Invalid credentials")
-
-        if not verify_password(request.password, user["password_hash"]):
-            await conn.execute(
-                """INSERT INTO audit_log (action, resource_type, details, ip_address, user_agent)
-                   VALUES ($1, $2, $3, $4, $5)""",
-                "login_failed",
-                "user",
-                json.dumps({"username": request.username}),
-                None,
-                None,
+        if not user or not verify_password(credentials.password, user["password_hash"]):
+            await audit_record(
+                action="login_failed",
+                resource_type="user",
+                resource_id=str(user["id"]) if user else None,
+                details={
+                    "username": credentials.username,
+                    # Distinguishing the two matters when reading the log: one
+                    # is a typo, a run of the other is username enumeration.
+                    "reason": "unknown_or_inactive_user" if not user else "bad_password",
+                },
+                ip_address=ip,
+                user_agent=user_agent,
             )
             raise HTTPException(status_code=401, detail="Invalid credentials")
 
@@ -111,31 +112,29 @@ async def login(request: LoginRequest):
 
         token = create_token(str(user["id"]), user["username"], user["role"])
 
-        # Log successful login
-        await conn.execute(
-            """INSERT INTO audit_log (user_id, action, resource_type, details, ip_address, user_agent)
-               VALUES ($1, $2, $3, $4, $5, $6)""",
-            user["id"],
-            "login",
-            "user",
-            json.dumps({"username": user["username"], "role": user["role"]}),
-            None,
-            None,
-        )
+    await audit_record(
+        action="login",
+        resource_type="user",
+        resource_id=str(user["id"]),
+        user_id=str(user["id"]),
+        details={"username": user["username"], "role": user["role"]},
+        ip_address=ip,
+        user_agent=user_agent,
+    )
 
-        return {
-            "access_token": token,
-            "token_type": "bearer",
-            "user": {
-                "id": str(user["id"]),
-                "username": user["username"],
-                "email": user["email"],
-                "full_name": user["full_name"],
-                "role": user["role"],
-                "is_active": user["is_active"],
-                "last_login": str(user["last_login"]) if user["last_login"] else None,
-            },
-        }
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {
+            "id": str(user["id"]),
+            "username": user["username"],
+            "email": user["email"],
+            "full_name": user["full_name"],
+            "role": user["role"],
+            "is_active": user["is_active"],
+            "last_login": str(user["last_login"]) if user["last_login"] else None,
+        },
+    }
 
 
 @router.get("/auth/me", response_model=dict)
@@ -178,3 +177,77 @@ async def register(request: RegisterRequest, current_user = Depends(get_current_
         )
 
         return dict(row)
+
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str
+
+
+MIN_PASSWORD_LENGTH = 8
+
+
+@router.post("/auth/change-password", response_model=dict)
+async def change_password(
+    body: PasswordChange,
+    http_request: Request,
+    current_user = Depends(get_current_user),
+):
+    """Change your OWN password.
+
+    Distinct from the admin reset at /users/{id}/password, which sets someone
+    else's password without knowing it. This one proves the caller currently
+    holds the password before replacing it, so a walk-up on an unlocked
+    session cannot silently take the account over.
+    """
+    if len(body.new_password) < MIN_PASSWORD_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"New password must be at least {MIN_PASSWORD_LENGTH} characters",
+        )
+    if body.new_password == body.current_password:
+        raise HTTPException(
+            status_code=400,
+            detail="New password must be different from the current one",
+        )
+
+    ip = _client_ip(http_request)
+    user_agent = http_request.headers.get("user-agent")
+
+    async with get_connection() as conn:
+        user = await conn.fetchrow(
+            "SELECT id, username, password_hash FROM users WHERE id = $1 AND is_active = TRUE",
+            current_user["sub"],
+        )
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        if not verify_password(body.current_password, user["password_hash"]):
+            # A failed attempt to change a password is a security event in its
+            # own right, and is logged as one.
+            await audit_record(
+                action="password_change_failed",
+                resource_type="user",
+                resource_id=str(user["id"]),
+                user_id=str(user["id"]),
+                details={"username": user["username"], "reason": "wrong_current_password"},
+                ip_address=ip,
+                user_agent=user_agent,
+            )
+            raise HTTPException(status_code=401, detail="Current password is incorrect")
+
+        await conn.execute(
+            "UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2",
+            hash_password(body.new_password), user["id"],
+        )
+
+    await audit_record(
+        action="password_changed",
+        resource_type="user",
+        resource_id=str(user["id"]),
+        user_id=str(user["id"]),
+        details={"username": user["username"], "self_service": True},
+        ip_address=ip,
+        user_agent=user_agent,
+    )
+    return {"status": "password_changed"}

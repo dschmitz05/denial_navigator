@@ -5,22 +5,27 @@ import { useAuth } from '../contexts/AuthContext'
 function Layout({ children, showNav = true }) {
   const location = useLocation()
   const navigate = useNavigate()
-  const { user, logout, hasRole } = useAuth()
+  const { user, logout, hasRole, can } = useAuth()
 
   const handleLogout = () => {
     logout()
     navigate('/login')
   }
 
+  // Only tabs this role can actually use. A specialist works the queues and
+  // reads policy; ingestion, the audit trail and user administration are not
+  // theirs, and showing them would just hand out doors that answer 403.
   const adminNavItems = [
     { path: '/', label: 'Dashboard', icon: '📊' },
-    { path: '/upload', label: 'Upload', icon: '📁' },
+    ...(can.ingestFiles() ? [{ path: '/upload', label: 'Upload', icon: '📁' }] : []),
     { path: '/claims', label: 'Claims', icon: '📋' },
     { path: '/denials', label: 'Denials', icon: '🚫' },
     { path: '/appeals', label: 'Appeals', icon: '⚖️' },
+    { path: '/worklist', label: 'Worklist', icon: '🛠️' },
     { path: '/knowledge', label: 'Knowledge Base', icon: '📚' },
-    { path: '/audit', label: 'Audit Log', icon: '🔍' },
-    ...(hasRole(['admin']) ? [{ path: '/users', label: 'Users', icon: '👥' }] : []),
+    ...(can.viewAudit() ? [{ path: '/audit', label: 'Audit Log', icon: '🔍' }] : []),
+    ...(can.manageUsers() ? [{ path: '/users', label: 'Users', icon: '👥' }] : []),
+    { path: '/profile', label: 'My Profile', icon: '👤' },
     { path: '/settings', label: 'Settings', icon: '⚙️' },
   ]
 
@@ -33,7 +38,7 @@ function Layout({ children, showNav = true }) {
           <div className="sidebar-header">
             <h1>🧭 Denial Navigator</h1>
             <p>{user?.full_name || user?.username}</p>
-            <span style={{ fontSize: '0.7rem', color: '#9ca3af', textTransform: 'uppercase', letterSpacing: 1 }}>
+            <span style={{ fontSize: '0.7rem', color: 'var(--gray-400)', textTransform: 'uppercase', letterSpacing: 1 }}>
               {user?.role?.replace(/_/g, ' ')}
             </span>
           </div>
@@ -49,7 +54,7 @@ function Layout({ children, showNav = true }) {
               </Link>
             ))}
           </nav>
-          <div style={{ padding: 16, borderTop: '1px solid #e5e7eb' }}>
+          <div style={{ padding: 16, borderTop: '1px solid var(--sidebar-border)' }}>
             <button className="btn" onClick={handleLogout} style={{ width: '100%', textAlign: 'center' }}>
               🚪 Sign Out
             </button>

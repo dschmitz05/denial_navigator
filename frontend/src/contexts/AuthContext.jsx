@@ -57,10 +57,23 @@ export function AuthProvider({ children }) {
     localStorage.removeItem('auth_token')
   }
 
-  const hasRole = (roles) => user && roles.includes(user.role)
+  const hasRole = (roles) => !!user && roles.includes(user.role)
+
+  // Mirrors PERMISSIONS in api-gateway/services/access.py. The server is the
+  // authority — this only decides what to SHOW, so a user is not handed a
+  // button that answers 403. Keep the two in step when either changes.
+  const MANAGER_UP = ['billing_manager', 'rcm_director', 'admin']
+  const can = {
+    manageKnowledge: () => hasRole(MANAGER_UP),   // add/upload/archive policy docs
+    ingestFiles: () => hasRole(MANAGER_UP),       // upload remittance files
+    viewAudit: () => hasRole(MANAGER_UP),
+    editClaims: () => hasRole(MANAGER_UP),
+    manageUsers: () => hasRole(['admin']),
+    assignWork: () => hasRole(MANAGER_UP),        // route work to other people
+  }
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout, hasRole }}>
+    <AuthContext.Provider value={{ user, loading, login, logout, hasRole, can }}>
       {children}
     </AuthContext.Provider>
   )

@@ -22,6 +22,48 @@ def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
     return current_user
 
 
+# Outcomes that mean a queue item is finished. Assignment on a CLOSED item is
+# the record of who did the work, so it is left alone; only live work moves.
+OPEN_QUEUE_CLAUSE = """
+    (outcome_status IS NULL
+     OR outcome_status NOT IN ('approved', 'overruled', 'resolved',
+                               'denied_again', 'cancelled'))
+"""
+
+
+async def _release_queue_items(conn, user_id: str) -> int:
+    """Return a deactivated user's live queue items to the shared pool.
+
+    Blocking assignment TO a deactivated user is only half the problem. The
+    other half is assigning work to someone active and deactivating them
+    afterwards: the item stays pinned to an account nobody can log into, and
+    because specialists only see their own items plus unassigned ones, it
+    becomes invisible to every specialist while still counting as open work.
+
+    Unassigning is better than refusing to deactivate the user - offboarding
+    should not be blocked by a queue - and better than deleting the items,
+    which are real outstanding money.
+    """
+    released = await conn.fetch(
+        f"""
+        UPDATE appeals_queue
+           SET assigned_user_id = NULL, updated_at = NOW()
+         WHERE assigned_user_id = $1
+           AND {OPEN_QUEUE_CLAUSE}
+        RETURNING id
+        """,
+        user_id,
+    )
+    return len(released)
+
+
+def require_manager_up(current_user: dict = Depends(get_current_user)) -> dict:
+    """Dependency that requires manager, director or admin."""
+    if current_user.get("role") not in ("billing_manager", "rcm_director", "admin"):
+        raise HTTPException(status_code=403, detail="Manager+ access required")
+    return current_user
+
+
 # ── Models ──
 
 class UserUpdate(BaseModel):
@@ -75,6 +117,35 @@ async def list_users(
 
         rows = await conn.fetch(query, *params)
         return [dict(r) for r in rows]
+
+
+@router.get("/users/assignable", response_model=list[dict])
+async def list_assignable_users(current_user = Depends(require_manager_up)):
+    """Users a manager can hand queue work to.
+
+    Deliberately not /users: assigning work needs names and roles, not email
+    addresses, activity or the ability to edit anyone. Managers get this;
+    user administration stays with admins.
+
+    Declared above /users/{user_id} on purpose - FastAPI matches routes in
+    order, and "assignable" would otherwise be parsed as a user id.
+    """
+    async with get_connection() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, username, full_name, role
+            FROM users
+            WHERE is_active = TRUE
+            ORDER BY
+                -- Specialists first: they are who work is usually assigned to.
+                CASE role WHEN 'billing_specialist' THEN 0
+                          WHEN 'billing_manager' THEN 1
+                          WHEN 'rcm_director' THEN 2
+                          ELSE 3 END,
+                COALESCE(full_name, username)
+            """
+        )
+        return [{**dict(r), "id": str(r["id"])} for r in rows]
 
 
 @router.get("/users/{user_id}", response_model=dict)
@@ -139,6 +210,13 @@ async def update_user(
             *params,
         )
 
+        # Deactivating through this route is the same event as DELETE, so it
+        # must release the same work. Handling it in only one of the two paths
+        # is how a fix quietly stops applying.
+        released = 0
+        if update.is_active is False and row:
+            released = await _release_queue_items(conn, user_id)
+
         if not row:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -150,10 +228,16 @@ async def update_user(
             "update_user",
             "user",
             user_id,
-            json.dumps({"changes": {k: v for k, v in update.model_dump().items() if v is not None}}),
+            json.dumps({
+                "changes": {k: v for k, v in update.model_dump().items() if v is not None},
+                **({"queue_items_released": released} if released else {}),
+            }),
         )
 
-        return dict(row)
+        result = dict(row)
+        if update.is_active is False:
+            result["queue_items_released"] = released
+        return result
 
 
 @router.post("/users/{user_id}/password", status_code=200)
@@ -215,6 +299,9 @@ async def delete_user(
             user_id,
         )
 
+        # Their live work goes back in the pool, or it is orphaned.
+        released = await _release_queue_items(conn, user_id)
+
         # Log the action
         await conn.execute(
             """INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
@@ -223,7 +310,7 @@ async def delete_user(
             "deactivate_user",
             "user",
             user_id,
-            json.dumps({"username": user["username"]}),
+            json.dumps({"username": user["username"], "queue_items_released": released}),
         )
 
-        return {"status": "deactivated"}
+        return {"status": "deactivated", "queue_items_released": released}

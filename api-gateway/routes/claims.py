@@ -7,6 +7,8 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from api_gateway.services.db import get_connection
+from api_gateway.services.claim_status import TERMINAL_DENIAL_STATUSES
+from api_gateway.routes.appeals import APPEAL_RESOLUTION_TYPES, TERMINAL_OUTCOMES
 
 logger = logging.getLogger("api_gateway.claims")
 
@@ -33,23 +35,35 @@ async def list_claims(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
-    """List claims with optional status filter"""
+    """List claims with optional status filter.
+
+    Returns open_denial_count alongside denial_count so the UI can show WHY a
+    claim is not resolved yet. A claim only reaches 'resolved' once every one
+    of its denials is closed, so a claim with resolved queue items against it
+    can still, correctly, read 'partially_paid' - that difference is confusing
+    unless the remaining work is visible on the row.
+    """
     async with get_connection() as conn:
+        # $1 is always the terminal-status array, so the optional filters
+        # below can number themselves from the end of the params list.
+        params = [list(TERMINAL_DENIAL_STATUSES)]
         query = """
-            SELECT c.*, COUNT(d.id) as denial_count
+            SELECT c.*,
+                   COUNT(d.id) AS denial_count,
+                   COUNT(d.id) FILTER (WHERE d.status <> ALL($1::text[])) AS open_denial_count
             FROM claims c
             LEFT JOIN denials d ON d.claim_id = c.id
         """
-        params = []
-        where_count = 0
 
         if status:
-            query += " WHERE c.status = $1"
             params.append(status)
-            where_count = 1
+            query += f" WHERE c.status = ${len(params)}"
 
-        query += " GROUP BY c.id ORDER BY c.created_at DESC LIMIT $%d OFFSET $%d" % (where_count + 1, where_count + 2)
-        params.extend([limit, offset])
+        query += " GROUP BY c.id ORDER BY c.created_at DESC"
+        params.append(limit)
+        query += f" LIMIT ${len(params)}"
+        params.append(offset)
+        query += f" OFFSET ${len(params)}"
 
         rows = await conn.fetch(query, *params)
         return [dict(r) for r in rows]
@@ -148,12 +162,29 @@ async def dashboard_stats():
         # "Pending" is anything not yet in a terminal state - including rows
         # with a NULL outcome_status. Counting only 'queued' missed every
         # appeal a biller had started working.
+        #
+        # Counted per TAB, because the card links to one. A single count over
+        # the whole queue would send you to Appeals showing a number that
+        # included worklist items. The terminal list is shared with
+        # routes/appeals.py so the card and the page can never disagree - it
+        # used to omit 'denied_again' here, which the Appeals list excludes.
         pending_appeals = await conn.fetchval(
-            """
+            f"""
             SELECT COUNT(*) FROM appeals_queue
-            WHERE outcome_status IS NULL
-               OR outcome_status NOT IN ('approved', 'overruled', 'resolved', 'cancelled')
-            """
+            WHERE (outcome_status IS NULL OR outcome_status <> ALL($1::text[]))
+              AND resolution_type = ANY($2::text[])
+            """,
+            list(TERMINAL_OUTCOMES), list(APPEAL_RESOLUTION_TYPES),
+        )
+
+        pending_worklist = await conn.fetchval(
+            f"""
+            SELECT COUNT(*) FROM appeals_queue
+            WHERE (outcome_status IS NULL OR outcome_status <> ALL($1::text[]))
+              AND (resolution_type IS NULL
+                   OR NOT (resolution_type = ANY($2::text[])))
+            """,
+            list(TERMINAL_OUTCOMES), list(APPEAL_RESOLUTION_TYPES),
         )
 
         # Financial impact is the money actually adjusted off on denial lines.
@@ -183,6 +214,7 @@ async def dashboard_stats():
             "denied_claims": denied_claims,
             "pending_denials": total_denials,
             "pending_appeals": pending_appeals,
+            "pending_worklist": pending_worklist,
             "total_denied": float(total_denied),
             "open_denied": float(open_denied),
             "total_charges": float(financial["total_charges"] or 0),

@@ -11,6 +11,18 @@ function formatDate(dateStr) {
   return new Date(dateStr).toLocaleDateString('en-US')
 }
 
+function denialProgress(claim) {
+  const total = Number(claim.denial_count || 0)
+  if (!total) return <span style={{ color: 'var(--gray-400)' }}>—</span>
+  const open = Number(claim.open_denial_count || 0)
+  const closed = total - open
+  return (
+    <span style={{ color: open ? 'var(--warning-text)' : 'var(--success)', whiteSpace: 'nowrap' }}>
+      {closed}/{total} closed{open ? ` · ${open} open` : ''}
+    </span>
+  )
+}
+
 export default function Claims() {
   const [claims, setClaims] = useState([])
   const [statusFilter, setStatusFilter] = useState('')
@@ -38,6 +50,7 @@ export default function Claims() {
           <option value="denied">Denied</option>
           <option value="partially_paid">Partially Paid</option>
           <option value="resolved">Resolved</option>
+          <option value="appealed">Appealed</option>
         </select>
         <button className="btn btn-primary" onClick={loadClaims}>Refresh</button>
       </div>
@@ -54,12 +67,13 @@ export default function Claims() {
                 <th>Paid</th>
                 <th>Adjustment</th>
                 <th>Status</th>
+                <th>Denials</th>
                 <th>Date</th>
               </tr>
             </thead>
             <tbody>
               {claims.length === 0 ? (
-                <tr><td colSpan="8" style={{ textAlign: 'center', padding: 20 }}>No claims found</td></tr>
+                <tr><td colSpan="9" style={{ textAlign: 'center', padding: 20 }}>No claims found</td></tr>
               ) : (
                 claims.map(c => (
                   <tr key={c.id}>
@@ -69,7 +83,8 @@ export default function Claims() {
                     <td>{formatCurrency(c.total_charge)}</td>
                     <td>{formatCurrency(c.total_paid)}</td>
                     <td>{formatCurrency(c.total_adjustment)}</td>
-                    <td><span className={`badge badge-${c.status.replace(/ /g, '-')}`}>{c.status}</span></td>
+                    <td><span className={`badge badge-${c.status.replace(/_/g, '-')}`}>{c.status.replace(/_/g, ' ')}</span></td>
+                    <td>{denialProgress(c)}</td>
                     <td>{formatDate(c.created_at)}</td>
                   </tr>
                 ))

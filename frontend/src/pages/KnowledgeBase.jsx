@@ -1,8 +1,13 @@
 import React, { useState, useEffect } from 'react'
+import { useAuth } from '../contexts/AuthContext'
 
 const API_BASE = '/api/v1'
 
 export default function KnowledgeBase() {
+  const { can } = useAuth()
+  // Policy documents steer every future AI analysis, so curating them is a
+  // manager responsibility. Everyone can still read and search them.
+  const mayCurate = can.manageKnowledge()
   const [documents, setDocuments] = useState([])
   const [sourceFilter, setSourceFilter] = useState('')
   const [loading, setLoading] = useState(true)
@@ -14,6 +19,9 @@ export default function KnowledgeBase() {
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState([])
   const [searching, setSearching] = useState(false)
+  const [viewingDoc, setViewingDoc] = useState(null)
+  const [viewingContent, setViewingContent] = useState(null)
+  const [viewingLoading, setViewingLoading] = useState(false)
 
   const loadDocuments = () => {
     const params = new URLSearchParams({ limit: 50 })
@@ -126,6 +134,21 @@ export default function KnowledgeBase() {
     setSearching(false)
   }
 
+  const handleViewDoc = async (doc) => {
+    setViewingDoc(doc)
+    setViewingLoading(true)
+    setViewingContent(null)
+    try {
+      const resp = await fetch(`${API_BASE}/knowledge/documents/${doc.id}`)
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      const data = await resp.json()
+      setViewingContent(data)
+    } catch (err) {
+      setViewingContent({ error: err.message })
+    }
+    setViewingLoading(false)
+  }
+
   return (
     <div className="page-body">
       <div className="filters-bar">
@@ -138,17 +161,21 @@ export default function KnowledgeBase() {
           <option value="prior_auth_policy">Prior Auth Policy</option>
           <option value="medical_necessity_criteria">Medical Necessity</option>
         </select>
-        <button className="btn btn-primary" onClick={() => setShowForm(!showForm)}>+ Add Document</button>
-        <label className="btn" style={{ cursor: 'pointer' }}>
-          {indexing ? 'Indexing…' : '⬆ Upload PDF / .txt / .md'}
-          <input type="file" accept=".pdf,.txt,.md,application/pdf,text/plain,text/markdown"
-                 style={{ display: 'none' }} onChange={handleUpload} disabled={indexing} />
-        </label>
+        {mayCurate && (
+          <>
+            <button className="btn btn-primary" onClick={() => setShowForm(!showForm)}>+ Add Document</button>
+            <label className="btn" style={{ cursor: 'pointer' }}>
+              {indexing ? 'Indexing…' : '⬆ Upload PDF / .txt / .md'}
+              <input type="file" accept=".pdf,.txt,.md,application/pdf,text/plain,text/markdown"
+                     style={{ display: 'none' }} onChange={handleUpload} disabled={indexing} />
+            </label>
+          </>
+        )}
       </div>
 
       {notice && (
-        <div className="card" style={{ marginBottom: 12, borderLeft: `4px solid ${notice.error ? '#dc2626' : '#16a34a'}` }}>
-          <div className="card-body" style={{ color: notice.error ? '#dc2626' : '#166534' }}>{notice.text}</div>
+        <div className="card" style={{ marginBottom: 12, borderLeft: `4px solid ${notice.error ? 'var(--danger)' : 'var(--success)'}` }}>
+          <div className="card-body" style={{ color: notice.error ? 'var(--danger)' : 'var(--success-text)' }}>{notice.text}</div>
         </div>
       )}
 
@@ -208,8 +235,8 @@ export default function KnowledgeBase() {
             <div style={{ marginTop: 16 }}>
               <h4>Results ({searchResults.length})</h4>
               {searchResults.map((r, i) => (
-                <div key={i} style={{ padding: 12, background: '#f9fafb', borderRadius: 8, marginBottom: 8 }}>
-                  <p style={{ fontSize: 0.85, color: '#6b7280' }}>Chunk {r.chunk_index} · {r.token_count} tokens · Score: {Math.round(r.similarity_score * 100)}%</p>
+                <div key={i} style={{ padding: 12, background: 'var(--gray-50)', borderRadius: 8, marginBottom: 8 }}>
+                  <p style={{ fontSize: 0.85, color: 'var(--gray-500)' }}>Chunk {r.chunk_index} · {r.token_count} tokens · Score: {Math.round(r.similarity_score * 100)}%</p>
                   <p style={{ marginTop: 4 }}>{r.content?.substring(0, 300)}...</p>
                 </div>
               ))}
@@ -244,19 +271,27 @@ export default function KnowledgeBase() {
                     <td>{d.chunk_count ?? 0}</td>
                     <td>{new Date(d.created_at).toLocaleDateString()}</td>
                     <td style={{ whiteSpace: 'nowrap' }}>
-                      {d.status !== 'archived' && (
+                      <button className="btn btn-sm"
+                              title="View document content"
+                              onClick={() => handleViewDoc(d)}>
+                        👁 View
+                      </button>
+                      {mayCurate && d.status !== 'archived' && (
                         <button className="btn btn-sm" disabled={busyId === d.id}
                                 title="Remove from the index but keep the record"
-                                onClick={() => handleRetire(d, false)}>
+                                onClick={() => handleRetire(d, false)}
+                                style={{ marginLeft: 6 }}>
                           {busyId === d.id ? '…' : '📦 Archive'}
                         </button>
                       )}
-                      <button className="btn btn-sm" disabled={busyId === d.id}
-                              style={{ marginLeft: d.status !== 'archived' ? 6 : 0, color: '#dc2626' }}
-                              title="Permanently delete this record"
-                              onClick={() => handleRetire(d, true)}>
-                        {busyId === d.id ? '…' : '🗑 Delete'}
-                      </button>
+                      {mayCurate && (
+                        <button className="btn btn-sm" disabled={busyId === d.id}
+                                style={{ marginLeft: d.status !== 'archived' ? 6 : 0, color: 'var(--danger)' }}
+                                title="Permanently delete this record"
+                                onClick={() => handleRetire(d, true)}>
+                          {busyId === d.id ? '…' : '🗑 Delete'}
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))
@@ -265,6 +300,48 @@ export default function KnowledgeBase() {
           </table>
         </div>
       </div>
+
+      {/* View Document Modal */}
+      {viewingDoc && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 1000, padding: 20,
+        }} onClick={() => { setViewingDoc(null); setViewingContent(null); }}>
+          <div style={{
+            background: 'var(--surface)', color: 'var(--text)', borderRadius: 12, maxWidth: 800, width: '100%',
+            maxHeight: '85vh', display: 'flex', flexDirection: 'column',
+          }} onClick={e => e.stopPropagation()}>
+            <div style={{
+              padding: '16px 24px', borderBottom: '1px solid #e5e7eb',
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            }}>
+              <div>
+                <h3 style={{ margin: 0 }}>{viewingDoc.title}</h3>
+                <p style={{ margin: '4px 0 0', fontSize: '0.85rem', color: 'var(--gray-500)' }}>
+                  {viewingDoc.source_type.replace(/_/g, ' ')} · {viewingContent?.chunk_count ?? '?'} chunks · {new Date(viewingDoc.created_at).toLocaleDateString()}
+                </p>
+              </div>
+              <button className="btn" onClick={() => { setViewingDoc(null); setViewingContent(null); }} style={{ padding: '4px 12px' }}>✕</button>
+            </div>
+            <div style={{ padding: 24, overflowY: 'auto', flex: 1 }}>
+              {viewingLoading ? (
+                <p style={{ color: 'var(--gray-500)', textAlign: 'center' }}>Loading…</p>
+              ) : viewingContent?.error ? (
+                <p style={{ color: 'var(--danger)' }}>Failed to load: {viewingContent.error}</p>
+              ) : (
+                <pre style={{
+                  whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                  fontFamily: 'inherit', fontSize: '0.9rem', lineHeight: 1.7,
+                  color: '#1f2937', margin: 0,
+                }}>
+                  {viewingContent?.content || '(empty)'}
+                </pre>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

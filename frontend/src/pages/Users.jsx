@@ -36,7 +36,14 @@ export default function Users() {
     }
   }
 
-  useEffect(() => { loadUsers() }, [])
+  // Re-query whenever a filter changes. With an empty dependency array the
+  // selects only set state and nothing ever refetched, so picking a role
+  // appeared to do nothing. The search box is debounced so it does not fire a
+  // request per keystroke.
+  useEffect(() => {
+    const t = setTimeout(loadUsers, search ? 300 : 0)
+    return () => clearTimeout(t)
+  }, [roleFilter, search])
 
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -114,10 +121,10 @@ export default function Users() {
 
   const roleBadge = (role) => {
     const colors = {
-      admin: '#dc2626',
+      admin: 'var(--danger)',
       billing_manager: '#ea580c',
       rcm_director: '#2563eb',
-      billing_specialist: '#6b7280',
+      billing_specialist: 'var(--gray-500)',
     }
     return {
       display: 'inline-block',
@@ -148,7 +155,7 @@ export default function Users() {
               marginBottom: 16,
               background: msg.type === 'success' ? '#f0fdf4' : '#fef2f2',
               border: `1px solid ${msg.type === 'success' ? '#86efac' : '#fca5a5'}`,
-              color: msg.type === 'success' ? '#166534' : '#dc2626',
+              color: msg.type === 'success' ? 'var(--success-text)' : 'var(--danger)',
               fontSize: '0.85rem',
             }}>
               {msg.text}
@@ -159,7 +166,7 @@ export default function Users() {
           {showForm && (
             <form onSubmit={handleSubmit} style={{
               padding: 20,
-              background: '#f9fafb',
+              background: 'var(--gray-50)',
               borderRadius: 8,
               marginBottom: 24,
               border: '1px solid #e5e7eb',
@@ -206,13 +213,16 @@ export default function Users() {
               <option value="">All Roles</option>
               {ROLES.map(r => <option key={r} value={r}>{r.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}</option>)}
             </select>
+            {(roleFilter || search) && (
+              <button className="btn" onClick={() => { setRoleFilter(''); setSearch('') }}>Clear</button>
+            )}
           </div>
 
           {/* User Table */}
           {loading ? (
             <p style={{ textAlign: 'center', padding: 40 }}>Loading...</p>
           ) : users.length === 0 ? (
-            <p style={{ textAlign: 'center', padding: 40, color: '#6b7280' }}>No users found</p>
+            <p style={{ textAlign: 'center', padding: 40, color: 'var(--gray-500)' }}>No users found</p>
           ) : (
             <table>
               <thead>
@@ -238,7 +248,7 @@ export default function Users() {
                         {u.is_active ? 'Active' : 'Inactive'}
                       </span>
                     </td>
-                    <td style={{ fontSize: '0.85rem', color: '#6b7280' }}>
+                    <td style={{ fontSize: '0.85rem', color: 'var(--gray-500)' }}>
                       {u.last_login ? new Date(u.last_login).toLocaleDateString() : 'Never'}
                     </td>
                     <td style={{ whiteSpace: 'nowrap' }}>
@@ -248,7 +258,7 @@ export default function Users() {
                           <button className="btn btn-sm" onClick={() => handleToggleActive(u.id)}>
                             {u.is_active ? '⏸' : '▶️'}
                           </button>
-                          <button className="btn btn-sm" onClick={() => handleDelete(u.id)} style={{ color: '#dc2626' }}>🗑</button>
+                          <button className="btn btn-sm" onClick={() => handleDelete(u.id)} style={{ color: 'var(--danger)' }}>🗑</button>
                         </div>
                       )}
                     </td>

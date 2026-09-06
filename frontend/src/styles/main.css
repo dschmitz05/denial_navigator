@@ -36,7 +36,115 @@
   --shadow: 0 1px 3px rgba(0,0,0,0.1), 0 1px 2px rgba(0,0,0,0.06);
   --shadow-md: 0 4px 6px rgba(0,0,0,0.1), 0 2px 4px rgba(0,0,0,0.06);
   --shadow-lg: 0 10px 15px rgba(0,0,0,0.1), 0 4px 6px rgba(0,0,0,0.05);
+
+  /* Text colours for the tinted badge backgrounds above. Named rather than
+     hardcoded so dark mode can flip them: dark-green-on-pale-green has to
+     become pale-green-on-dark-green, not stay unreadable. */
+  --success-text: #166534;
+  --warning-text: #92400e;
+  --danger-text: #991b1b;
+
+  /* Surfaces. The light theme's are the greys it already used; naming them
+     is what lets one override swap the whole app. */
+  --surface: #ffffff;
+  --surface-alt: var(--gray-50);
+  --border: var(--gray-200);
+  --text: var(--gray-900);
+  --text-muted: var(--gray-500);
+
+  /* The sidebar is dark chrome in both themes, so it gets its own tokens
+     rather than borrowing --gray-900. The grey scale inverts for dark mode;
+     the sidebar must not. */
+  --on-accent: #ffffff;
+
+  /* A terminal block reads as a terminal in both themes, so it does not
+     invert - but its foreground must be stated, not inherited, or it picks
+     up the page's text colour and goes dark-on-dark. */
+  --code-bg: #1f2937;
+  --code-text: #e5e7eb;
+  --code-border: #374151;
+
+  /* Tinted callouts. Stating BOTH halves is the point: a hardcoded pale
+     background with inherited text is exactly what made the security notes
+     white-on-cream in dark mode. */
+  --info-light: #eff6ff;
+  --info-text: #1e40af;
+  --info-border: #bfdbfe;
+
+  --sidebar-bg: #111827;
+  --sidebar-text: #ffffff;
+  --sidebar-muted: #9ca3af;
+  --sidebar-hover: #1f2937;
+  --sidebar-border: #374151;
 }
+
+/* ── Dark theme ──
+   Set by the profile page on <html data-theme="dark">. The app is built on
+   the grey scale, so inverting it does most of the work; the tinted status
+   colours are re-derived rather than inverted, because a pale badge on a
+   dark card reads as a glare patch. */
+:root[data-theme="dark"] {
+  /* Not black. A near-black page with a bright panel on it is the worst of
+     both worlds; a lifted charcoal page with DARKER chrome beside it reads
+     the way a dark UI is supposed to - the sidebar recedes, the work area
+     comes forward. Ordered darkest to lightest:
+       sidebar #121217  <  page #24242a  <  cards #2e2e35 */
+  --gray-50:  #24242a;   /* the page itself */
+  --gray-100: #2a2a31;
+  --gray-200: #383840;   /* borders, dividers */
+  --gray-300: #4a4a55;
+  --gray-400: #8b8b96;
+  --gray-500: #adadb8;   /* muted text - lifted so it stays legible */
+  --gray-600: #c9c9d1;
+  --gray-700: #dedee4;
+  --gray-800: #eeeef1;
+  --gray-900: #fafafa;   /* primary text */
+
+  --surface: #2e2e35;    /* cards sit ABOVE the page, not below it */
+  --surface-alt: #282830;
+  --border: #383840;
+  --text: #fafafa;
+  --text-muted: #adadb8;
+
+  /* Darker than the page, so it frames the content instead of shouting. */
+  --on-accent: #10131a;
+
+  --code-bg: #16161b;
+  --code-text: #d6d6de;
+  --code-border: #2e2e37;
+
+  --info-light: #17263f;
+  --info-text: #93c5fd;
+  --info-border: #2b4570;
+
+  --sidebar-bg: #121217;
+  --sidebar-text: #e8e8ee;
+  --sidebar-muted: #82828d;
+  --sidebar-hover: #1e1e26;
+  --sidebar-border: #2b2b34;
+
+  --primary: #60a5fa;
+  --primary-dark: #93c5fd;
+  --primary-light: #1e3a5f;
+  --success: #4ade80;
+  --success-light: #14351f;
+  --success-text: #86efac;
+  --warning: #fbbf24;
+  --warning-light: #3a2c0a;
+  --warning-text: #fcd34d;
+  --danger: #f87171;
+  --danger-light: #3f1d1d;
+  --danger-text: #fca5a5;
+
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.4);
+  --shadow: 0 1px 3px rgba(0,0,0,0.5), 0 1px 2px rgba(0,0,0,0.4);
+  --shadow-md: 0 4px 6px rgba(0,0,0,0.5), 0 2px 4px rgba(0,0,0,0.4);
+  --shadow-lg: 0 10px 15px rgba(0,0,0,0.55), 0 4px 6px rgba(0,0,0,0.4);
+}
+
+/* Native widgets (scrollbars, date pickers, the caret) follow the theme. */
+:root[data-theme="dark"] { color-scheme: dark; }
+:root { color-scheme: light; }
 
 html { font-size: 14px; }
 body {
@@ -54,8 +162,8 @@ body {
 
 .sidebar {
   width: var(--sidebar-width);
-  background: var(--gray-900);
-  color: white;
+  background: var(--sidebar-bg);
+  color: var(--sidebar-text);
   position: fixed;
   top: 0;
   left: 0;
@@ -66,18 +174,18 @@ body {
 
 .sidebar-header {
   padding: 20px;
-  border-bottom: 1px solid var(--gray-700);
+  border-bottom: 1px solid var(--sidebar-border);
 }
 
 .sidebar-header h1 {
   font-size: 1.2rem;
   font-weight: 700;
-  color: white;
+  color: var(--sidebar-text);
 }
 
 .sidebar-header p {
   font-size: 0.8rem;
-  color: var(--gray-400);
+  color: var(--sidebar-muted);
   margin-top: 4px;
 }
 
@@ -90,20 +198,20 @@ body {
   align-items: center;
   gap: 10px;
   padding: 10px 20px;
-  color: var(--gray-300);
+  color: var(--sidebar-muted);
   text-decoration: none;
   font-size: 0.9rem;
   transition: all 0.15s;
 }
 
 .sidebar-nav a:hover {
-  background: var(--gray-800);
-  color: white;
+  background: var(--sidebar-hover);
+  color: var(--sidebar-text);
 }
 
 .sidebar-nav a.active {
   background: var(--primary);
-  color: white;
+  color: var(--on-accent);
 }
 
 .sidebar-nav a .icon {
@@ -119,7 +227,7 @@ body {
 }
 
 .page-header {
-  background: white;
+  background: var(--surface);
   padding: 20px 32px;
   border-bottom: 1px solid var(--gray-200);
   display: flex;
@@ -139,7 +247,7 @@ body {
 
 /* ── Cards ── */
 .card {
-  background: white;
+  background: var(--surface);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   border: 1px solid var(--gray-200);
@@ -171,7 +279,7 @@ body {
 }
 
 .stat-card {
-  background: white;
+  background: var(--surface);
   border-radius: var(--radius);
   padding: 20px;
   box-shadow: var(--shadow);
@@ -268,7 +376,7 @@ tr:hover td {
   padding: 8px 16px;
   border: 1px solid var(--gray-300);
   border-radius: var(--radius);
-  background: white;
+  background: var(--surface);
   color: var(--gray-700);
   font-size: 0.85rem;
   font-weight: 500;
@@ -284,7 +392,7 @@ tr:hover td {
 
 .btn-primary {
   background: var(--primary);
-  color: white;
+  color: var(--on-accent);
   border-color: var(--primary);
 }
 
@@ -294,13 +402,13 @@ tr:hover td {
 
 .btn-danger {
   background: var(--danger);
-  color: white;
+  color: var(--on-accent);
   border-color: var(--danger);
 }
 
 .btn-success {
   background: var(--success);
-  color: white;
+  color: var(--on-accent);
   border-color: var(--success);
 }
 
@@ -329,7 +437,7 @@ tr:hover td {
   border-radius: var(--radius);
   font-size: 0.9rem;
   color: var(--gray-900);
-  background: white;
+  background: var(--surface);
 }
 
 .form-input:focus, .form-select:focus, .form-textarea:focus {
@@ -373,7 +481,7 @@ tr:hover td {
 }
 
 .modal {
-  background: white;
+  background: var(--surface);
   border-radius: var(--radius);
   box-shadow: var(--shadow-lg);
   max-width: 700px;
@@ -440,7 +548,7 @@ tr:hover td {
   font-family: 'Times New Roman', serif;
   line-height: 1.8;
   padding: 24px;
-  background: white;
+  background: var(--surface);
   border: 1px solid var(--gray-200);
   border-radius: var(--radius);
   white-space: pre-wrap;
@@ -482,3 +590,54 @@ tr:hover td {
   .page-body { padding: 16px; }
   .stats-grid { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* Stat cards that navigate to the tab they summarise. The affordance has to
+   be visible, or a clickable card just looks like a number. */
+.stat-card-link { cursor: pointer; transition: transform .12s ease, box-shadow .12s ease; }
+.stat-card-link:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(0,0,0,.10); }
+.stat-card-link:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.stat-card-link .stat-label::after { content: ' ›'; opacity: .55; }
+
+/* ── Callouts & code blocks ──
+   Both halves of every pair are declared. An element that sets only its
+   background inherits --text for the foreground, which flips with the theme
+   and lands as white-on-cream or dark-on-dark. */
+.callout {
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface-alt);
+  color: var(--text);
+  padding: 14px 16px;
+}
+.callout-warning {
+  background: var(--warning-light);
+  border-color: var(--warning);
+  color: var(--warning-text);
+}
+.callout-danger {
+  background: var(--danger-light);
+  border-color: var(--danger);
+  color: var(--danger-text);
+}
+.callout-info {
+  background: var(--info-light);
+  border-color: var(--info-border);
+  color: var(--info-text);
+}
+.callout ul { margin: 0; padding-left: 18px; }
+.callout li { margin-bottom: 6px; }
+.callout li:last-child { margin-bottom: 0; }
+
+.code-block {
+  background: var(--code-bg);
+  color: var(--code-text);
+  border: 1px solid var(--code-border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  line-height: 1.7;
+  overflow-x: auto;
+  white-space: pre;
+}
+.code-block .comment { color: var(--gray-400); }
