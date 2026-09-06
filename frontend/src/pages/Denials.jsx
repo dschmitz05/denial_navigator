@@ -183,7 +183,7 @@ export default function Denials() {
       )}
 
       {error && (
-        <div className="card" style={{ marginBottom: 12, borderLeft: '4px solid #dc2626' }}>
+        <div className="card" style={{ marginBottom: 12, borderLeft: '4px solid var(--danger)' }}>
           <div className="card-body" style={{ color: 'var(--danger)' }}>
             <strong>AI analysis failed:</strong> {error}
           </div>

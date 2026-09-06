@@ -221,7 +221,7 @@ export default function Users() {
       fontSize: '0.75rem',
       fontWeight: 600,
       color: '#fff',   // always white: these pills use a saturated fill in both themes
-      background: colors[role] || '#6b7280',
+      background: colors[role] || 'var(--gray-500)',
     }
   }
 
@@ -241,9 +241,9 @@ export default function Users() {
               padding: '10px 16px',
               borderRadius: 8,
               marginBottom: 16,
-              background: msg.type === 'success' ? '#f0fdf4' : '#fef2f2',
-              border: `1px solid ${msg.type === 'success' ? '#86efac' : '#fca5a5'}`,
-              color: msg.type === 'success' ? 'var(--success-text)' : 'var(--danger)',
+              background: msg.type === 'success' ? 'var(--success-light)' : 'var(--danger-light)',
+              border: `1px solid ${msg.type === 'success' ? 'var(--success)' : 'var(--danger)'}`,
+              color: msg.type === 'success' ? 'var(--success-text)' : 'var(--danger-text)',
               fontSize: '0.85rem',
             }}>
               {msg.text}

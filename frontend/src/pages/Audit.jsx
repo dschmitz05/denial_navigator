@@ -209,8 +209,11 @@ export default function Audit() {
                               borderRadius: 4,
                               fontSize: '0.8rem',
                               fontWeight: 600,
-                              background: (actionColors[l.action] || '#9ca3af') + '22',
-                              color: actionColors[l.action] || '#6b7280',
+                              // The tint derives from the text colour rather than being a
+                              // second fixed hex. The unmapped fallback was grey text on a
+                              // grey tint, which on a dark card was barely legible.
+                              color: actionColors[l.action] || 'var(--text-muted)',
+                              background: 'color-mix(in srgb, currentColor 16%, transparent)',
                             }}>
                               {actionHeadline(l.action, l.details)}
                             </span>

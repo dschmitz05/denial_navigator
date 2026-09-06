@@ -614,6 +614,11 @@ tr:hover td {
   border-color: var(--warning);
   color: var(--warning-text);
 }
+.callout-success {
+  background: var(--success-light);
+  border-color: var(--success);
+  color: var(--success-text);
+}
 .callout-danger {
   background: var(--danger-light);
   border-color: var(--danger);
@@ -641,3 +646,10 @@ tr:hover td {
   white-space: pre;
 }
 .code-block .comment { color: var(--gray-400); }
+
+/* color-mix is used for tinted pills that derive their background from their
+   own text colour. Anything too old to support it gets a flat surface, which
+   is plain but never illegible. */
+@supports not (color: color-mix(in srgb, red 50%, transparent)) {
+  .badge, [data-tinted] { background: var(--surface-alt) !important; }
+}

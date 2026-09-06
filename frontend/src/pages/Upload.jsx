@@ -95,12 +95,12 @@ export default function Upload() {
             onDragLeave={handleDrag}
             onDrop={handleDrop}
             style={{
-              border: `2px dashed ${dragActive ? '#3b82f6' : 'var(--gray-300)'}`,
+              border: `2px dashed ${dragActive ? 'var(--primary)' : 'var(--gray-300)'}`,
               borderRadius: 12,
               padding: '40px 20px',
               textAlign: 'center',
               cursor: 'pointer',
-              background: dragActive ? '#eff6ff' : '#fafafa',
+              background: dragActive ? 'var(--info-light)' : 'var(--surface-alt)',
               marginBottom: 24,
               transition: 'all 0.2s',
             }}
@@ -181,28 +181,24 @@ export default function Upload() {
             <div style={{ marginTop: 32 }}>
               <h4 style={{ fontSize: '0.9rem', marginBottom: 12 }}>Upload Results</h4>
               {results.map((r, i) => (
-                <div key={i} style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 12,
-                  padding: '12px',
-                  borderRadius: 8,
-                  marginBottom: 8,
-                  background: r.status === 'success' ? '#f0fdf4' : '#fef2f2',
-                  border: `1px solid ${r.status === 'success' ? '#86efac' : '#fca5a5'}`,
-                }}>
+                // The pale green/red backgrounds were fixed values while the
+                // filename inherited --text, which is near-white in dark mode.
+                // The callout classes state both halves, so they follow the theme.
+                <div key={i}
+                     className={`callout ${r.status === 'success' ? 'callout-success' : 'callout-danger'}`}
+                     style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
                   <span style={{ fontSize: '1.2rem' }}>
                     {r.status === 'success' ? '✅' : '❌'}
                   </span>
                   <div style={{ flex: 1 }}>
                     <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>{r.file}</div>
                     {r.status === 'success' && (
-                      <div style={{ fontSize: '0.8rem', color: 'var(--success-text)' }}>
+                      <div style={{ fontSize: '0.8rem', opacity: 0.85 }}>
                         {r.claims_stored} claims, {r.denials_stored} denials stored
                       </div>
                     )}
                     {r.status === 'error' && (
-                      <div style={{ fontSize: '0.8rem', color: 'var(--danger)' }}>{r.error}</div>
+                      <div style={{ fontSize: '0.8rem', opacity: 0.85 }}>{r.error}</div>
                     )}
                   </div>
                 </div>
@@ -216,7 +212,6 @@ export default function Upload() {
               background: 'var(--danger-light)', color: 'var(--danger-text)',
               border: '1px solid var(--danger)',
               marginTop: 20,
-              color: 'var(--danger)',
               fontSize: '0.85rem',
             }}>
               {error}
