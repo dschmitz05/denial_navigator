@@ -149,8 +149,44 @@ Still your responsibility before production:
 - Change the default `admin` and PostgreSQL passwords.
 - **Install a trusted certificate.** The default is self-signed: encrypted, not
   authenticated.
-- Automate PostgreSQL backups, and test a restore.
-- Decide audit-log retention — nothing prunes it today.
+- **Encrypt the database volume.** PHI is stored unencrypted at rest —
+  `ai_analyses` holds raw prompts containing patient data. Use LUKS, an
+  encrypted ZFS dataset, or an encrypted EBS volume; the application cannot do
+  this for you.
+- Schedule `scripts/backup.sh` and verify a restore periodically.
+
+## Backups
+
+```bash
+./scripts/backup.sh                                   # nightly, from cron
+./scripts/restore.sh <backup.sql.gz> --verify-only    # prove it restores
+```
+
+The backup script refuses to keep a dump it cannot read back, or one with
+implausibly few tables — a corrupt file that looks like a backup is worse than
+no file. `--verify-only` restores into a scratch database and prints row
+counts, so you can test a restore without touching live data. Dumps are written
+`chmod 600` because they contain PHI.
+
+Suggested cron entry:
+
+```
+0 2 * * * /path/to/denial-navigator/scripts/backup.sh >> /var/log/dn-backup.log 2>&1
+```
+
+## Audit retention
+
+The audit log grows without limit. `AUDIT_RETENTION_DAYS` defaults to **2190
+(six years)**, matching HIPAA's documentation retention expectation, and
+nothing is ever deleted automatically.
+
+```
+GET  /api/v1/retention/audit         # size, age, how much is beyond the window
+POST /api/v1/retention/audit/prune   # admin only, confirm=true, minimum 1 year
+```
+
+A prune records itself as an audit entry naming the range it removed — that
+entry is the only remaining evidence the history existed.
 
 ## TLS
 

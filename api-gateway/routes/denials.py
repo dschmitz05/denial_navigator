@@ -94,6 +94,7 @@ async def list_denials(
     carc_code: str = Query(None),
     cagc: str = Query(None),
     claim_id: str = Query(None),
+    q: str = Query(None, description="Claim number, patient name, CPT or CARC code"),
     priority: bool = Query(False),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0),
@@ -151,6 +152,17 @@ async def list_denials(
         if claim_id:
             filters.append(f"d.claim_id = (SELECT id FROM claims WHERE claim_number = ${where_count + 1})")
             params.append(claim_id)
+            where_count += 1
+        if q and q.strip():
+            # One parameter, matched across the fields somebody would actually
+            # type: a claim number from a payer letter, a patient's name, or
+            # the code they are chasing.
+            params.append(f"%{q.strip()}%")
+            n = len(params)
+            filters.append(
+                f"(c.claim_number ILIKE ${n} OR c.patient_name ILIKE ${n}"
+                f" OR d.cpt_code ILIKE ${n} OR d.carc_code ILIKE ${n})"
+            )
             where_count += 1
         if priority:
             filters.append("d.appeal_deadline IS NOT NULL AND d.appeal_deadline <= CURRENT_DATE + INTERVAL '14 days'")

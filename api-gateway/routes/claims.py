@@ -32,6 +32,7 @@ class ClaimUpdate(BaseModel):
 @router.get("/claims", response_model=list[dict])
 async def list_claims(
     status: str = Query(None, description="Filter by claim status"),
+    q: str = Query(None, description="Claim number, patient name or patient id"),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
@@ -55,9 +56,21 @@ async def list_claims(
             LEFT JOIN denials d ON d.claim_id = c.id
         """
 
+        where = []
         if status:
             params.append(status)
-            query += f" WHERE c.status = ${len(params)}"
+            where.append(f"c.status = ${len(params)}")
+        if q and q.strip():
+            # Looking one patient up beats paging the whole census - and the
+            # audit log records a targeted lookup rather than a bulk browse.
+            params.append(f"%{q.strip()}%")
+            where.append(
+                f"(c.claim_number ILIKE ${len(params)}"
+                f" OR c.patient_name ILIKE ${len(params)}"
+                f" OR c.patient_id ILIKE ${len(params)})"
+            )
+        if where:
+            query += " WHERE " + " AND ".join(where)
 
         query += " GROUP BY c.id ORDER BY c.created_at DESC"
         params.append(limit)

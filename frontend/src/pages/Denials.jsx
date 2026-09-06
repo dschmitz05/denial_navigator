@@ -17,6 +17,10 @@ export default function Denials() {
   const [showDetail, setShowDetail] = useState(false)
   const [statusFilter, setStatusFilter] = useState('')
   const [carcFilter, setCarcFilter] = useState('')
+  const [search, setSearch] = useState('')
+  const [selected, setSelected] = useState(new Set())
+  const [bulkType, setBulkType] = useState('')
+  const [bulkBusy, setBulkBusy] = useState(false)
   const [carcOptions, setCarcOptions] = useState([])
   const [generatingId, setGeneratingId] = useState(null)
   const [error, setError] = useState(null)
@@ -28,10 +32,11 @@ export default function Denials() {
     const params = new URLSearchParams({ limit: 50 })
     if (filters.status) params.set('status', filters.status)
     if (filters.carc_code) params.set('carc_code', filters.carc_code)
+    if (filters.q) params.set('q', filters.q)
 
     fetch(`${API_BASE}/denials?${params}`)
       .then(r => r.json())
-      .then(data => { setDenials(data); setLoading(false) })
+      .then(data => { setDenials(data); setSelected(new Set()); setLoading(false) })
       .catch(err => { console.error(err); setLoading(false) })
   }
 
@@ -40,8 +45,12 @@ export default function Denials() {
   // choosing a filter appeared to do nothing.
   useEffect(() => {
     setLoading(true)
-    loadDenials({ status: statusFilter, carc_code: carcFilter })
-  }, [statusFilter, carcFilter])
+    const t = setTimeout(
+      () => loadDenials({ status: statusFilter, carc_code: carcFilter, q: search }),
+      search ? 300 : 0,
+    )
+    return () => clearTimeout(t)
+  }, [statusFilter, carcFilter, search])
 
   // The CARC list is built from the codes actually present in the data.
   // It used to be hard-coded to five codes that mostly never occur.
@@ -140,6 +149,42 @@ export default function Denials() {
     setQueueing(false)
   }
 
+  const toggle = (id) => setSelected(prev => {
+    const next = new Set(prev)
+    next.has(id) ? next.delete(id) : next.add(id)
+    return next
+  })
+
+  const handleBulkQueue = async () => {
+    if (!bulkType || selected.size === 0) return
+    if (!confirm(`Queue ${selected.size} denial(s) as ${bulkType.replace(/_/g, ' ')}?`)) return
+    setBulkBusy(true)
+    setNotice(null)
+    try {
+      const resp = await fetch(`${API_BASE}/appeals/bulk`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ denial_ids: [...selected], resolution_type: bulkType }),
+      })
+      const data = await resp.json()
+      if (!resp.ok) throw new Error(data.detail || 'Bulk queue failed')
+      // Partial success is the normal case, so report both halves rather than
+      // a bare "done" that hides what did not happen.
+      const skipped = data.not_queued || []
+      setNotice({
+        error: false,
+        text: `${data.queued} queued to the ${destinationFor(bulkType)} tab`
+          + (data.skipped ? `; ${data.skipped} skipped (${[...new Set(skipped.map(s => s.reason))].join(', ')})` : ''),
+      })
+      setSelected(new Set())
+      setBulkType('')
+      loadDenials({ status: statusFilter, carc_code: carcFilter, q: search })
+    } catch (err) {
+      setNotice({ error: true, text: err.message })
+    }
+    setBulkBusy(false)
+  }
+
   const handleSelectDenial = async (denial) => {
     const resp = await fetch(`${API_BASE}/denials/${denial.id}`)
     const data = await resp.json()
@@ -173,7 +218,10 @@ export default function Denials() {
             </option>
           ))}
         </select>
-        <button className="btn" onClick={() => { setStatusFilter(''); setCarcFilter('') }}>Clear</button>
+        <input className="form-input" style={{ maxWidth: 260 }}
+               placeholder="Search claim, patient, CPT, CARC…"
+               value={search} onChange={e => setSearch(e.target.value)} />
+        <button className="btn" onClick={() => { setStatusFilter(''); setCarcFilter(''); setSearch('') }}>Clear</button>
       </div>
 
       {notice && (
@@ -190,11 +238,43 @@ export default function Denials() {
         </div>
       )}
 
+      {/* Denials arrive in clusters that share one reason code, and the
+          decision for the cluster is usually one decision. */}
+      {selected.size > 0 && (
+        <div className="card" style={{ marginBottom: 12 }}>
+          <div className="card-body" style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <strong>{selected.size} selected</strong>
+            <select className="form-select" style={{ maxWidth: 240 }}
+                    value={bulkType} onChange={e => setBulkType(e.target.value)}>
+              <option value="">Queue all as…</option>
+              {[...APPEAL_TYPES, ...WORKLIST_TYPES].map(t => (
+                <option key={t} value={t}>{LABELS[t]}</option>
+              ))}
+            </select>
+            <button className="btn btn-primary" disabled={!bulkType || bulkBusy} onClick={handleBulkQueue}>
+              {bulkBusy ? 'Queueing…' : `Queue ${selected.size}`}
+            </button>
+            <button className="btn" onClick={() => setSelected(new Set())}>Clear selection</button>
+            {bulkType && (
+              <span style={{ color: 'var(--gray-500)', fontSize: '0.85rem' }}>
+                → {destinationFor(bulkType)} tab
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
       <div className="card">
         <div className="table-container">
           <table>
             <thead>
               <tr>
+                <th style={{ width: 32 }}>
+                  <input type="checkbox"
+                         title="Select everything shown"
+                         checked={denials.length > 0 && selected.size === denials.length}
+                         onChange={e => setSelected(e.target.checked ? new Set(denials.map(d => d.id)) : new Set())} />
+                </th>
                 <th>Claim #</th>
                 <th>Patient</th>
                 <th>Payer</th>
@@ -208,10 +288,13 @@ export default function Denials() {
             </thead>
             <tbody>
               {denials.length === 0 ? (
-                <tr><td colSpan="9" style={{ textAlign: 'center', padding: 20 }}>No denials found</td></tr>
+                <tr><td colSpan="10" style={{ textAlign: 'center', padding: 20 }}>No denials found</td></tr>
               ) : (
                 denials.map(d => (
                   <tr key={d.id} style={{ cursor: 'pointer' }} onClick={() => handleSelectDenial(d)}>
+                    <td onClick={e => e.stopPropagation()}>
+                      <input type="checkbox" checked={selected.has(d.id)} onChange={() => toggle(d.id)} />
+                    </td>
                     <td>{d.claim_number}</td>
                     <td>{d.patient_name || '—'}</td>
                     <td>{d.payer_name}</td>

@@ -107,6 +107,37 @@ def _parse_date(val) -> Optional[date]:
     return None
 
 
+async def _already_ingested(conn, file_hash: str):
+    """The previous ingest of this exact file, if there was one.
+
+    The hash was recorded from the beginning and never compared to anything, so
+    re-uploading a file silently doubled its denials - and with them the denied
+    dollar totals, the CARC counts and the queue.
+    """
+    return await conn.fetchrow(
+        """
+        SELECT id, file_name, created_at, claims_count, denials_count
+          FROM ingestion_log
+         WHERE file_hash = $1 AND status IN ('completed', 'parsed')
+         ORDER BY created_at DESC LIMIT 1
+        """,
+        file_hash,
+    )
+
+
+def _duplicate_response(previous) -> HTTPException:
+    when = previous["created_at"].strftime("%d %b %Y at %H:%M")
+    return HTTPException(
+        status_code=409,
+        detail=(
+            f"This exact file was already ingested as '{previous['file_name']}' on "
+            f"{when} ({previous['claims_count']} claims, {previous['denials_count']} "
+            "denials). Re-ingesting it would duplicate those denials. "
+            "Send force=true if you intend to load it again anyway."
+        ),
+    )
+
+
 def _clean_claim(claim, index, seen_numbers):
     """Normalize claim data from EDIParser for safe DB insertion."""
     raw_id = claim.get("claim_id", "") or ""
@@ -276,7 +307,11 @@ async def upload_file(request: Request, file: UploadFile = File(...)):
 
 
 @router.post("/ingestion/ingest", response_model=dict, status_code=201)
-async def ingest_file(request: Request, file: UploadFile = File(...)):
+async def ingest_file(
+    request: Request,
+    file: UploadFile = File(...),
+    force: bool = Query(False, description="Ingest even if this exact file was loaded before"),
+):
     """Upload and parse an 835/837 file, storing results in one step"""
     _check_rate(request)
     _validate_upload(file)
@@ -285,6 +320,12 @@ async def ingest_file(request: Request, file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="File does not appear to be a valid X12 file (missing ISA segment)")
     file_hash = hashlib.sha256(content).hexdigest()
     file_size = len(content)
+
+    if not force:
+        async with get_connection() as conn:
+            previous = await _already_ingested(conn, file_hash)
+        if previous:
+            raise _duplicate_response(previous)
 
     # Parse via EDI service
     try:
@@ -356,8 +397,12 @@ async def ingest_file(request: Request, file: UploadFile = File(...)):
                 json.dumps(claim_data, default=str),
             )
 
+        denials_written = 0
         for denial_data in cleaned_denials:
-            await conn.execute(
+            # ON CONFLICT DO NOTHING means "offered" and "stored" are different
+            # numbers. Reporting the first as the second told the user five
+            # denials had been stored when none had.
+            result = await conn.execute(
                 """
                 INSERT INTO denials
                     (claim_id, service_line_number, cpt_code, hcpcs_code, modfier_1, modifier_2,
@@ -371,6 +416,11 @@ async def ingest_file(request: Request, file: UploadFile = File(...)):
                         appeal_deadline_for(
                             (SELECT payer_name FROM claims WHERE claim_number = $1),
                             COALESCE($14, CURRENT_DATE)))
+                -- The same claim can legitimately arrive in two different files
+                -- (a corrected 837 after an 835, say). The hash check cannot see
+                -- that; this does. Skipping the row is right - the adjustment is
+                -- already recorded.
+                ON CONFLICT DO NOTHING
                 """,
                 denial_data["claim_id"],
                 denial_data["service_line_number"],
@@ -387,6 +437,7 @@ async def ingest_file(request: Request, file: UploadFile = File(...)):
                 denial_data["denial_reason"],
                 denial_data["denial_date"],
             )
+            denials_written += 1 if result.endswith(" 1") else 0
 
         # Reflect adjudication on the claim itself. Ingestion hardcodes
         # status 'parsed' and nothing ever marked a claim denied, so the
@@ -408,7 +459,8 @@ async def ingest_file(request: Request, file: UploadFile = File(...)):
             "ingestion_id": str(ingestion_row["id"]),
             "file_name": file.filename or "unknown",
             "claims_stored": len(cleaned_claims),
-            "denials_stored": len(cleaned_denials),
+            "denials_stored": denials_written,
+            "denials_skipped_as_duplicates": len(cleaned_denials) - denials_written,
         }
 
 
@@ -438,7 +490,27 @@ async def get_ingestion_history(
 
 @router.post("/ingestion/store", response_model=dict)
 async def store_parsed_data(payload: StoreIngestion):
-    """Store parsed claims and denials from EDI parser"""
+    """Store parsed claims and denials from EDI parser.
+
+    The watcher re-reads the dropzone after a restart, so this path needs the
+    same guard as the upload endpoint or a container restart re-ingests
+    everything sitting there.
+    """
+    async with get_connection() as conn:
+        previous = await _already_ingested(conn, payload.file_hash)
+    if previous:
+        logger.info(
+            f"Skipping {payload.file_name}: identical to ingest {previous['id']} "
+            f"({previous['created_at']:%Y-%m-%d %H:%M})"
+        )
+        return {
+            "status": "skipped_duplicate",
+            "file_name": payload.file_name,
+            "previous_ingestion_id": str(previous["id"]),
+            "claims_stored": 0,
+            "denials_stored": 0,
+        }
+
     seen_numbers = set()
     cleaned_claims = [_clean_claim(c, i, seen_numbers) for i, c in enumerate(payload.claims)]
     cleaned_denials = [_clean_denial(d) for d in payload.denials]
@@ -480,8 +552,12 @@ async def store_parsed_data(payload: StoreIngestion):
             )
 
         # Store cleaned denials
+        denials_written = 0
         for denial_data in cleaned_denials:
-            await conn.execute(
+            # ON CONFLICT DO NOTHING means "offered" and "stored" are different
+            # numbers. Reporting the first as the second told the user five
+            # denials had been stored when none had.
+            result = await conn.execute(
                 """
                 INSERT INTO denials
                     (claim_id, service_line_number, cpt_code, hcpcs_code, modfier_1, modifier_2,
@@ -495,6 +571,11 @@ async def store_parsed_data(payload: StoreIngestion):
                         appeal_deadline_for(
                             (SELECT payer_name FROM claims WHERE claim_number = $1),
                             COALESCE($14, CURRENT_DATE)))
+                -- The same claim can legitimately arrive in two different files
+                -- (a corrected 837 after an 835, say). The hash check cannot see
+                -- that; this does. Skipping the row is right - the adjustment is
+                -- already recorded.
+                ON CONFLICT DO NOTHING
                 """,
                 denial_data["claim_id"],
                 denial_data["service_line_number"],
@@ -511,6 +592,7 @@ async def store_parsed_data(payload: StoreIngestion):
                 denial_data["denial_reason"],
                 denial_data["denial_date"],
             )
+            denials_written += 1 if result.endswith(" 1") else 0
 
         # Reflect adjudication on the claim itself. Ingestion hardcodes
         # status 'parsed' and nothing ever marked a claim denied, so the
@@ -532,5 +614,6 @@ async def store_parsed_data(payload: StoreIngestion):
             "ingestion_id": str(ingestion_row["id"]),
             "file_name": payload.file_name,
             "claims_stored": len(cleaned_claims),
-            "denials_stored": len(cleaned_denials),
+            "denials_stored": denials_written,
+            "denials_skipped_as_duplicates": len(cleaned_denials) - denials_written,
         }

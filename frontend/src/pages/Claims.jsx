@@ -26,11 +26,13 @@ function denialProgress(claim) {
 export default function Claims() {
   const [claims, setClaims] = useState([])
   const [statusFilter, setStatusFilter] = useState('')
+  const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
 
   const loadClaims = () => {
     const params = new URLSearchParams({ limit: 50 })
     if (statusFilter) params.set('status', statusFilter)
+    if (search.trim()) params.set('q', search.trim())
 
     fetch(`${API_BASE}/claims?${params}`)
       .then(r => r.json())
@@ -38,7 +40,11 @@ export default function Claims() {
       .catch(err => { console.error(err); setLoading(false) })
   }
 
-  useEffect(() => { loadClaims() }, [statusFilter])
+  // Debounced so a search is one request, not one per keystroke.
+  useEffect(() => {
+    const t = setTimeout(loadClaims, search ? 300 : 0)
+    return () => clearTimeout(t)
+  }, [statusFilter, search])
 
   return (
     <div className="page-body">
@@ -52,6 +58,12 @@ export default function Claims() {
           <option value="resolved">Resolved</option>
           <option value="appealed">Appealed</option>
         </select>
+        <input className="form-input" style={{ maxWidth: 280 }}
+               placeholder="Search claim number, patient, ID…"
+               value={search} onChange={e => setSearch(e.target.value)} />
+        {(search || statusFilter) && (
+          <button className="btn" onClick={() => { setSearch(''); setStatusFilter('') }}>Clear</button>
+        )}
         <button className="btn btn-primary" onClick={loadClaims}>Refresh</button>
       </div>
 

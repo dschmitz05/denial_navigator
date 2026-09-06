@@ -383,6 +383,116 @@ async def get_appeal_letter(appeal_id: str, http_request: Request):
         return dict(row)
 
 
+class BulkQueue(BaseModel):
+    """Queue many denials as the same kind of work in one action."""
+    denial_ids: list[str] = Field(..., min_length=1, max_length=500)
+    resolution_type: str = Field(
+        ..., pattern="^(appeal_letter|corrected_claim|clinical_docs|payer_contact|bill_patient|write_off)$"
+    )
+    assigned_user_id: Optional[str] = None
+    notes: Optional[str] = None
+
+
+@router.post("/appeals/bulk", response_model=dict, status_code=201)
+async def bulk_queue(body: BulkQueue, http_request: Request):
+    """Queue a batch of denials as the same resolution.
+
+    Denials arrive in clusters - forty claims rejected for the same missing
+    modifier - and working them one at a time is the bulk of the labour. The
+    decision is the same for the whole cluster; only the clicking differs.
+
+    Partial success is reported rather than rolled back. If three of forty are
+    already queued, the other thirty-seven should still be queued and the
+    caller told which were not - failing the batch would make the feature
+    unusable on any real queue.
+    """
+    owner = _queue_owner(http_request)
+    assigned_to = body.assigned_user_id or owner
+
+    queued, skipped = [], []
+    denial_status = (
+        "in_appeal" if body.resolution_type in APPEAL_RESOLUTION_TYPES else "in_progress"
+    )
+
+    async with get_connection() as conn:
+        for denial_id in body.denial_ids:
+            denial = await conn.fetchrow(
+                """SELECT d.id, d.claim_id, c.claim_number
+                     FROM denials d JOIN claims c ON c.id = d.claim_id
+                    WHERE d.id = $1::uuid""",
+                denial_id,
+            )
+            if not denial:
+                skipped.append({"denial_id": denial_id, "reason": "not found"})
+                continue
+
+            existing = await conn.fetchval(
+                f"""SELECT claim_number FROM appeals_queue aq
+                      JOIN denials d ON d.id = aq.denial_id
+                      JOIN claims c ON c.id = d.claim_id
+                     WHERE aq.denial_id = $1::uuid
+                       AND (aq.outcome_status IS NULL
+                            OR aq.outcome_status <> ALL($2::text[]))""",
+                denial_id, list(TERMINAL_OUTCOMES),
+            )
+            if existing:
+                skipped.append({
+                    "denial_id": denial_id, "claim_number": denial["claim_number"],
+                    "reason": "already has open work",
+                })
+                continue
+
+            analysis_id = await conn.fetchval(
+                "SELECT id FROM ai_analyses WHERE denial_id = $1 ORDER BY created_at DESC LIMIT 1",
+                denial_id,
+            )
+            row = await conn.fetchrow(
+                """
+                INSERT INTO appeals_queue
+                    (denial_id, claim_id, ai_analysis_id, resolution_type,
+                     assigned_user_id, notes, outcome_status)
+                VALUES ($1::uuid, $2, $3, $4, $5::uuid, $6, 'queued')
+                RETURNING id
+                """,
+                denial_id, denial["claim_id"], analysis_id,
+                body.resolution_type, assigned_to, body.notes,
+            )
+            await conn.execute(
+                "UPDATE denials SET status = $2, updated_at = NOW() WHERE id = $1",
+                denial["id"], denial_status,
+            )
+            await refresh_claim_status(conn, denial["claim_id"])
+            queued.append({"denial_id": denial_id, "claim_number": denial["claim_number"],
+                           "queue_id": str(row["id"])})
+
+    actor_id, actor_name = _identify(http_request)
+    await audit_record(
+        action="bulk_queue",
+        resource_type="appeal",
+        user_id=actor_id,
+        details={
+            "username": actor_name or "anonymous",
+            "resolution_type": body.resolution_type,
+            "queued": len(queued),
+            "skipped": len(skipped),
+            # Named, so the audit entry says which claims moved rather than
+            # just how many.
+            "claim_numbers": [q["claim_number"] for q in queued][:50],
+        },
+        ip_address=_client_ip(http_request),
+        user_agent=http_request.headers.get("user-agent"),
+    )
+
+    return {
+        "status": "queued",
+        "resolution_type": body.resolution_type,
+        "queued": len(queued),
+        "skipped": len(skipped),
+        "items": queued,
+        "not_queued": skipped,
+    }
+
+
 def _json_field(value):
     """jsonb comes back from asyncpg as a string; hand the UI real structure."""
     if value is None or isinstance(value, (list, dict)):

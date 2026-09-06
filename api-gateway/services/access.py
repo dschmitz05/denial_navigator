@@ -160,6 +160,10 @@ PERMISSIONS = {
     # is how a biller understands why the AI button is failing. Nothing to
     # write: status is observed, never set.
     "system":    {"read": ALL_ROLES, "write": NOBODY},
+
+    # Retention policy and pruning the audit trail. Admin only, and the prune
+    # itself carries further guards in the handler.
+    "retention": {"read": ADMIN_ONLY, "write": ADMIN_ONLY},
 }
 
 # Exceptions that are narrower or wider than their resource's rule. Checked
