@@ -1,0 +1,4 @@
+# Certificates and keys never belong in version control.
+*
+!.gitignore
+!README.md

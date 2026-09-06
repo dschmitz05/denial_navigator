@@ -14,8 +14,19 @@ RUN npm run build
 
 # Use nginx to serve the built files
 FROM nginx:alpine
+
+# openssl is not in nginx:alpine, and the entrypoint needs it to generate a
+# self-signed certificate when none is mounted.
+RUN apk add --no-cache openssl
+
 COPY --from=0 /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-EXPOSE 80
+
+# The location blocks, shared by the HTTP and HTTPS server blocks that
+# docker-entrypoint.d/05-tls.sh writes at startup.
+COPY app-locations.conf /etc/nginx/snippets/app-locations.conf
+COPY docker-entrypoint.d/05-tls.sh /docker-entrypoint.d/05-tls.sh
+RUN chmod +x /docker-entrypoint.d/05-tls.sh
+
+EXPOSE 80 443
 
 CMD ["nginx", "-g", "daemon off;"]

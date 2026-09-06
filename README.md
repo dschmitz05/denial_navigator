@@ -48,12 +48,12 @@ trail complete.
 
 | Service | Port | Purpose |
 |---------|------|---------|
-| **PostgreSQL** | 5432 | Relational store + pgvector embeddings |
-| **API Gateway** | 8000 | REST API, authentication, RBAC, audit |
-| **EDI Parser** | 8001 | X12 835/837 parsing, dropzone watcher |
-| **RAG Engine** | 8002 | Chunking, embeddings, vector search |
-| **LLM Service** | 8003 | Denial reasoning and appeal drafting |
-| **Frontend** | 3081 | React billing dashboard |
+| **PostgreSQL** | *internal* | Relational store + pgvector embeddings |
+| **API Gateway** | 8000 *(loopback)* | REST API, authentication, RBAC, audit |
+| **EDI Parser** | *internal* | X12 835/837 parsing, dropzone watcher |
+| **RAG Engine** | *internal* | Chunking, embeddings, vector search |
+| **LLM Service** | *internal* | Denial reasoning and appeal drafting |
+| **Frontend** | 3443 (HTTPS) | React billing dashboard — 3081 redirects here |
 
 Two model servers run outside Compose and are configured by URL:
 
@@ -94,8 +94,12 @@ docker compose up -d --build
 docker compose run --rm --no-deps -v "$PWD/scripts:/seed" api python /seed/seed_admin.py
 ```
 
-Open <http://localhost:3081> and sign in as `admin` / `admin123`.
+Open <https://localhost:3443> and sign in as `admin` / `admin123`.
 **Change that password immediately** on the My Profile page.
+
+The first start generates a **self-signed** certificate, so your browser will
+warn. That is expected and correct — the connection is encrypted but not
+authenticated. See [TLS](#tls) to install a trusted one.
 
 Then drop a file in: Upload tab, or
 
@@ -122,15 +126,56 @@ Enforced today:
 - **Audit logging on every request** — who, which record, from where, and the
   outcome, including refused ones. Written as middleware so a new route cannot
   be missed.
-- **bcrypt password hashes**; self-service change requires the current password.
+- **bcrypt password hashes** (cost 12, unique per-password salt); self-service
+  change requires the current password.
+- **TLS by default.** The application is served over HTTPS on first start, with
+  HTTP redirecting to it. See below.
+- **Only the web listener is published.** PostgreSQL and the internal services
+  are reachable on the Docker network only; the API gateway is bound to
+  loopback for scripting.
 
 Still your responsibility before production:
 
 - Change the default `admin` and PostgreSQL passwords.
-- **Terminate TLS in front of the app.** Tokens and PHI cross the network in
-  the clear over plain HTTP.
+- **Install a trusted certificate.** The default is self-signed: encrypted, not
+  authenticated.
 - Automate PostgreSQL backups, and test a restore.
 - Decide audit-log retention — nothing prunes it today.
+
+## TLS
+
+Set `TLS_MODE` in `.env`:
+
+| Mode | Behaviour |
+|------|-----------|
+| `self-signed` *(default)* | Generates a certificate on first start if `certs/` is empty. Encrypted but **not authenticated** — browsers warn. |
+| `provided` | Uses `certs/tls.crt` + `certs/tls.key`. **Refuses to start** if they are missing, rather than silently falling back. |
+| `off` | Plain HTTP only. Valid **only** when something else terminates TLS over a trusted hop — a proxy on the same host or Docker network. Across a VLAN this puts PHI on the wire in clear. |
+
+To install a real certificate:
+
+```bash
+cp your-cert.pem certs/tls.crt     # server cert, then any intermediates
+cp your-key.pem  certs/tls.key
+sed -i 's/^TLS_MODE=.*/TLS_MODE=provided/' .env
+docker compose restart frontend
+```
+
+Set `TLS_HOSTNAME` to the name staff actually type — a certificate issued for
+the wrong name makes the browser warning worse, not better. `PUBLIC_HTTPS_PORT`
+only shapes the HTTP→HTTPS redirect; set it to `443` if you publish there.
+
+HSTS is deliberately **not** enabled. With a self-signed certificate it would
+pin browsers to a certificate they do not trust, and undoing that means
+clearing state on every client machine. Turn it on once a trusted certificate
+is in place.
+
+### Behind an existing reverse proxy
+
+Point your proxy at the frontend's HTTPS listener and let it verify or skip
+verification as your policy requires. If the proxy runs on the same host or
+Docker network, `TLS_MODE=off` with plain HTTP on 3081 is a reasonable
+simplification — but not across a network segment.
 
 ## Roles
 

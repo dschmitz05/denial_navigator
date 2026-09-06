@@ -197,8 +197,8 @@ Output: JSON with explanation, category, action plan, steps, appeal draft
 docker-compose -f docker-compose.yml up -d
 
 # Verify
-curl http://localhost:8000/health
-curl http://localhost:3080
+curl http://localhost:8000/health        # gateway, bound to loopback
+curl -k https://localhost:3443/          # the application over TLS
 ```
 
 ### Monitoring
