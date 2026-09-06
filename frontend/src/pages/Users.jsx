@@ -16,6 +16,11 @@ export default function Users() {
     username: '', email: '', password: '', full_name: '', role: 'billing_specialist',
   })
   const [resetForm, setResetForm] = useState({ userId: '', password: '' })
+  // Permanent deletion is a modal rather than a confirm() because the admin
+  // has to type the username, and a browser confirm cannot take input.
+  const [purgeTarget, setPurgeTarget] = useState(null)
+  const [purgeTyped, setPurgeTyped] = useState('')
+  const [purging, setPurging] = useState(false)
   const [msg, setMsg] = useState({ type: '', text: '' })
 
   const loadUsers = async () => {
@@ -125,6 +130,37 @@ export default function Users() {
     } catch (err) {
       setMsg({ type: 'error', text: err.message })
     }
+  }
+
+  const handlePurge = async () => {
+    if (!purgeTarget || purgeTyped !== purgeTarget.username) return
+    setPurging(true)
+    try {
+      const params = new URLSearchParams({ purge: 'true', confirm_username: purgeTarget.username })
+      const resp = await fetch(`${API_BASE}/users/${purgeTarget.id}?${params}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${localStorage.getItem('auth_token')}` },
+      })
+      const data = await resp.json().catch(() => ({}))
+      if (!resp.ok) throw new Error(data.detail || `Delete failed (HTTP ${resp.status})`)
+
+      // Report the collateral rather than a bare success: the admin should
+      // see what the deletion actually cost.
+      const bits = []
+      if (data.queue_items_released) bits.push(`${data.queue_items_released} queue item(s) returned to the pool`)
+      if (data.closed_items_unattributed) bits.push(`${data.closed_items_unattributed} completed item(s) no longer show who worked them`)
+      if (data.audit_entries_orphaned) bits.push(`${data.audit_entries_orphaned} audit entries kept, still showing the name`)
+      setMsg({
+        type: 'success',
+        text: `${data.username} permanently deleted` + (bits.length ? ` — ${bits.join('; ')}` : ''),
+      })
+      setPurgeTarget(null)
+      setPurgeTyped('')
+      loadUsers()
+    } catch (err) {
+      setMsg({ type: 'error', text: err.message })
+    }
+    setPurging(false)
   }
 
   const roleBadge = (role) => {
@@ -279,6 +315,12 @@ export default function Users() {
                                   onClick={() => handleToggleActive(u.id)}>
                             {u.is_active ? 'Deactivate' : 'Reactivate'}
                           </button>
+                          <button className="btn btn-sm"
+                                  style={{ color: 'var(--danger)' }}
+                                  title="Erase the account permanently. Deactivate instead unless the account should never have existed."
+                                  onClick={() => { setPurgeTarget(u); setPurgeTyped('') }}>
+                            Delete permanently
+                          </button>
                         </div>
                       ) : (
                         <span style={{ color: 'var(--gray-400)', fontSize: '0.85rem' }}>
@@ -321,6 +363,56 @@ export default function Users() {
                 <button type="submit" className="btn btn-primary">Reset Password</button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Permanent deletion. Typing the username is the point: it makes an
+          accidental click impossible, and forces the admin to look at which
+          account they are about to erase. */}
+      {purgeTarget && (
+        <div className="modal-overlay" onClick={() => setPurgeTarget(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 560 }}>
+            <div className="modal-header">
+              <h3>Permanently delete {purgeTarget.username}?</h3>
+              <button className="btn" onClick={() => setPurgeTarget(null)}>✕</button>
+            </div>
+            <div className="modal-body">
+              <div className="callout callout-danger" style={{ marginBottom: 16 }}>
+                <strong>This cannot be undone.</strong>
+                <ul>
+                  <li>The account is erased. It is not recoverable.</li>
+                  <li>Their open queue items return to the unassigned pool.</li>
+                  <li>Completed work will no longer show who did it.</li>
+                  <li>Their audit entries are kept and still show the username,
+                      but no longer link to an account.</li>
+                </ul>
+              </div>
+
+              <p style={{ marginBottom: 12, color: 'var(--text-muted)' }}>
+                In almost every case <strong>Deactivate</strong> is the right choice — it
+                blocks sign-in, releases their work, and keeps the record intact.
+                Delete permanently only when the account should never have existed.
+              </p>
+
+              <div className="form-group">
+                <label className="form-label">
+                  Type <strong>{purgeTarget.username}</strong> to confirm
+                </label>
+                <input className="form-input" autoFocus
+                       value={purgeTyped}
+                       placeholder={purgeTarget.username}
+                       onChange={e => setPurgeTyped(e.target.value)} />
+              </div>
+            </div>
+            <div className="modal-footer" style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button className="btn" onClick={() => setPurgeTarget(null)}>Cancel</button>
+              <button className="btn btn-danger"
+                      disabled={purgeTyped !== purgeTarget.username || purging}
+                      onClick={handlePurge}>
+                {purging ? 'Deleting…' : 'Delete permanently'}
+              </button>
+            </div>
           </div>
         </div>
       )}

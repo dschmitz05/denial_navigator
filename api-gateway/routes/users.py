@@ -273,9 +273,24 @@ async def reset_user_password(
 @router.delete("/users/{user_id}", status_code=200)
 async def delete_user(
     user_id: str,
+    purge: bool = Query(False, description="Permanently erase the account instead of deactivating it"),
+    confirm_username: Optional[str] = Query(
+        None, description="Required with purge=true; must equal the target's username"
+    ),
     current_user = Depends(require_admin),
 ):
-    """Delete or deactivate a user (admin only)"""
+    """Deactivate a user, or with `purge=true`, erase the account entirely.
+
+    Deactivation is the normal path: sign-in is blocked, the row survives, and
+    everything that user ever did stays attributable to a name.
+
+    A purge is different in kind, so it is guarded differently. Nothing in this
+    schema has a foreign key to users, so the database will not stop you and
+    nothing cascades - the references have to be cleared here, deliberately,
+    and the attribution they carried is gone. `confirm_username` must match the
+    account exactly, which makes an accidental purge - a wrong id in a script,
+    a mis-click - very hard to perform.
+    """
     async with get_connection() as conn:
         user = await conn.fetchrow("SELECT id, username, role FROM users WHERE id = $1", user_id)
         if not user:
@@ -287,11 +302,72 @@ async def delete_user(
 
         # Prevent deleting the last admin
         admin_count = await conn.fetchval(
-            "SELECT COUNT(*) FROM users WHERE role = 'admin' AND id != $1",
+            "SELECT COUNT(*) FROM users WHERE role = 'admin' AND id != $1 AND is_active = TRUE",
             user_id,
         )
         if user["role"] == "admin" and admin_count == 0:
             raise HTTPException(status_code=400, detail="Cannot delete the last admin user")
+
+        if purge:
+            if confirm_username != user["username"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Permanent deletion requires confirm_username to match "
+                        f"the account exactly (expected '{user['username']}')"
+                    ),
+                )
+
+            # Their live work goes back to the pool; closed items lose the
+            # record of who did them, because that record was the user row.
+            released = await _release_queue_items(conn, user_id)
+            closed_items = await conn.fetchval(
+                f"""SELECT COUNT(*) FROM appeals_queue
+                     WHERE assigned_user_id = $1 AND NOT {OPEN_QUEUE_CLAUSE}""",
+                user_id,
+            )
+            audit_entries = await conn.fetchval(
+                "SELECT COUNT(*) FROM audit_log WHERE user_id = $1", user_id
+            )
+
+            # Written BEFORE the row disappears, so the log records who was
+            # erased, by whom, and what it cost. This entry is the only thing
+            # left afterwards that names them.
+            await conn.execute(
+                """INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
+                   VALUES ($1, $2, $3, $4, $5)""",
+                current_user["sub"], "purge_user", "user", user_id,
+                json.dumps({
+                    "username": user["username"],
+                    "role": user["role"],
+                    "queue_items_released": released,
+                    "closed_items_unattributed": closed_items,
+                    "audit_entries_orphaned": audit_entries,
+                }),
+            )
+
+            async with conn.transaction():
+                # No foreign keys exist, so these would otherwise be left
+                # pointing at an id that resolves to nobody.
+                await conn.execute(
+                    "UPDATE appeals_queue SET assigned_user_id = NULL WHERE assigned_user_id = $1",
+                    user_id,
+                )
+                await conn.execute(
+                    "UPDATE feedback_loop SET user_id = NULL WHERE user_id = $1", user_id
+                )
+                await conn.execute("DELETE FROM users WHERE id = $1", user_id)
+
+            logger.warning(
+                f"PURGED user {user['username']} ({user_id}) by {current_user.get('username')}"
+            )
+            return {
+                "status": "purged",
+                "username": user["username"],
+                "queue_items_released": released,
+                "closed_items_unattributed": closed_items,
+                "audit_entries_orphaned": audit_entries,
+            }
 
         # Soft delete by deactivating
         await conn.execute(
