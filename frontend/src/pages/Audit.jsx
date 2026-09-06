@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import {
   actionHeadline, describeAction, describeDetails, describeOutcome,
-  describeResource, technicalDetails,
+  describeResource, describeSubject, technicalDetails,
 } from '../lib/auditText'
 
 const API_BASE = '/api/v1'
@@ -176,6 +176,7 @@ export default function Audit() {
                     <th>User</th>
                     <th>Action</th>
                     <th>Outcome</th>
+                    <th>Record</th>
                     <th>What happened</th>
                     <th></th>
                   </tr>
@@ -185,6 +186,7 @@ export default function Audit() {
                     const outcome = describeOutcome(l.details)
                     const tone = outcome ? OUTCOME_TONES[outcome.tone] : null
                     const sentence = describeDetails(l.action, l.details)
+                    const subject = describeSubject(l.details)
                     const tech = technicalDetails(l)
                     const open = expanded === l.id
                     return (
@@ -230,6 +232,9 @@ export default function Audit() {
                               }}>{outcome.label}</span>
                             ) : <span style={{ color: 'var(--gray-300)' }}>—</span>}
                           </td>
+                          <td style={{ fontSize: '0.85rem', whiteSpace: 'nowrap' }}>
+                            {subject || <span style={{ color: 'var(--gray-300)' }}>—</span>}
+                          </td>
                           <td style={{ fontSize: '0.85rem', color: 'var(--gray-700)' }}>
                             {sentence || <span style={{ color: 'var(--gray-300)' }}>—</span>}
                           </td>
@@ -247,7 +252,7 @@ export default function Audit() {
                           <tr>
                             {/* Nothing is discarded by the plain-English view - the
                                 precise record is one click away. */}
-                            <td colSpan="6" style={{ background: 'var(--gray-50)', fontSize: '0.8rem' }}>
+                            <td colSpan="7" style={{ background: 'var(--gray-50)', fontSize: '0.8rem' }}>
                               <div style={{ display: 'grid', gridTemplateColumns: 'max-content 1fr', gap: '4px 16px', padding: '8px 4px' }}>
                                 {tech.map(([k, v]) => (
                                   <React.Fragment key={k}>

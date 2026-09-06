@@ -321,8 +321,12 @@ async def update_appeal(appeal_id: str, appeal: AppealUpdate, http_request: Requ
                 "old_outcome": old_outcome,
                 "outcome_status": row["outcome_status"],
                 "resolution_type": row["resolution_type"],
-                "denial_id": str(row["denial_id"]),
-                "claim_id": str(row["claim_id"]),
+                # The claim NUMBER, not just its uuid - a reviewer reading this
+                # entry needs to know which claim moved, and an id tells them
+                # nothing without another query.
+                "claim_number": await conn.fetchval(
+                    "SELECT claim_number FROM claims WHERE id = $1", row["claim_id"]
+                ),
             },
             ip_address=_client_ip(http_request),
             user_agent=http_request.headers.get("user-agent"),
@@ -454,9 +458,12 @@ async def assign_appeal(appeal_id: str, body: AppealAssign, http_request: Reques
         current = await conn.fetchrow(
             """
             SELECT aq.id, aq.assigned_user_id, aq.resolution_type, aq.denial_id,
-                   u.username AS current_username
+                   u.username AS current_username,
+                   c.claim_number
             FROM appeals_queue aq
             LEFT JOIN users u ON u.id = aq.assigned_user_id
+            JOIN denials d ON d.id = aq.denial_id
+            JOIN claims c ON c.id = d.claim_id
             WHERE aq.id = $1
             """,
             appeal_id,
@@ -501,6 +508,7 @@ async def assign_appeal(appeal_id: str, body: AppealAssign, http_request: Reques
                 "from": current["current_username"],
                 "to": assignee["username"] if assignee else None,
                 "resolution_type": current["resolution_type"],
+                "claim_number": current["claim_number"],
             },
             ip_address=_client_ip(http_request),
             user_agent=http_request.headers.get("user-agent"),

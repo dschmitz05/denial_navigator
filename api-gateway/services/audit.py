@@ -193,6 +193,61 @@ def _classify(method: str, path: str) -> tuple[str, str, Optional[str]]:
     return f"{verb}_{resource_type}", resource_type, resource_id
 
 
+# What each kind of record is called by the people who work with it. A UUID
+# identifies a row; it does not tell a reviewer which patient's claim was
+# opened, which is the entire question an access log exists to answer.
+#
+# Resolved when the entry is WRITTEN, not when it is read. An audit record has
+# to stand on its own: if the claim is later corrected, re-ingested or purged,
+# the log must still say which claim number was accessed at the time.
+_LABEL_QUERIES = {
+    "claim": """
+        SELECT claim_number AS claim_number, patient_name
+          FROM claims WHERE id = $1::uuid
+    """,
+    "denial": """
+        SELECT c.claim_number, c.patient_name, d.cpt_code, d.carc_code
+          FROM denials d JOIN claims c ON c.id = d.claim_id
+         WHERE d.id = $1::uuid
+    """,
+    "appeal": """
+        SELECT c.claim_number, c.patient_name, aq.resolution_type
+          FROM appeals_queue aq
+          JOIN denials d ON d.id = aq.denial_id
+          JOIN claims c ON c.id = d.claim_id
+         WHERE aq.id = $1::uuid
+    """,
+    "analysis": """
+        SELECT c.claim_number, c.patient_name
+          FROM ai_analyses aa JOIN claims c ON c.id = aa.claim_id
+         WHERE aa.id = $1::uuid
+    """,
+    "user": "SELECT username AS target_username FROM users WHERE id = $1::uuid",
+    "knowledge_doc": "SELECT title AS document_title FROM knowledge_documents WHERE id = $1::uuid",
+}
+
+
+async def _label_for(resource_type: str, resource_id: Optional[str]) -> dict:
+    """Human identifiers for the record being touched, or {} if unavailable.
+
+    Never raises: an audit entry with a missing label is worth far more than a
+    request that failed because the lookup did.
+    """
+    query = _LABEL_QUERIES.get(resource_type)
+    if not query or not resource_id:
+        return {}
+    try:
+        async with get_connection() as conn:
+            row = await conn.fetchrow(query, resource_id)
+    except Exception as e:
+        logger.warning(f"audit label lookup failed for {resource_type} {resource_id}: {e}")
+        return {}
+    if not row:
+        # The record is gone. Saying so is more useful than an absent field.
+        return {"record": "no longer exists"}
+    return {k: v for k, v in dict(row).items() if v is not None}
+
+
 async def record(
     action: str,
     resource_type: str,
@@ -252,6 +307,11 @@ class AuditMiddleware(BaseHTTPMiddleware):
             "duration_ms": duration_ms,
             "outcome": "success" if response.status_code < 400 else "failure",
         }
+
+        # Name the record, not just its id. Only for requests that actually
+        # addressed one, so list endpoints cost no extra query.
+        if resource_id:
+            details.update(await _label_for(resource_type, resource_id))
         if request.url.query:
             details["query"] = request.url.query
         if username:

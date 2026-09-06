@@ -4,11 +4,12 @@ import json
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from api_gateway.services.db import get_connection
 from api_gateway.services import RAGEngineClient, LLMServiceClient
+from api_gateway.services.audit import _client_ip, _identify, record as audit_record
 
 logger = logging.getLogger("api_gateway.analyses")
 
@@ -108,7 +109,7 @@ async def store_analysis(analysis: StoreAnalysis):
 
 
 @router.post("/analyses/generate", response_model=dict)
-async def generate_analysis(request: GenerateAnalysisRequest):
+async def generate_analysis(request: GenerateAnalysisRequest, http_request: Request):
     """Generate a complete AI analysis for a denial (RAG + LLM)"""
     async with get_connection() as conn:
         denial = await conn.fetchrow(
@@ -163,6 +164,26 @@ async def generate_analysis(request: GenerateAnalysisRequest):
         }
 
         llm_result = await llm_client.analyze_denial(llm_request)
+
+        # The denial id arrives in the body, so the access log sees no record
+        # in the path to name. This entry says whose claim was analysed.
+        actor_id, actor_name = _identify(http_request)
+        await audit_record(
+            action="generate_analysis",
+            resource_type="denial",
+            resource_id=str(request.denial_id),
+            user_id=actor_id,
+            details={
+                "username": actor_name or "anonymous",
+                "claim_number": denial["claim_number"],
+                "patient_name": denial["patient_name"],
+                "carc_code": denial["carc_code"],
+                "cpt_code": denial["cpt_code"],
+                "policies_retrieved": len(policy_texts),
+            },
+            ip_address=_client_ip(http_request),
+            user_agent=http_request.headers.get("user-agent"),
+        )
 
         return {
             "denial_id": request.denial_id,

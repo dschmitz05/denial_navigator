@@ -129,6 +129,25 @@ const prettyRole = (r) => (r ? String(r).replace(/_/g, ' ') : r)
 const prettyWork = (r) => (r ? String(r).replace(/_/g, ' ') : 'work')
 
 /**
+ * Which record the entry is about, in the terms people use for it.
+ *
+ * The log stores a UUID, which answers nothing on its own - "who opened this
+ * patient's claim" is the question, and an id does not name a claim. The
+ * server resolves this when the entry is written, so it still reads correctly
+ * after the record itself is gone.
+ */
+export function describeSubject(details) {
+  const d = parseDetails(details)
+  if (d.claim_number) {
+    return d.patient_name ? `Claim ${d.claim_number} · ${d.patient_name}` : `Claim ${d.claim_number}`
+  }
+  if (d.document_title) return d.document_title
+  if (d.target_username) return d.target_username
+  if (d.record) return `(${d.record})`
+  return ''
+}
+
+/**
  * A sentence describing what actually happened, or '' when the action name
  * already says everything (a plain successful read needs no elaboration).
  */
@@ -188,6 +207,18 @@ export function describeDetails(action, details) {
 
     case 'reset_password':
       return d.target_username ? `For ${d.target_username}` : ''
+
+    case 'generate_analysis': {
+      const bits = []
+      if (d.carc_code) bits.push(`CARC ${d.carc_code}`)
+      if (d.cpt_code) bits.push(`CPT ${d.cpt_code}`)
+      if (d.policies_retrieved !== undefined) {
+        bits.push(d.policies_retrieved
+          ? `${d.policies_retrieved} policy document(s) used`
+          : 'no payer policy matched')
+      }
+      return bits.join(' · ')
+    }
   }
 
   // Middleware-written rows. The outcome is shown as its own badge, so
@@ -216,7 +247,7 @@ export function technicalDetails(row) {
   if (d.duration_ms !== undefined) out.push(['Duration', `${d.duration_ms} ms`])
   if (row.ip_address) out.push(['IP address', row.ip_address])
   if (row.user_agent) out.push(['Device', row.user_agent])
-  if (row.resource_id) out.push(['Record id', row.resource_id])
+  if (row.resource_id) out.push(['Record id', row.resource_id])   // the raw uuid, for tracing
   const known = new Set(['method', 'path', 'query', 'status_code', 'duration_ms', 'outcome', 'username'])
   Object.entries(d).forEach(([k, v]) => {
     if (!known.has(k) && v !== null && v !== '') out.push([k.replace(/_/g, ' '), String(v)])
