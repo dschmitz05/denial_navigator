@@ -92,7 +92,10 @@ export default function Login({ onLogin, onComplete }) {
                   </p>
                   {/* Rendered by the server as inline SVG, so this works with
                       no internet and the secret never reaches a third party. */}
-                  <div style={{ background: '#fff', padding: 12, borderRadius: 8, display: 'flex', justifyContent: 'center' }}
+                  {/* Deliberately white in both themes: a QR code needs light quiet
+                          zones and dark modules to scan reliably, so this one does
+                          not follow the palette. */}
+                  <div style={{ background: '#ffffff', padding: 12, borderRadius: 8, display: 'flex', justifyContent: 'center' }}
                        dangerouslySetInnerHTML={{ __html: enrollment.qr_svg }} />
                   <details style={{ marginTop: 10 }}>
                     <summary style={{ cursor: 'pointer', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
@@ -146,7 +149,7 @@ export default function Login({ onLogin, onComplete }) {
             {error && (
               <div className="card" style={{
                 background: 'var(--danger-light)', color: 'var(--danger-text)',
-                border: '1px solid #fca5a5',
+                border: '1px solid var(--danger)',
                 marginBottom: 20,
                 fontSize: '0.85rem',
                 color: 'var(--danger)',

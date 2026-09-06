@@ -214,7 +214,7 @@ export default function Upload() {
           {error && (
             <div className="card" style={{
               background: 'var(--danger-light)', color: 'var(--danger-text)',
-              border: '1px solid #fca5a5',
+              border: '1px solid var(--danger)',
               marginTop: 20,
               color: 'var(--danger)',
               fontSize: '0.85rem',

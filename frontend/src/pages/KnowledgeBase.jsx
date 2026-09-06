@@ -313,7 +313,7 @@ export default function KnowledgeBase() {
             maxHeight: '85vh', display: 'flex', flexDirection: 'column',
           }} onClick={e => e.stopPropagation()}>
             <div style={{
-              padding: '16px 24px', borderBottom: '1px solid #e5e7eb',
+              padding: '16px 24px', borderBottom: '1px solid var(--border)',
               display: 'flex', justifyContent: 'space-between', alignItems: 'center',
             }}>
               <div>
@@ -333,7 +333,7 @@ export default function KnowledgeBase() {
                 <pre style={{
                   whiteSpace: 'pre-wrap', wordBreak: 'break-word',
                   fontFamily: 'inherit', fontSize: '0.9rem', lineHeight: 1.7,
-                  color: '#1f2937', margin: 0,
+                  color: 'var(--text)', margin: 0,
                 }}>
                   {viewingContent?.content || '(empty)'}
                 </pre>

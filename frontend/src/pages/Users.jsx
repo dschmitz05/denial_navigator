@@ -220,7 +220,7 @@ export default function Users() {
       borderRadius: 4,
       fontSize: '0.75rem',
       fontWeight: 600,
-      color: '#fff',
+      color: '#fff',   // always white: these pills use a saturated fill in both themes
       background: colors[role] || '#6b7280',
     }
   }
@@ -257,7 +257,7 @@ export default function Users() {
               background: 'var(--gray-50)',
               borderRadius: 8,
               marginBottom: 24,
-              border: '1px solid #e5e7eb',
+              border: '1px solid var(--border)',
             }}>
               <h4 style={{ marginTop: 0, fontSize: '0.95rem', marginBottom: 16 }}>New User</h4>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>

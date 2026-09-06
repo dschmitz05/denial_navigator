@@ -129,7 +129,7 @@ export default function Audit() {
               </div>
               <div className="stat-card">
                 <div className="stat-label">Last 24h</div>
-                <div className="stat-value" style={{ fontSize: '1.4rem', color: '#3b82f6' }}>{stats.recent_24h}</div>
+                <div className="stat-value" style={{ fontSize: '1.4rem', color: 'var(--primary)' }}>{stats.recent_24h}</div>
               </div>
             </div>
           )}
