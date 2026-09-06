@@ -4,7 +4,7 @@ import json
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from api_gateway.services.db import get_connection
@@ -91,7 +91,9 @@ async def list_users(
     """List all users (admin only)"""
     async with get_connection() as conn:
         query = """
-            SELECT id, username, email, full_name, role, is_active, created_at, last_login
+            SELECT id, username, email, full_name, role, is_active, created_at, last_login,
+                   totp_required,
+                   (totp_confirmed_at IS NOT NULL) AS totp_enrolled
             FROM users
         """
         params = []
@@ -398,3 +400,115 @@ async def delete_user(
         )
 
         return {"status": "deactivated", "queue_items_released": released}
+
+
+# ── Two-factor administration ──
+#
+# An administrator decides WHETHER an account uses 2FA and can reset it when a
+# device is lost. They never see or set the secret: enrolment happens between
+# the user and their authenticator, so an admin cannot generate codes for
+# someone else's account.
+
+class TotpPolicy(BaseModel):
+    required: bool
+
+
+@router.post("/users/{user_id}/totp", response_model=dict)
+async def set_totp_policy(
+    user_id: str,
+    body: TotpPolicy,
+    http_request: Request,
+    current_user = Depends(require_admin),
+):
+    """Require or stop requiring two-factor authentication for an account."""
+    async with get_connection() as conn:
+        user = await conn.fetchrow(
+            "SELECT id, username, totp_required, totp_confirmed_at FROM users WHERE id = $1",
+            user_id,
+        )
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        if body.required:
+            # Turning it on does not clear an existing enrolment: an admin
+            # toggling the policy should not silently invalidate a working
+            # authenticator the user still holds.
+            await conn.execute(
+                "UPDATE users SET totp_required = TRUE, updated_at = NOW() WHERE id = $1",
+                user_id,
+            )
+            outcome = "enrolled" if user["totp_confirmed_at"] else "enrollment_pending"
+        else:
+            # Turning it off discards the secret. Leaving it behind would mean
+            # re-enabling 2FA later silently re-activates a device that may be
+            # long gone, and keeps a password-equivalent secret for no reason.
+            await conn.execute(
+                """UPDATE users
+                      SET totp_required = FALSE, totp_secret = NULL,
+                          totp_confirmed_at = NULL, totp_last_used_step = NULL,
+                          updated_at = NOW()
+                    WHERE id = $1""",
+                user_id,
+            )
+            outcome = "disabled"
+
+        await conn.execute(
+            """INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
+               VALUES ($1, $2, $3, $4, $5)""",
+            current_user["sub"],
+            "totp_required" if body.required else "totp_disabled",
+            "user", user_id,
+            json.dumps({"username": user["username"], "outcome": outcome}),
+        )
+
+    return {
+        "status": outcome,
+        "username": user["username"],
+        "totp_required": body.required,
+    }
+
+
+@router.post("/users/{user_id}/totp/reset", response_model=dict)
+async def reset_totp(
+    user_id: str,
+    http_request: Request,
+    current_user = Depends(require_admin),
+):
+    """Clear an account's authenticator so it can be set up on a new device.
+
+    This is the answer to a lost or replaced phone. It keeps the requirement in
+    place, so the account cannot sign in until it has enrolled again - resetting
+    is not a way to switch 2FA off by the back door.
+
+    Every session is also ended: if the device is lost rather than replaced,
+    leaving existing sessions running would be the obvious gap.
+    """
+    async with get_connection() as conn:
+        user = await conn.fetchrow(
+            "SELECT id, username, totp_required FROM users WHERE id = $1", user_id
+        )
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        await conn.execute(
+            """UPDATE users
+                  SET totp_secret = NULL, totp_confirmed_at = NULL,
+                      totp_last_used_step = NULL,
+                      sessions_valid_from = date_trunc('second', NOW()),
+                      updated_at = NOW()
+                WHERE id = $1""",
+            user_id,
+        )
+        await conn.execute(
+            """INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
+               VALUES ($1, $2, $3, $4, $5)""",
+            current_user["sub"], "totp_reset", "user", user_id,
+            json.dumps({"username": user["username"], "still_required": user["totp_required"]}),
+        )
+
+    return {
+        "status": "reset",
+        "username": user["username"],
+        "totp_required": user["totp_required"],
+        "note": "The user will be asked to set up an authenticator at their next sign-in.",
+    }

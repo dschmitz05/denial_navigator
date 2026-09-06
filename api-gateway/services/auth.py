@@ -20,6 +20,29 @@ def verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
 
 
+# A token issued after the password step but before the second factor. It can
+# only reach the enrolment and code-entry endpoints - see MFA_ONLY_PATHS in
+# services/access.py - and is short-lived, because it is a partially
+# authenticated credential and should not be usable as a parking spot.
+MFA_SCOPE = "mfa"
+MFA_TOKEN_MINUTES = 10
+
+
+def create_mfa_token(user_id: str, username: str) -> str:
+    now = datetime.now(timezone.utc)
+    return jwt.encode(
+        {
+            "sub": user_id,
+            "username": username,
+            "scope": MFA_SCOPE,
+            "iat": now,
+            "exp": now + timedelta(minutes=MFA_TOKEN_MINUTES),
+        },
+        JWT_SECRET,
+        algorithm=JWT_ALGORITHM,
+    )
+
+
 def create_token(user_id: str, username: str, role: str) -> str:
     now = datetime.now(timezone.utc)
     payload = {

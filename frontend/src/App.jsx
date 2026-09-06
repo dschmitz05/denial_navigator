@@ -48,12 +48,16 @@ function LoginScreen() {
   const { login } = useAuth()
   const navigate = useNavigate()
 
+  // Returns whatever the account still needs, so the Login component can show
+  // the code entry or the enrolment step. Only a completed sign-in navigates.
   const handleLogin = async (username, password) => {
-    await login(username, password)
+    const result = await login(username, password)
+    if (result.mfa) return result
     navigate('/')
+    return result
   }
 
-  return <Login onLogin={handleLogin} />
+  return <Login onLogin={handleLogin} onComplete={() => navigate('/')} />
 }
 
 function AppContent() {

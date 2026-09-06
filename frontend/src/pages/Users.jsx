@@ -132,6 +132,50 @@ export default function Users() {
     }
   }
 
+  const handleTotpPolicy = async (u, required) => {
+    if (!required && !confirm(
+      `Turn off two-factor authentication for ${u.username}?\n\n` +
+      'Their authenticator is discarded. If you turn it back on later they will ' +
+      'set up a new one.'
+    )) return
+    try {
+      const resp = await fetch(`${API_BASE}/users/${u.id}/totp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('auth_token')}` },
+        body: JSON.stringify({ required }),
+      })
+      const data = await resp.json()
+      if (!resp.ok) throw new Error(data.detail || 'Update failed')
+      setMsg({
+        type: 'success',
+        text: required
+          ? `${u.username} must now use an authenticator` +
+            (data.status === 'enrollment_pending' ? ' — they will set one up at their next sign-in' : '')
+          : `Two-factor authentication turned off for ${u.username}`,
+      })
+      loadUsers()
+    } catch (err) { setMsg({ type: 'error', text: err.message }) }
+  }
+
+  const handleTotpReset = async (u) => {
+    if (!confirm(
+      `Reset ${u.username}'s authenticator?\n\n` +
+      'Use this when they have lost or replaced their device. They will set up a ' +
+      'new one at their next sign-in, two-factor stays required, and any session ' +
+      'they currently have open is ended.'
+    )) return
+    try {
+      const resp = await fetch(`${API_BASE}/users/${u.id}/totp/reset`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${localStorage.getItem('auth_token')}` },
+      })
+      const data = await resp.json()
+      if (!resp.ok) throw new Error(data.detail || 'Reset failed')
+      setMsg({ type: 'success', text: `${u.username} will set up a new authenticator at their next sign-in` })
+      loadUsers()
+    } catch (err) { setMsg({ type: 'error', text: err.message }) }
+  }
+
   const handlePurge = async () => {
     if (!purgeTarget || purgeTyped !== purgeTarget.username) return
     setPurging(true)
@@ -276,6 +320,7 @@ export default function Users() {
                   <th>Full Name</th>
                   <th>Role</th>
                   <th>Status</th>
+                  <th>2FA</th>
                   <th>Last Login</th>
                   <th>Actions</th>
                 </tr>
@@ -292,12 +337,25 @@ export default function Users() {
                         {u.is_active ? 'Active' : 'Inactive'}
                       </span>
                     </td>
+                    <td style={{ whiteSpace: 'nowrap' }}>
+                      {/* Three distinct states, because they need different
+                          actions: off, required but not yet set up, and in use. */}
+                      {!u.totp_required ? (
+                        <span style={{ color: 'var(--gray-400)', fontSize: '0.85rem' }}>Off</span>
+                      ) : u.totp_enrolled ? (
+                        <span className="badge badge-success">Enrolled</span>
+                      ) : (
+                        <span className="badge badge-queued" title="Will set up an authenticator at next sign-in">
+                          Pending setup
+                        </span>
+                      )}
+                    </td>
                     <td style={{ fontSize: '0.85rem', color: 'var(--gray-500)' }}>
                       {u.last_login ? new Date(u.last_login).toLocaleDateString() : 'Never'}
                     </td>
                     <td style={{ whiteSpace: 'nowrap' }}>
                       {u.id !== user?.id ? (
-                        <div style={{ display: 'flex', gap: 6 }}>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                           <button className="btn btn-sm"
                                   title="Set a new password for this user"
                                   onClick={() => setResetForm({ ...resetForm, userId: u.id })}>
@@ -315,6 +373,28 @@ export default function Users() {
                                   onClick={() => handleToggleActive(u.id)}>
                             {u.is_active ? 'Deactivate' : 'Reactivate'}
                           </button>
+                          {u.totp_required ? (
+                            <>
+                              {u.totp_enrolled && (
+                                <button className="btn btn-sm"
+                                        title="Their device was lost or replaced — let them set up a new authenticator"
+                                        onClick={() => handleTotpReset(u)}>
+                                  Reset 2FA
+                                </button>
+                              )}
+                              <button className="btn btn-sm"
+                                      title="Stop requiring a second factor for this account"
+                                      onClick={() => handleTotpPolicy(u, false)}>
+                                Disable 2FA
+                              </button>
+                            </>
+                          ) : (
+                            <button className="btn btn-sm"
+                                    title="Require an authenticator app for this account"
+                                    onClick={() => handleTotpPolicy(u, true)}>
+                              Require 2FA
+                            </button>
+                          )}
                           <button className="btn btn-sm"
                                   style={{ color: 'var(--danger)' }}
                                   title="Erase the account permanently. Deactivate instead unless the account should never have existed."

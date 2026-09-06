@@ -8,7 +8,10 @@ from fastapi import APIRouter, HTTPException, Request, Depends, Header, Query
 from pydantic import BaseModel
 
 from api_gateway.services.db import get_connection
-from api_gateway.services.auth import hash_password, verify_password, create_token, decode_token
+from api_gateway.services.auth import (
+    hash_password, verify_password, create_token, create_mfa_token, decode_token,
+)
+from api_gateway.services import totp as totp_service
 from api_gateway.services.audit import _client_ip, record as audit_record
 
 logger = logging.getLogger("api_gateway.auth")
@@ -189,6 +192,27 @@ async def login(http_request: Request, credentials: LoginRequest):
             user["id"],
         )
 
+        # Password accepted. If this account carries a second factor, the
+        # session is not issued yet: what comes back only unlocks the endpoints
+        # that complete it.
+        if user["totp_required"]:
+            stage = "totp_required" if user["totp_confirmed_at"] else "enrollment_required"
+            await audit_record(
+                action="login_password_ok",
+                resource_type="user",
+                resource_id=str(user["id"]),
+                user_id=str(user["id"]),
+                details={"username": user["username"], "awaiting": stage},
+                ip_address=ip,
+                user_agent=user_agent,
+            )
+            return {
+                "status": stage,
+                "mfa_token": create_mfa_token(str(user["id"]), user["username"]),
+                "token_type": "mfa",
+                "username": user["username"],
+            }
+
         token = create_token(str(user["id"]), user["username"], user["role"])
 
     await audit_record(
@@ -343,3 +367,132 @@ async def change_password(
         "access_token": create_token(str(user["id"]), user["username"], current_user["role"]),
         "token_type": "bearer",
     }
+
+
+# ── Two-factor authentication ──
+#
+# Enrolment happens between the user and their authenticator. An administrator
+# can require 2FA and can reset it, but never sees the secret - so an admin
+# cannot mint codes for someone else's account, and there is no place for the
+# secret to leak from besides the user's own device.
+
+class TotpCode(BaseModel):
+    code: str
+
+
+async def _mfa_user(http_request: Request):
+    """The account behind a half-authenticated token, or 401."""
+    who = getattr(http_request.state, "principal", None)
+    if who is None or who.kind != "user" or who.scope != "mfa":
+        raise HTTPException(status_code=401, detail="A sign-in in progress is required")
+    async with get_connection() as conn:
+        user = await conn.fetchrow(
+            """SELECT id, username, role, totp_required, totp_secret,
+                      totp_confirmed_at, totp_last_used_step
+                 FROM users WHERE id = $1 AND is_active = TRUE""",
+            who.user_id,
+        )
+    if not user:
+        raise HTTPException(status_code=401, detail="Account is not available")
+    return user
+
+
+@router.post("/auth/totp/enroll", response_model=dict)
+async def totp_enroll(http_request: Request):
+    """Issue a secret for an account that must enrol.
+
+    Called with the token from the password step. Returns a QR code rendered
+    locally, so the secret never reaches a third-party script and the screen
+    works with no internet.
+    """
+    user = await _mfa_user(http_request)
+
+    if user["totp_confirmed_at"]:
+        # Already enrolled: re-issuing here would let anyone holding the
+        # password silently replace the second factor. Only an administrator
+        # can reset a lost device.
+        raise HTTPException(
+            status_code=409,
+            detail="This account is already enrolled. Ask an administrator to reset it.",
+        )
+
+    secret = totp_service.new_secret()
+    async with get_connection() as conn:
+        await conn.execute(
+            "UPDATE users SET totp_secret = $1, totp_last_used_step = NULL WHERE id = $2",
+            totp_service.encrypt_secret(secret), user["id"],
+        )
+
+    uri = totp_service.provisioning_uri(secret, user["username"])
+    return {
+        "secret": secret,          # shown once, so a device without a camera can type it
+        "otpauth_uri": uri,
+        "qr_svg": totp_service.qr_svg(uri),
+        "issuer": totp_service.ISSUER,
+    }
+
+
+async def _complete_totp(http_request: Request, body: TotpCode, confirming: bool) -> dict:
+    """Shared by enrolment confirmation and ordinary sign-in."""
+    user = await _mfa_user(http_request)
+    ip = _client_ip(http_request)
+    user_agent = http_request.headers.get("user-agent")
+
+    if not user["totp_secret"]:
+        raise HTTPException(status_code=409, detail="No authenticator is set up for this account")
+
+    secret = totp_service.decrypt_secret(user["totp_secret"])
+    if secret is None:
+        # The encryption key changed. Fail closed and make them re-enrol.
+        raise HTTPException(
+            status_code=409,
+            detail="The stored authenticator could not be read. Ask an administrator to reset it.",
+        )
+
+    accepted, step = totp_service.verify(secret, body.code, user["totp_last_used_step"])
+    if not accepted:
+        await audit_record(
+            action="totp_failed",
+            resource_type="user",
+            resource_id=str(user["id"]),
+            user_id=str(user["id"]),
+            details={"username": user["username"], "stage": "enrollment" if confirming else "login"},
+            ip_address=ip, user_agent=user_agent,
+        )
+        raise HTTPException(status_code=401, detail="That code is not valid")
+
+    async with get_connection() as conn:
+        await conn.execute(
+            """UPDATE users
+                  SET totp_last_used_step = $1,
+                      totp_confirmed_at = COALESCE(totp_confirmed_at, NOW()),
+                      last_login = NOW()
+                WHERE id = $2""",
+            step, user["id"],
+        )
+
+    await audit_record(
+        action="totp_enrolled" if confirming else "login",
+        resource_type="user",
+        resource_id=str(user["id"]),
+        user_id=str(user["id"]),
+        details={"username": user["username"], "role": user["role"], "second_factor": "totp"},
+        ip_address=ip, user_agent=user_agent,
+    )
+    return {
+        "access_token": create_token(str(user["id"]), user["username"], user["role"]),
+        "token_type": "bearer",
+        "user": {"id": str(user["id"]), "username": user["username"], "role": user["role"]},
+    }
+
+
+@router.post("/auth/totp/confirm", response_model=dict)
+async def totp_confirm(body: TotpCode, http_request: Request):
+    """Prove the authenticator was set up, and finish signing in."""
+    return await _complete_totp(http_request, body, confirming=True)
+
+
+@router.post("/auth/login/totp", response_model=dict)
+async def login_totp(body: TotpCode, http_request: Request):
+    """Second step of an ordinary sign-in."""
+    return await _complete_totp(http_request, body, confirming=False)

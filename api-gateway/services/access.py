@@ -33,6 +33,16 @@ SERVICE_API_KEY = os.environ.get("SERVICE_API_KEY", "")
 
 # Reachable without credentials. Everything here is either infrastructure or
 # the door itself - the login endpoint cannot require a login.
+# The only things a token issued between the password and the second factor
+# may touch. Without this, passing the password would be enough to reach the
+# API and 2FA would be decorative.
+MFA_ONLY_PATHS = {
+    "/api/v1/auth/totp/enroll",
+    "/api/v1/auth/totp/confirm",
+    "/api/v1/auth/login/totp",
+    "/api/v1/auth/me",
+}
+
 PUBLIC_EXACT = {
     "/", "/health", "/docs", "/redoc", "/openapi.json", "/favicon.ico",
     "/api/v1/auth/login",
@@ -42,16 +52,17 @@ PUBLIC_EXACT = {
 class Principal:
     """Who is making this request."""
 
-    __slots__ = ("kind", "user_id", "username", "role", "reason", "issued_at")
+    __slots__ = ("kind", "user_id", "username", "role", "reason", "issued_at", "scope")
 
     def __init__(self, kind: str, user_id=None, username=None, role=None,
-                 reason=None, issued_at=None):
+                 reason=None, issued_at=None, scope=None):
         self.kind = kind            # 'user' | 'service' | 'anonymous'
         self.user_id = user_id      # UUID string, users only
         self.username = username
         self.role = role            # RBAC role, users only
         self.reason = reason        # why authentication failed, if it did
         self.issued_at = issued_at  # JWT iat, epoch seconds
+        self.scope = scope          # 'mfa' for a half-authenticated token
 
     @property
     def authenticated(self) -> bool:
@@ -92,6 +103,7 @@ def principal(request) -> Principal:
         username=payload.get("username"),
         role=payload.get("role"),
         issued_at=payload.get("iat"),
+        scope=payload.get("scope"),
     )
 
 
@@ -162,6 +174,10 @@ PERMISSIONS = {
 PATH_PERMISSIONS = {
     ("GET", "/api/v1/users/assignable"): MANAGER_UP,
     ("POST", "/api/v1/appeals/{id}/assign"): MANAGER_UP,
+    # Deciding whether an account needs 2FA, and resetting a lost device, are
+    # administrator actions - never the user's own.
+    ("POST", "/api/v1/users/{id}/totp"): ADMIN_ONLY,
+    ("POST", "/api/v1/users/{id}/totp/reset"): ADMIN_ONLY,
 }
 
 WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -197,6 +213,12 @@ def authorize(who: "Principal", method: str, path: str) -> tuple[bool, str]:
     # Sibling services are not people and hold no role. They are already
     # restricted by holding the shared key, which never leaves the network.
     if who.kind == "service":
+        return True, ""
+
+    # A half-authenticated token carries no role - the session it will become
+    # has not been issued yet. It is already confined to MFA_ONLY_PATHS by the
+    # middleware, so there is nothing further for the role rules to decide.
+    if who.scope == "mfa":
         return True, ""
 
     specific = PATH_PERMISSIONS.get((method, _normalise(path)))
@@ -285,6 +307,16 @@ class AccessControlMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         who = principal(request)
+
+        # A token that has only cleared the password step is confined to the
+        # endpoints that complete the second factor.
+        if who.kind == "user" and who.scope == "mfa" and path not in MFA_ONLY_PATHS:
+            logger.warning(f"401 {request.method} {path} reason=mfa_incomplete user={who.username}")
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Two-factor authentication has not been completed"},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
         # A valid signature is not enough; the account behind it must still be
         # entitled to it. Services hold no account, so they skip this.

@@ -299,7 +299,14 @@ CREATE TABLE users (
     last_login TIMESTAMPTZ,
     -- Tokens issued before this moment are refused. Bumped on password change
     -- so a credential reset actually ends the sessions using the old one.
-    sessions_valid_from TIMESTAMPTZ NOT NULL DEFAULT date_trunc('second', NOW())
+    sessions_valid_from TIMESTAMPTZ NOT NULL DEFAULT date_trunc('second', NOW()),
+    -- Two-factor authentication. An administrator sets totp_required; the user
+    -- enrols by scanning the secret and proving they hold the device, which
+    -- sets totp_confirmed_at. Clearing the secret re-enrols a lost device.
+    totp_required BOOLEAN NOT NULL DEFAULT FALSE,
+    totp_secret TEXT,
+    totp_confirmed_at TIMESTAMPTZ,
+    totp_last_used_step BIGINT
 );
 
 CREATE INDEX idx_users_role ON users(role);

@@ -37,6 +37,19 @@ export function AuthProvider({ children }) {
     }
   }, [])
 
+  const acceptSession = (data) => {
+    setUser(data.user)
+    setToken(data.access_token)
+    localStorage.setItem('auth_token', data.access_token)
+    return data.user
+  }
+
+  /**
+   * Step one. Returns either a session, or what the account still needs.
+   *
+   * The mfa_token it hands back is NOT a session: the API confines it to the
+   * second-factor endpoints, so holding it grants nothing on its own.
+   */
   const login = async (username, password) => {
     const resp = await fetch(`${API_BASE}/auth/login`, {
       method: 'POST',
@@ -45,10 +58,35 @@ export function AuthProvider({ children }) {
     })
     const data = await resp.json()
     if (!resp.ok) throw new Error(data.detail || 'Login failed')
-    setUser(data.user)
-    setToken(data.access_token)
-    localStorage.setItem('auth_token', data.access_token)
-    return data.user
+
+    if (data.status === 'totp_required' || data.status === 'enrollment_required') {
+      return { mfa: data.status, mfaToken: data.mfa_token, username: data.username }
+    }
+    return { user: acceptSession(data) }
+  }
+
+  /** Step two: the six-digit code, or the code that confirms a new device. */
+  const completeTotp = async (mfaToken, code, { enrolling = false } = {}) => {
+    const path = enrolling ? '/auth/totp/confirm' : '/auth/login/totp'
+    const resp = await fetch(`${API_BASE}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${mfaToken}` },
+      body: JSON.stringify({ code }),
+    })
+    const data = await resp.json()
+    if (!resp.ok) throw new Error(data.detail || 'That code is not valid')
+    return acceptSession(data)
+  }
+
+  /** Fetch the secret and QR for an account that has to enrol. */
+  const startEnrollment = async (mfaToken) => {
+    const resp = await fetch(`${API_BASE}/auth/totp/enroll`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${mfaToken}` },
+    })
+    const data = await resp.json()
+    if (!resp.ok) throw new Error(data.detail || 'Could not start enrolment')
+    return data
   }
 
   const logout = () => {
@@ -73,7 +111,7 @@ export function AuthProvider({ children }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout, hasRole, can }}>
+    <AuthContext.Provider value={{ user, loading, login, completeTotp, startEnrollment, logout, hasRole, can }}>
       {children}
     </AuthContext.Provider>
   )

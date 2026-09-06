@@ -1,23 +1,59 @@
 import React, { useState } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 
-export default function Login({ onLogin }) {
+export default function Login({ onLogin, onComplete }) {
+  const { completeTotp, startEnrollment } = useAuth()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+
+  // 'password' -> 'code', or -> 'enroll' -> 'code' the first time.
+  const [stage, setStage] = useState('password')
+  const [mfaToken, setMfaToken] = useState(null)
+  const [code, setCode] = useState('')
+  const [enrollment, setEnrollment] = useState(null)
 
   const handleSubmit = async (e) => {
     e.preventDefault()
     setError('')
     setLoading(true)
     try {
-      await onLogin(username, password)
+      const result = await onLogin(username, password)
+      if (result?.mfa) {
+        setMfaToken(result.mfaToken)
+        if (result.mfa === 'enrollment_required') {
+          setEnrollment(await startEnrollment(result.mfaToken))
+          setStage('enroll')
+        } else {
+          setStage('code')
+        }
+      }
     } catch (err) {
       setError(err.message || 'Invalid credentials')
     } finally {
       setLoading(false)
     }
+  }
+
+  const handleCode = async (e) => {
+    e.preventDefault()
+    setError('')
+    setLoading(true)
+    try {
+      await completeTotp(mfaToken, code, { enrolling: stage === 'enroll' })
+      onComplete?.()
+    } catch (err) {
+      setError(err.message || 'That code is not valid')
+      setCode('')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const restart = () => {
+    setStage('password'); setMfaToken(null); setCode(''); setEnrollment(null)
+    setError(''); setPassword('')
   }
 
   return (
@@ -37,6 +73,75 @@ export default function Login({ onLogin }) {
           <h1 style={{ fontSize: '1.8rem', marginBottom: 8 }}>🧭 Denial Navigator</h1>
           <p style={{ color: 'var(--gray-500)', marginBottom: 32 }}>Healthcare Denial Management</p>
 
+          {stage !== 'password' ? (
+            <form onSubmit={handleCode}>
+              {error && (
+                <div style={{
+                  background: 'var(--danger-light)', color: 'var(--danger-text)',
+                  border: '1px solid var(--danger)', borderRadius: 8,
+                  padding: 10, marginBottom: 20, fontSize: '0.9rem',
+                }}>{error}</div>
+              )}
+
+              {stage === 'enroll' && enrollment && (
+                <div style={{ marginBottom: 20, textAlign: 'left' }}>
+                  <h3 style={{ fontSize: '1.05rem', marginBottom: 6 }}>Set up two-factor authentication</h3>
+                  <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: 12 }}>
+                    Your administrator requires a second factor on this account. Scan this
+                    with an authenticator app, then enter the six-digit code it shows.
+                  </p>
+                  {/* Rendered by the server as inline SVG, so this works with
+                      no internet and the secret never reaches a third party. */}
+                  <div style={{ background: '#fff', padding: 12, borderRadius: 8, display: 'flex', justifyContent: 'center' }}
+                       dangerouslySetInnerHTML={{ __html: enrollment.qr_svg }} />
+                  <details style={{ marginTop: 10 }}>
+                    <summary style={{ cursor: 'pointer', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                      Can't scan it?
+                    </summary>
+                    <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: 6 }}>
+                      Enter this key manually:
+                    </p>
+                    <code style={{
+                      display: 'block', wordBreak: 'break-all', padding: 8,
+                      background: 'var(--surface-alt)', borderRadius: 6, fontSize: '0.85rem',
+                    }}>{enrollment.secret}</code>
+                    <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: 6 }}>
+                      Shown once. If you lose the device, an administrator can reset it.
+                    </p>
+                  </details>
+                </div>
+              )}
+
+              {stage === 'code' && (
+                <p style={{ color: 'var(--text-muted)', marginBottom: 16 }}>
+                  Enter the six-digit code from your authenticator app.
+                </p>
+              )}
+
+              <div className="form-group" style={{ textAlign: 'left' }}>
+                <label className="form-label">Authentication code</label>
+                <input
+                  className="form-input"
+                  value={code}
+                  onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  placeholder="000000"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  autoFocus
+                  style={{ letterSpacing: '0.3em', fontSize: '1.2rem', textAlign: 'center' }}
+                />
+              </div>
+
+              <button type="submit" className="btn btn-primary"
+                      disabled={loading || code.length !== 6}
+                      style={{ width: '100%', marginBottom: 10 }}>
+                {loading ? 'Checking…' : stage === 'enroll' ? 'Confirm and sign in' : 'Sign in'}
+              </button>
+              <button type="button" className="btn" onClick={restart} style={{ width: '100%' }}>
+                Back
+              </button>
+            </form>
+          ) : (
           <form onSubmit={handleSubmit}>
             {error && (
               <div className="card" style={{
@@ -86,6 +191,7 @@ export default function Login({ onLogin }) {
               {loading ? 'Signing in...' : 'Sign In'}
             </button>
           </form>
+          )}
 
           <p style={{ marginTop: 24, fontSize: '0.8rem', color: 'var(--gray-500)' }}>
             Default: admin / admin123

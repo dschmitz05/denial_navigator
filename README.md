@@ -128,6 +128,12 @@ Enforced today:
   be missed.
 - **bcrypt password hashes** (cost 12, unique per-password salt); self-service
   change requires the current password.
+- **Optional TOTP two-factor**, per account, controlled by an administrator.
+  Secrets are encrypted at rest, codes are single-use, and an admin can reset a
+  lost device without ever seeing the secret.
+- **Sessions are revocable.** Deactivating an account, resetting its password or
+  deleting it ends its existing sessions immediately, rather than leaving them
+  valid for the rest of the token's life.
 - **TLS by default.** The application is served over HTTPS on first start, with
   HTTP redirecting to it. See below.
 - **Only the web listener is published.** PostgreSQL and the internal services
