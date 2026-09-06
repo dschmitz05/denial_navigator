@@ -362,9 +362,15 @@ async def ingest_file(request: Request, file: UploadFile = File(...)):
                 INSERT INTO denials
                     (claim_id, service_line_number, cpt_code, hcpcs_code, modfier_1, modifier_2,
                      charge_amount, payment_amount, adjustment_amount, cagc, carc_code, rarc_code,
-                     adjustment_reason, denial_date, status)
+                     adjustment_reason, denial_date, status, appeal_deadline)
                 VALUES ((SELECT id FROM claims WHERE claim_number = $1), $2, $3, $4, $5, $6,
-                        $7, $8, $9, $10, $11, $12, $13, $14, 'open')
+                        $7, $8, $9, $10, $11, $12, $13, $14, 'open',
+                        -- The filing clock starts at the remittance date and runs
+                        -- for the payer's window; see migration 006. Computed in
+                        -- SQL so ingestion, backfill and recompute cannot disagree.
+                        appeal_deadline_for(
+                            (SELECT payer_name FROM claims WHERE claim_number = $1),
+                            COALESCE($14, CURRENT_DATE)))
                 """,
                 denial_data["claim_id"],
                 denial_data["service_line_number"],
@@ -480,9 +486,15 @@ async def store_parsed_data(payload: StoreIngestion):
                 INSERT INTO denials
                     (claim_id, service_line_number, cpt_code, hcpcs_code, modfier_1, modifier_2,
                      charge_amount, payment_amount, adjustment_amount, cagc, carc_code, rarc_code,
-                     adjustment_reason, denial_date, status)
+                     adjustment_reason, denial_date, status, appeal_deadline)
                 VALUES ((SELECT id FROM claims WHERE claim_number = $1), $2, $3, $4, $5, $6,
-                        $7, $8, $9, $10, $11, $12, $13, $14, 'open')
+                        $7, $8, $9, $10, $11, $12, $13, $14, 'open',
+                        -- The filing clock starts at the remittance date and runs
+                        -- for the payer's window; see migration 006. Computed in
+                        -- SQL so ingestion, backfill and recompute cannot disagree.
+                        appeal_deadline_for(
+                            (SELECT payer_name FROM claims WHERE claim_number = $1),
+                            COALESCE($14, CURRENT_DATE)))
                 """,
                 denial_data["claim_id"],
                 denial_data["service_line_number"],

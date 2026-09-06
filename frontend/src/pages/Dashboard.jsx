@@ -115,6 +115,9 @@ export default function Dashboard() {
       <div className="card" style={{ marginBottom: 24 }}>
         <div className="card-header">
           <h3>⚠️ Priority Denials — Appeal Deadlines</h3>
+          <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+            Open denials whose filing deadline falls within 14 days, soonest first
+          </span>
         </div>
         <div className="table-container">
           <table>
@@ -131,16 +134,34 @@ export default function Dashboard() {
             </thead>
             <tbody>
               {priorityDenials.length === 0 ? (
-                <tr><td colSpan="7" style={{ textAlign: 'center', padding: 20 }}>No urgent denials</td></tr>
+                <tr><td colSpan="7" style={{ textAlign: 'center', padding: 20, color: 'var(--text-muted)' }}>
+                  Nothing due in the next 14 days.
+                  {' '}Deadlines come from each payer's filing window — set them under Settings.
+                </td></tr>
               ) : (
                 priorityDenials.map((d, i) => (
-                  <tr key={i}>
+                  <tr key={i} style={d.deadline_passed ? { background: 'var(--danger-light)' } : undefined}>
                     <td>{d.claim_number}</td>
                     <td>{d.patient_name || '—'}</td>
                     <td>{d.payer_name}</td>
                     <td>{d.cpt_code || '—'}</td>
                     <td>{formatCurrency(d.charge_amount)}</td>
-                    <td>{formatDate(d.appeal_deadline)}</td>
+                    <td style={{ whiteSpace: 'nowrap' }}>
+                      {formatDate(d.appeal_deadline)}
+                      {d.days_until_deadline !== null && d.days_until_deadline !== undefined && (
+                        <div style={{
+                          fontSize: '0.75rem', fontWeight: 600,
+                          color: d.deadline_passed ? 'var(--danger)'
+                               : d.days_until_deadline <= 3 ? 'var(--danger)'
+                               : 'var(--warning-text)',
+                        }}>
+                          {d.deadline_passed
+                            ? `${Math.abs(d.days_until_deadline)} days overdue`
+                            : d.days_until_deadline === 0 ? 'due today'
+                            : `${d.days_until_deadline} days left`}
+                        </div>
+                      )}
+                    </td>
                     <td>
                       <span className={`badge badge-${d.denial_category?.replace(' ', '-') || 'open'}`}>
                         {d.denial_category || 'Open'}

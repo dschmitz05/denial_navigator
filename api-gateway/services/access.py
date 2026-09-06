@@ -178,6 +178,8 @@ PATH_PERMISSIONS = {
     # administrator actions - never the user's own.
     ("POST", "/api/v1/users/{id}/totp"): ADMIN_ONLY,
     ("POST", "/api/v1/users/{id}/totp/reset"): ADMIN_ONLY,
+    # Filing windows are payer policy, curated by managers like the rest of it.
+    ("PUT", "/api/v1/denials/appeal-windows"): MANAGER_UP,
 }
 
 WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
+import { useAuth } from '../contexts/AuthContext'
 
 const API_BASE = '/api/v1'
 const REFRESH_MS = 30000
@@ -10,6 +11,12 @@ const STATUS_LOOK = {
 }
 
 export default function Settings() {
+  const { can } = useAuth()
+  const canEdit = can.manageKnowledge()      // policy curation, same as documents
+  const [windows, setWindows] = useState([])
+  const [draft, setDraft] = useState({})
+  const [savingWindow, setSavingWindow] = useState(null)
+  const [windowsError, setWindowsError] = useState(null)
   const [health, setHealth] = useState(null)
   const [checking, setChecking] = useState(true)
   const [error, setError] = useState(null)
@@ -34,6 +41,41 @@ export default function Settings() {
     const t = setInterval(check, REFRESH_MS)
     return () => clearInterval(t)
   }, [check])
+
+  const loadWindows = useCallback(async () => {
+    try {
+      const resp = await fetch(`${API_BASE}/denials/appeal-windows`)
+      if (!resp.ok) throw new Error(`Could not load filing windows (HTTP ${resp.status})`)
+      setWindows(await resp.json())
+      setWindowsError(null)
+    } catch (err) { setWindowsError(err.message) }
+  }, [])
+
+  useEffect(() => { loadWindows() }, [loadWindows])
+
+  const defaultWindow = windows.find(w => w.is_default)?.appeal_window_days
+
+  const saveWindow = async (payerName) => {
+    const value = Number(draft[payerName] ?? windows.find(w => w.payer_name === payerName)?.appeal_window_days)
+    if (!value || value < 1) { setWindowsError('Enter a number of days'); return }
+    setSavingWindow(payerName)
+    try {
+      const resp = await fetch(`${API_BASE}/denials/appeal-windows`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ payer_name: payerName, appeal_window_days: value }),
+      })
+      const data = await resp.json()
+      if (!resp.ok) throw new Error(data.detail || 'Could not save')
+      // Say how many open denials moved: editing a window silently re-dating
+      // the queue would be worse than not saying.
+      setWindowsError(null)
+      setDraft(d => { const { [payerName]: _, ...rest } = d; return rest })
+      await loadWindows()
+      alert(`Saved. ${data.denials_redated} open denial(s) re-dated.`)
+    } catch (err) { setWindowsError(err.message) }
+    setSavingWindow(null)
+  }
 
   const overall = health?.overall
   const overallLook = STATUS_LOOK[overall] || STATUS_LOOK.down
@@ -95,6 +137,60 @@ export default function Settings() {
               )
             })}
           </div>
+
+          <h4 style={{ marginTop: 24, marginBottom: 8 }}>Appeal filing windows</h4>
+          <p style={{ color: 'var(--text-muted)', marginBottom: 12, fontSize: '0.9rem' }}>
+            How long you have to contest a denial, per payer. A remittance does not
+            state this — it is the payer's own rule — so the deadlines the dashboard
+            warns about are only as good as what is set here.
+          </p>
+          {windowsError && <div className="callout callout-danger" style={{ marginBottom: 12 }}>{windowsError}</div>}
+          <div className="table-container" style={{ marginBottom: 24 }}>
+            <table>
+              <thead>
+                <tr><th>Payer</th><th>Window</th><th>Claims</th><th></th></tr>
+              </thead>
+              <tbody>
+                {windows.length === 0 ? (
+                  <tr><td colSpan="4" style={{ padding: 12, color: 'var(--text-muted)' }}>Loading…</td></tr>
+                ) : windows.map(w => (
+                  <tr key={w.payer_name}>
+                    <td>
+                      {w.is_default ? <em>All other payers (default)</em> : w.payer_name}
+                      {w.using_default && (
+                        <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}> · using the default</span>
+                      )}
+                    </td>
+                    <td style={{ whiteSpace: 'nowrap' }}>
+                      <input
+                        className="form-input"
+                        type="number" min="1" max="3650"
+                        style={{ width: 90, padding: '2px 6px' }}
+                        value={draft[w.payer_name] ?? w.appeal_window_days ?? ''}
+                        placeholder={String(defaultWindow ?? 90)}
+                        disabled={!canEdit}
+                        onChange={e => setDraft({ ...draft, [w.payer_name]: e.target.value })}
+                      /> days
+                    </td>
+                    <td style={{ color: 'var(--text-muted)' }}>{w.claims_covered ?? 0}</td>
+                    <td>
+                      {canEdit && (
+                        <button className="btn btn-sm" disabled={savingWindow === w.payer_name}
+                                onClick={() => saveWindow(w.payer_name)}>
+                          {savingWindow === w.payer_name ? 'Saving…' : 'Save'}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {!canEdit && (
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: -12, marginBottom: 24 }}>
+              Filing windows are edited by managers and above.
+            </p>
+          )}
 
           <h4 style={{ marginTop: 24, marginBottom: 16 }}>Quick Links</h4>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>

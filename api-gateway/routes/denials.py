@@ -4,7 +4,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from api_gateway.services.db import get_connection
 from api_gateway.services.claim_status import refresh_claim_status
@@ -68,7 +68,11 @@ async def list_denials(
     async with get_connection() as conn:
         query = """
             SELECT DISTINCT ON (d.id) d.*, c.claim_number, c.patient_name, c.payer_name,
-                   c.total_charge, cc.description as carc_description,
+                   c.total_charge,
+                   (d.appeal_deadline - CURRENT_DATE) AS days_until_deadline,
+                   (d.appeal_deadline IS NOT NULL
+                    AND d.appeal_deadline < CURRENT_DATE) AS deadline_passed,
+                   cc.description as carc_description,
                    rc.description as rarc_description,
                    aa.explanation, aa.denial_category, aa.needs_appeal,
                    aq.outcome_status as appeal_status
@@ -111,8 +115,21 @@ async def list_denials(
         if filters:
             query += " WHERE " + " AND ".join(filters)
 
-        query += " ORDER BY d.id, d.charge_amount DESC LIMIT $%d OFFSET $%d" % (where_count + 1, where_count + 2)
+        # DISTINCT ON must be ordered by its own expression first, so the
+        # ordering that matters is applied to the result of that, not inside
+        # it. Without this the panel headed "Appeal Deadlines" was sorted by
+        # dollar amount, which is not what urgency means.
+        query += " ORDER BY d.id"
+        outer_order = (
+            "ORDER BY sub.appeal_deadline ASC NULLS LAST, sub.charge_amount DESC"
+            if priority else
+            "ORDER BY sub.charge_amount DESC"
+        )
         params.extend([limit, offset])
+        query = (
+            f"SELECT * FROM ({query}) sub {outer_order} "
+            f"LIMIT ${where_count + 1} OFFSET ${where_count + 2}"
+        )
 
         rows = await conn.fetch(query, *params)
         return [dict(r) for r in rows]
@@ -169,6 +186,121 @@ async def carc_options(status: str = Query(None)):
             ORDER BY COUNT(*) DESC, d.carc_code
         """, *params)
         return [dict(r) for r in rows]
+
+
+# ── Payer filing windows ──
+#
+# How long you have to contest a denial is a payer's rule, not something the
+# remittance tells you, so it is configuration. Editing it is policy work, the
+# same as curating payer documents, so it sits with managers and above.
+
+class PayerWindow(BaseModel):
+    payer_name: str
+    appeal_window_days: int = Field(..., ge=1, le=3650)
+    notes: Optional[str] = None
+
+
+@router.get("/denials/appeal-windows", response_model=list[dict])
+async def list_appeal_windows():
+    """Filing windows, with how many claims each one governs."""
+    async with get_connection() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT p.id, p.payer_name, p.appeal_window_days, p.notes, p.updated_at,
+                   (SELECT COUNT(DISTINCT c.id) FROM claims c
+                     WHERE p.payer_name <> '*'
+                       AND lower(c.payer_name) = lower(p.payer_name)) AS claims_covered
+              FROM payer_appeal_policies p
+             ORDER BY (p.payer_name = '*') DESC, p.payer_name
+            """
+        )
+        # Payers that appear in the data but have no policy of their own, so an
+        # administrator can see what the default is silently covering.
+        unconfigured = await conn.fetch(
+            """
+            SELECT c.payer_name, COUNT(DISTINCT c.id) AS claims
+              FROM claims c
+             WHERE c.payer_name IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM payer_appeal_policies p
+                                WHERE lower(p.payer_name) = lower(c.payer_name))
+             GROUP BY c.payer_name ORDER BY 2 DESC
+            """
+        )
+    out = [{**dict(r), "id": str(r["id"]),
+            "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+            "is_default": r["payer_name"] == "*"} for r in rows]
+    for r in unconfigured:
+        out.append({
+            "id": None, "payer_name": r["payer_name"], "appeal_window_days": None,
+            "notes": None, "updated_at": None, "is_default": False,
+            "claims_covered": r["claims"], "using_default": True,
+        })
+    return out
+
+
+@router.put("/denials/appeal-windows", response_model=dict)
+async def set_appeal_window(body: PayerWindow):
+    """Set a payer's filing window, and re-date the denials it governs.
+
+    Recomputing matters: a window that only applied to future ingests would
+    leave today's queue sorted by a rule the administrator has just corrected.
+    Only OPEN denials move - a closed one's deadline is history.
+    """
+    name = body.payer_name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="A payer name is required")
+
+    async with get_connection() as conn:
+        await conn.execute(
+            """
+            INSERT INTO payer_appeal_policies (payer_name, appeal_window_days, notes)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (lower(payer_name)) DO UPDATE
+                SET appeal_window_days = EXCLUDED.appeal_window_days,
+                    notes = EXCLUDED.notes,
+                    updated_at = NOW()
+            """,
+            name, body.appeal_window_days, body.notes,
+        )
+
+        if name == "*":
+            # The default moved: re-date every open denial whose payer has no
+            # policy of its own.
+            updated = await conn.fetch(
+                """
+                UPDATE denials d
+                   SET appeal_deadline = appeal_deadline_for(c.payer_name, d.denial_date),
+                       updated_at = NOW()
+                  FROM claims c
+                 WHERE c.id = d.claim_id
+                   AND d.status IN ('open', 'analyzed')
+                   AND NOT EXISTS (SELECT 1 FROM payer_appeal_policies p
+                                    WHERE p.payer_name <> '*'
+                                      AND lower(p.payer_name) = lower(c.payer_name))
+                RETURNING d.id
+                """
+            )
+        else:
+            updated = await conn.fetch(
+                """
+                UPDATE denials d
+                   SET appeal_deadline = appeal_deadline_for(c.payer_name, d.denial_date),
+                       updated_at = NOW()
+                  FROM claims c
+                 WHERE c.id = d.claim_id
+                   AND d.status IN ('open', 'analyzed')
+                   AND lower(c.payer_name) = lower($1)
+                RETURNING d.id
+                """,
+                name,
+            )
+
+    return {
+        "status": "saved",
+        "payer_name": name,
+        "appeal_window_days": body.appeal_window_days,
+        "denials_redated": len(updated),
+    }
 
 
 @router.get("/denials/{denial_id}", response_model=dict)

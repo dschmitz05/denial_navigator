@@ -334,6 +334,43 @@ CREATE INDEX idx_ingestion_log_status ON ingestion_log(status);
 CREATE INDEX idx_ingestion_log_created_at ON ingestion_log(created_at);
 
 -- ============================================================
+-- 13. Payer appeal filing windows
+-- ============================================================
+-- An 835 states the payer's adjudication, not your window to contest it, so
+-- the filing deadline is configuration rather than parsed data. '*' is the
+-- default for payers without an entry.
+CREATE TABLE payer_appeal_policies (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    payer_name VARCHAR(255) NOT NULL,
+    appeal_window_days INTEGER NOT NULL CHECK (appeal_window_days BETWEEN 1 AND 3650),
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX idx_payer_appeal_policies_name
+    ON payer_appeal_policies (lower(payer_name));
+
+INSERT INTO payer_appeal_policies (payer_name, appeal_window_days, notes)
+VALUES ('*', 90, 'Default filing window for payers without a specific policy.');
+
+CREATE OR REPLACE FUNCTION appeal_deadline_for(p_payer TEXT, p_base DATE)
+RETURNS DATE
+LANGUAGE sql
+STABLE
+AS $fn$
+    SELECT COALESCE(p_base, CURRENT_DATE) + (
+        COALESCE(
+            (SELECT appeal_window_days FROM payer_appeal_policies
+              WHERE lower(payer_name) = lower(COALESCE(p_payer, '')) LIMIT 1),
+            (SELECT appeal_window_days FROM payer_appeal_policies
+              WHERE payer_name = '*' LIMIT 1),
+            90
+        ) || ' days'
+    )::INTERVAL;
+$fn$;
+
+-- ============================================================
 -- Triggers: updated_at auto-update
 -- ============================================================
 CREATE OR REPLACE FUNCTION update_updated_at_column()
@@ -357,6 +394,9 @@ CREATE TRIGGER update_appeals_queue_updated_at BEFORE UPDATE ON appeals_queue
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 CREATE TRIGGER update_knowledge_documents_updated_at BEFORE UPDATE ON knowledge_documents
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_payer_appeal_policies_updated_at BEFORE UPDATE ON payer_appeal_policies
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 -- ============================================================
