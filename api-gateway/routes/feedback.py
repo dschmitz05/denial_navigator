@@ -143,6 +143,54 @@ async def feedback_analytics():
             LIMIT 10
         """)
 
+        # Which payers the model reads well, and which it does not. A model
+        # that is right about Medicare and wrong about one commercial plan is
+        # a different problem from one that is uniformly mediocre, and the
+        # aggregate number hides the difference.
+        by_payer = await conn.fetch("""
+            SELECT
+                COALESCE(c.payer_name, 'Unknown')                        AS payer_name,
+                COUNT(*)                                                 AS feedback_count,
+                AVG(fl.rating)                                           AS avg_rating,
+                COUNT(*) FILTER (WHERE fl.was_paid_on_resubmit)          AS paid_count,
+                COUNT(*) FILTER (WHERE fl.was_paid_on_resubmit IS NOT NULL) AS outcome_known,
+                SUM(d.charge_amount) FILTER (WHERE fl.was_paid_on_resubmit) AS recovered_amount
+            FROM feedback_loop fl
+            JOIN ai_analyses aa ON aa.id = fl.ai_analysis_id
+            JOIN denials d ON d.id = aa.denial_id
+            JOIN claims c ON c.id = d.claim_id
+            GROUP BY COALESCE(c.payer_name, 'Unknown')
+            ORDER BY COUNT(*) DESC
+            LIMIT 10
+        """)
+
+        # Month by month, so "is it getting better" is answerable. A single
+        # lifetime average cannot distinguish a model that has improved from
+        # one that never worked.
+        trend = await conn.fetch("""
+            SELECT
+                date_trunc('month', fl.created_at)::date                 AS month,
+                COUNT(*)                                                 AS feedback_count,
+                AVG(fl.rating)                                           AS avg_rating,
+                COUNT(*) FILTER (WHERE fl.was_paid_on_resubmit)          AS paid_count,
+                COUNT(*) FILTER (WHERE fl.was_paid_on_resubmit IS NOT NULL) AS outcome_known
+            FROM feedback_loop fl
+            WHERE fl.created_at > NOW() - INTERVAL '12 months'
+            GROUP BY 1 ORDER BY 1
+        """)
+
+        # What the recommendations were actually worth, in money. Ratings say
+        # whether a biller liked the advice; this says whether it got paid.
+        money = await conn.fetchrow("""
+            SELECT
+                COALESCE(SUM(d.charge_amount) FILTER (WHERE fl.was_paid_on_resubmit), 0) AS recovered,
+                COALESCE(SUM(d.charge_amount) FILTER (WHERE fl.was_paid_on_resubmit IS FALSE), 0) AS not_recovered,
+                COALESCE(SUM(d.charge_amount) FILTER (WHERE fl.was_paid_on_resubmit IS NULL), 0) AS still_open
+            FROM feedback_loop fl
+            JOIN ai_analyses aa ON aa.id = fl.ai_analysis_id
+            JOIN denials d ON d.id = aa.denial_id
+        """)
+
         # How many analyses have been reviewed at all - the coverage of the
         # feedback loop itself, which is what tells you whether these rates
         # are worth anything yet.
@@ -183,6 +231,34 @@ async def feedback_analytics():
                 "outcome_known": r["outcome_known"],
                 "success_rate": _rate(r["paid_count"], r["outcome_known"]),
             }
-            for r in by_carc
-        ],
-    }
+                  for r in by_carc
+            ],
+            "by_payer": [
+                {
+                    "payer_name": r["payer_name"],
+                    "feedback_count": r["feedback_count"],
+                    "avg_rating": float(r["avg_rating"]) if r["avg_rating"] is not None else None,
+                    "paid_count": r["paid_count"],
+                    "outcome_known": r["outcome_known"],
+                    "success_rate": _rate(r["paid_count"], r["outcome_known"]),
+                    "recovered_amount": float(r["recovered_amount"] or 0),
+                }
+                for r in by_payer
+            ],
+            "trend": [
+                {
+                    "month": r["month"].isoformat(),
+                    "feedback_count": r["feedback_count"],
+                    "avg_rating": float(r["avg_rating"]) if r["avg_rating"] is not None else None,
+                    "paid_count": r["paid_count"],
+                    "outcome_known": r["outcome_known"],
+                    "success_rate": _rate(r["paid_count"], r["outcome_known"]),
+                }
+                for r in trend
+            ],
+            "money": {
+                "recovered": float(money["recovered"]),
+                "not_recovered": float(money["not_recovered"]),
+                "still_open": float(money["still_open"]),
+            },
+        }

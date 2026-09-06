@@ -174,6 +174,39 @@ Suggested cron entry:
 0 2 * * * /path/to/denial-navigator/scripts/backup.sh >> /var/log/dn-backup.log 2>&1
 ```
 
+## Deadline notifications
+
+Filing deadlines only helped whoever opened the dashboard. `scripts/send_deadline_digests.sh`
+builds them into alerts that arrive:
+
+- **Per owner** — what of *their* queue is overdue or due within
+  `DEADLINE_DIGEST_DAYS` (default 14, matching the dashboard's window so the
+  two cannot say different things).
+- **To managers** — anything overdue with nobody assigned, because an unowned
+  overdue denial has no one to chase it.
+
+Delivered in-app (a bell in the sidebar) rather than by email: an air-gapped
+deployment may have no mail path, and a notification that silently fails to
+send is worse than one waiting to be read.
+
+```
+0 7 * * 1-5 /path/to/denial-navigator/scripts/send_deadline_digests.sh >> /var/log/dn-digests.log 2>&1
+```
+
+Generation is idempotent per user per day — enforced by a unique index, not by
+assuming the script runs once — so a retry after a failure sends no duplicates.
+
+## AI Insights
+
+**AI Insights** answers whether the model is earning its place: success rate by
+payer, by recommended action and by denial reason, month over month, and the
+money actually recovered.
+
+Every rate divides by outcomes that are *known* — work still in flight is
+excluded rather than counted as failure — and the page says plainly when there
+are too few outcomes to conclude anything, rather than showing a confident
+percentage over four data points.
+
 ## Audit retention
 
 The audit log grows without limit. `AUDIT_RETENTION_DAYS` defaults to **2190

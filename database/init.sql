@@ -371,6 +371,27 @@ AS $fn$
 $fn$;
 
 -- ============================================================
+-- 14. Notifications
+-- ============================================================
+-- Deadline digests and escalations. Delivered in-app because an air-gapped
+-- deployment may have no mail path; the unique index makes generation
+-- idempotent, since the digest runs from cron against four API workers.
+CREATE TABLE notifications (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL,
+    kind VARCHAR(50) NOT NULL,
+    for_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    title VARCHAR(255) NOT NULL,
+    body TEXT,
+    payload JSONB,
+    read_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX idx_notifications_once_per_day ON notifications (user_id, kind, for_date);
+CREATE INDEX idx_notifications_unread ON notifications (user_id, created_at DESC) WHERE read_at IS NULL;
+
+-- ============================================================
 -- Triggers: updated_at auto-update
 -- ============================================================
 CREATE OR REPLACE FUNCTION update_updated_at_column()

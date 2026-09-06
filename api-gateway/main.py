@@ -59,7 +59,7 @@ app.add_middleware(
 app.add_middleware(AuditMiddleware)
 
 # ── Import routes ──
-from api_gateway.routes import claims, denials, appeals, analyses, knowledge, ingestion, feedback, auth, users, audit, system, retention
+from api_gateway.routes import claims, denials, appeals, analyses, knowledge, ingestion, feedback, auth, users, audit, system, retention, notifications
 from api_gateway.services import db
 
 # Register routers
@@ -75,6 +75,7 @@ app.include_router(users.router, prefix="/api/v1", tags=["users"])
 app.include_router(audit.router, prefix="/api/v1", tags=["audit"])
 app.include_router(system.router, prefix="/api/v1", tags=["system"])
 app.include_router(retention.router, prefix="/api/v1", tags=["retention"])
+app.include_router(notifications.router, prefix="/api/v1", tags=["notifications"])
 
 
 # ── API documentation ──

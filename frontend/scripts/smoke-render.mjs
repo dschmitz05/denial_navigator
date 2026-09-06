@@ -31,6 +31,7 @@ import Upload from '../src/pages/Upload.jsx'
 import Settings from '../src/pages/Settings.jsx'
 import Login from '../src/pages/Login.jsx'
 import Profile from '../src/pages/Profile.jsx'
+import Insights from '../src/pages/Insights.jsx'
 
 // Minimal browser surface the components touch at render time.
 globalThis.localStorage = {
@@ -43,7 +44,7 @@ globalThis.document = globalThis.document || { documentElement: { setAttribute: 
 
 const pages = {
   Dashboard, Claims, Denials, Appeals, Worklist,
-  KnowledgeBase, Audit, Users, Upload, Settings, Login, Profile,
+  KnowledgeBase, Audit, Users, Upload, Settings, Login, Profile, Insights,
 }
 
 let failures = 0

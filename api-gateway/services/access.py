@@ -164,6 +164,10 @@ PERMISSIONS = {
     # Retention policy and pruning the audit trail. Admin only, and the prune
     # itself carries further guards in the handler.
     "retention": {"read": ADMIN_ONLY, "write": ADMIN_ONLY},
+
+    # Your own notifications. Every handler scopes to the caller, so "write"
+    # here means marking your own as read - not writing anyone else's.
+    "notifications": {"read": ALL_ROLES, "write": ALL_ROLES},
 }
 
 # Exceptions that are narrower or wider than their resource's rule. Checked

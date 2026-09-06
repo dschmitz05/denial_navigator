@@ -1,6 +1,7 @@
 import React from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
+import NotificationBell from './NotificationBell'
 
 function Layout({ children, showNav = true }) {
   const location = useLocation()
@@ -23,6 +24,7 @@ function Layout({ children, showNav = true }) {
     { path: '/appeals', label: 'Appeals', icon: '⚖️' },
     { path: '/worklist', label: 'Worklist', icon: '🛠️' },
     { path: '/knowledge', label: 'Knowledge Base', icon: '📚' },
+    { path: '/insights', label: 'AI Insights', icon: '📈' },
     ...(can.viewAudit() ? [{ path: '/audit', label: 'Audit Log', icon: '🔍' }] : []),
     ...(can.manageUsers() ? [{ path: '/users', label: 'Users', icon: '👥' }] : []),
     { path: '/profile', label: 'My Profile', icon: '👤' },
@@ -54,6 +56,8 @@ function Layout({ children, showNav = true }) {
               </Link>
             ))}
           </nav>
+          <NotificationBell />
+
           <div style={{ padding: 16, borderTop: '1px solid var(--sidebar-border)' }}>
             <button className="btn" onClick={handleLogout} style={{ width: '100%', textAlign: 'center' }}>
               🚪 Sign Out

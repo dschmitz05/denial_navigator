@@ -15,6 +15,7 @@ import Upload from './pages/Upload'
 import Audit from './pages/Audit'
 import Users from './pages/Users'
 import Profile from './pages/Profile'
+import Insights from './pages/Insights'
 
 function ProtectedRoute({ children, roles }) {
   const { user, loading, hasRole } = useAuth()
@@ -95,6 +96,7 @@ function AppContent() {
       <Route path="/appeals" element={<ProtectedRoute><Appeals /></ProtectedRoute>} />
       <Route path="/worklist" element={<ProtectedRoute><Worklist /></ProtectedRoute>} />
       <Route path="/knowledge" element={<ProtectedRoute><KnowledgeBase /></ProtectedRoute>} />
+      <Route path="/insights" element={<ProtectedRoute><Insights /></ProtectedRoute>} />
       <Route path="/audit" element={<ProtectedRoute roles={MANAGER_UP}><Audit /></ProtectedRoute>} />
       <Route path="/users" element={<ProtectedRoute roles={['admin']}><Users /></ProtectedRoute>} />
       <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
