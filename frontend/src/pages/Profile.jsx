@@ -75,13 +75,19 @@ export default function Profile() {
                 <div className="detail-value">{user?.full_name || '—'}</div>
               </div>
               <div className="detail-item">
-                <div className="detail-label">Email</div>
-                <div className="detail-value">{user?.email || '—'}</div>
-              </div>
-              <div className="detail-item">
                 <div className="detail-label">Role</div>
                 <div className="detail-value">
                   <span className="badge">{user?.role?.replace(/_/g, ' ')}</span>
+                </div>
+              </div>
+              {/* Last, and across the whole grid. The columns are minmax(200px,
+                  1fr), which an address like bspecialist@denialnavigator.local
+                  overruns; the short fields have no such problem, so the email
+                  is the one that gets the full row. */}
+              <div className="detail-item" style={{ gridColumn: '1 / -1' }}>
+                <div className="detail-label">Email</div>
+                <div className="detail-value" style={{ wordBreak: 'break-word' }}>
+                  {user?.email || '—'}
                 </div>
               </div>
             </div>
