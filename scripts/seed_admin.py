@@ -172,10 +172,15 @@ async def seed():
         # Seed CARC codes
         existing_carc = await conn.fetchval("SELECT COUNT(*) FROM carc_codes")
         if not existing_carc:
-            for code, description in CARC_CODES:
+            # Each entry is (code, description, category) - the third element
+            # is the carc_codes.category column. Unpacking only two names
+            # raised ValueError on any database where these had not already
+            # been loaded by database/seed/carc_codes.sql.
+            for code, description, category in CARC_CODES:
                 await conn.execute(
-                    "INSERT INTO carc_codes (code, description) VALUES ($1, $2) ON CONFLICT (code) DO NOTHING",
-                    code, description,
+                    """INSERT INTO carc_codes (code, description, category)
+                       VALUES ($1, $2, $3) ON CONFLICT (code) DO NOTHING""",
+                    code, description, category,
                 )
             print(f"✓ Seeded {len(CARC_CODES)} CARC codes")
         else:

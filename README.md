@@ -1,137 +1,215 @@
 # Denial Navigator
 
-A self-hosted healthcare denial management system that processes EDI 835 Electronic Remittance Advice (ERA) files, analyzes claim denials using a local LLM with RAG-powered policy retrieval, and provides a human-in-the-loop UI for billing teams to resolve and appeal denied claims.
+A self-hosted healthcare denial management system. It parses EDI 835 remittance
+and 837 claim files, explains each denial with a local LLM grounded in your own
+payer policies, and gives billing teams a queue to work the result.
 
-## Architecture
+No PHI leaves the deployment. The models run on your hardware, and the
+application refuses unauthenticated requests rather than serving them.
+
+**Using it day to day?** See the [wiki](https://git.blacklionit.us/dschmitz/denial_navigator/wiki).
+This file covers running and operating it.
+
+## How it fits together
 
 ```
-[ raw 835 EDI / ERA ]
-         │
-         ▼
- ┌──────────────┐
- │  EDI Parser  │ (X12 835 -> Canonical JSON)
- └───────┬──────┘
-         │
-         ▼
- ┌──────────────┐      ┌─────────────────────────┐
- │ Data Store   │ ───► │ Vector DB (Embeddings)  │
- │ (PostgreSQL) │      │ (CMS & Local Policies)  │
- └───────┬──────┘      └────────────┬────────────┘
-         │                          │
-         └───────────┬──────────────┘
-                     │
-                     ▼
-        ┌─────────────────────────┐
-        │  LLM Reasoning Engine   │ (Local/Hosted Model)
-        └────────────┬────────────┘
-                     │
-                     ▼
-        ┌─────────────────────────┐
-        │ Human-in-the-Loop UI    │ (Appeals / Re-submits)
-        └─────────────────────────┘
+ 835 / 837 file
+       │
+       ▼
+ ┌──────────────┐     ┌──────────────────────────┐
+ │  EDI Parser  │     │  Knowledge base (policy  │
+ │  X12 → JSON  │     │  docs → pgvector chunks) │
+ └──────┬───────┘     └────────────┬─────────────┘
+        │                          │
+        ▼                          ▼
+ ┌─────────────────────────────────────────────┐
+ │        API Gateway — the only writer        │
+ │  auth · RBAC · audit · claims · denials     │
+ └──────┬──────────────────────────┬───────────┘
+        │                          │
+        ▼                          ▼
+ ┌──────────────┐          ┌───────────────┐
+ │  PostgreSQL  │          │  RAG + LLM    │
+ │  + pgvector  │          │  reasoning    │
+ └──────────────┘          └───────────────┘
+        │
+        ▼
+ ┌─────────────────────────────────────────────┐
+ │  React UI — Denials → Appeals / Worklist    │
+ └─────────────────────────────────────────────┘
 ```
 
-## Components
+Only the API gateway writes to the database. The parser parses, the RAG engine
+embeds and retrieves, the LLM service reasons; all three go through the gateway
+to persist anything, which is what keeps ingestion idempotent and the audit
+trail complete.
+
+## Services
 
 | Service | Port | Purpose |
 |---------|------|---------|
-| **PostgreSQL** | 5432 | Relational datastore + pgvector |
-| **llama.cpp** | 8080 | Self-hosted LLM + embedding model (OpenAI-compatible API) |
-| **EDI Parser** | 8001 | File watcher, X12 835 parsing |
-| **RAG Engine** | 8002 | Semantic search over policy documents |
-| **LLM Service** | 8003 | LLM reasoning for denial analysis |
-| **API Gateway** | 8000 | Main REST API |
+| **PostgreSQL** | 5432 | Relational store + pgvector embeddings |
+| **API Gateway** | 8000 | REST API, authentication, RBAC, audit |
+| **EDI Parser** | 8001 | X12 835/837 parsing, dropzone watcher |
+| **RAG Engine** | 8002 | Chunking, embeddings, vector search |
+| **LLM Service** | 8003 | Denial reasoning and appeal drafting |
 | **Frontend** | 3081 | React billing dashboard |
 
-## Quick Start
+Two model servers run outside Compose and are configured by URL:
 
-### Prerequisites
+| Backend | Default | Used for |
+|---------|---------|----------|
+| llama.cpp | `http://10.10.10.98:8080` | Reasoning (`LLM_MODEL`) |
+| Ollama | `http://10.10.10.98:11434` | Embeddings (`EMBEDDING_MODEL`) |
 
-- Docker & Docker Compose
-- llama.cpp server running with models loaded (see Setup section)
-- At least 8GB RAM, 20GB disk
+They are deliberately separate: the llama.cpp chat server answers
+`/v1/embeddings` with `501 does not support embeddings`, so embeddings come
+from Ollama, which produces the 768-dimension vectors the schema expects.
 
-### 1. Configure Environment
+## Quick start
 
 ```bash
 cp .env.example .env
-# Edit .env — set LLAMA_BASE_URL to your llama.cpp server
 ```
 
-### 2. Load Models on llama.cpp Server
-
-Your llama.cpp server at `10.10.10.98:8080` should have these models loaded:
+Then edit `.env` — at minimum:
 
 ```bash
-# Embedding model (768-dim vectors for pgvector)
-# Load via llama.cpp's model loading mechanism
-
-# Reasoning model (for denial analysis)
-# Load via llama.cpp's model loading mechanism
+POSTGRES_PASSWORD=...                                    # not the default
+JWT_SECRET=$(python3 -c "import secrets; print(secrets.token_urlsafe(48))")
+SERVICE_API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(48))")
+LLAMA_BASE_URL=http://<your-llama-host>:8080
+EMBED_BASE_URL=http://<your-ollama-host>:11434
+LLM_MODEL=<whatever your llama.cpp server has loaded>
 ```
 
-### 3. Start Services
+`JWT_SECRET` and `SERVICE_API_KEY` are not optional. Without the first, tokens
+are signed with a default string that is in the source; without the second, the
+parser and LLM service cannot write their results back through the gateway.
 
 ```bash
-docker-compose up -d
+docker compose up -d --build
+
+# Create the admin user. Idempotent - it skips anything already present.
+docker compose run --rm --no-deps -v "$PWD/scripts:/seed" api python /seed/seed_admin.py
 ```
 
-### 4. Verify
+Open <http://localhost:3081> and sign in as `admin` / `admin123`.
+**Change that password immediately** on the My Profile page.
+
+Then drop a file in: Upload tab, or
 
 ```bash
-# Check all services
-docker-compose ps
-
-# View API docs
-open http://localhost:8000/docs
-
-# View frontend
-open http://localhost:3081
+curl -X POST http://localhost:8000/api/v1/ingestion/ingest \
+  -H "Authorization: Bearer <token>" -F "file=@scripts/sample_835.txt;filename=sample.835"
 ```
 
-### 5. Drop an EDI 835 File
+Sample files for a first run: `scripts/sample_835.txt`, `sample_837p.txt`,
+`sample_837i.txt`.
 
-Place a `.835` or `.txt` file in the dropzone:
+## Security
+
+Enforced today:
+
+- **Every `/api` route requires credentials.** Unauthenticated callers get 401.
+  Sibling services authenticate with `SERVICE_API_KEY` and are audited under
+  their own name, so a machine write is never filed as a person's.
+- **Role-based access** by resource and action. An unknown resource denies
+  rather than allows, so a route added without a permission rule fails in
+  testing instead of leaking.
+- **Row-level queue scoping.** A billing specialist sees work assigned to them
+  plus the unassigned pool, enforced on lists, single-record reads and writes.
+- **Audit logging on every request** — who, which record, from where, and the
+  outcome, including refused ones. Written as middleware so a new route cannot
+  be missed.
+- **bcrypt password hashes**; self-service change requires the current password.
+
+Still your responsibility before production:
+
+- Change the default `admin` and PostgreSQL passwords.
+- **Terminate TLS in front of the app.** Tokens and PHI cross the network in
+  the clear over plain HTTP.
+- Automate PostgreSQL backups, and test a restore.
+- Decide audit-log retention — nothing prunes it today.
+
+## Roles
+
+| | Specialist | Manager | Director | Admin |
+|---|---|---|---|---|
+| Work denials, appeals, worklist | ✅ | ✅ | ✅ | ✅ |
+| See other people's queue items | — | ✅ | ✅ | ✅ |
+| Assign work | — | ✅ | ✅ | ✅ |
+| Upload remittance files | — | ✅ | ✅ | ✅ |
+| Manage policy documents | — | ✅ | ✅ | ✅ |
+| Read the audit log | — | ✅ | ✅ | ✅ |
+| Manage users | — | — | — | ✅ |
+
+Everyone can read claims, denials and policy documents; the differences are in
+what they can change. Defined in `api-gateway/services/access.py`.
+
+## Database migrations
+
+`database/migrations/*.sql` runs automatically **only against a fresh volume**,
+via the Compose initdb mount. An existing database needs them applied by hand:
 
 ```bash
-# Find the dropzone volume
-docker volume inspect denial-navigator-dropzone --format '{{ .Mountpoint }}'
-
-# Copy a test file there
-cp sample_835.txt /var/lib/docker/volumes/denial-navigator-dropzone/_data/
-
-# Or place directly via the API
-curl -X POST http://localhost:8000/api/v1/claims/ingest \
-  -F "file=@sample_835.txt"
+docker exec -i denial-navigator-postgres psql -U denial_nav -d denial_navigator \
+  -v ON_ERROR_STOP=1 < database/migrations/001_denial_status_in_progress.sql
 ```
 
-## Database Schema
+All migrations are written to be idempotent, so re-running one is safe.
 
-See `database/init.sql` for the full schema. Key tables:
+## Air-gapped deployment
 
-- **claims** — Primary claim tracking
-- **denials** — Individual denial records with CARC/RARC codes
-- **ai_analyses** — LLM-generated analysis and action plans
-- **appeals_queue** — Operational queue for billing teams
-- **feedback_loop** — Success/failure logging for model refinement
-- **carc_codes** / **rarc_codes** — WPC-maintained code lookups
-- **knowledge_documents** — Payer policies and guidelines
+The API docs at `/docs` and `/redoc` are served from assets vendored into the
+gateway image (`api-gateway/static/docs/`), so they work with no outbound
+network. Verify with:
 
-## API Documentation
+```bash
+./scripts/check_docs_offline.sh http://localhost:8000
+```
 
-Interactive Swagger/OpenAPI docs available at:
-- `http://localhost:8000/docs` (API Gateway)
-- `http://localhost:8001/docs` (EDI Parser)
-- `http://localhost:8002/docs` (RAG Engine)
-- `http://localhost:8003/docs` (LLM Service)
+**Image builds still need a network** — `apt-get`, `pip install` and
+`npm install`. For a genuinely air-gapped site, build on a connected machine and
+transfer the images with `docker save` / `docker load`, or point the package
+managers at an internal mirror.
 
-## Security & Compliance
+## Development
 
-- All PHI stays within your self-hosted environment
-- No data sent to public LLM endpoints
-- Audit logging on all data modifications
-- Role-based access control (RBAC) framework ready
+```bash
+cd frontend && npm run smoke      # server-renders every page
+./scripts/check_docs_offline.sh   # asserts the docs reference nothing off-host
+docker compose logs -f api        # follow a service
+```
+
+`npm run smoke` catches what a build cannot: a page that compiles cleanly and
+throws the moment it renders. It exists because a temporal-dead-zone read once
+shipped the audit page as a blank white screen.
+
+## Layout
+
+```
+api-gateway/     REST API — routes/, services/ (auth, access, audit, db)
+                 static/docs/  vendored Swagger + ReDoc, for air-gapped use
+ediparser/       X12 835/837 parser + dropzone watcher
+rag-engine/      chunking, embeddings, pgvector search, prompt building
+llm-service/     llama.cpp client, JSON parsing, analysis storage
+frontend/        React + Vite; scripts/smoke-render.mjs
+database/        init.sql, migrations/, seed/
+scripts/         setup, sample EDI files, offline-docs check
+docs/            ARCHITECTURE.md
+```
+
+## Troubleshooting
+
+| Symptom | Cause |
+|---------|-------|
+| AI button fails | Check Settings → Service Status. A model server being down shows as *degraded*. |
+| Vector search returns nothing | Embeddings need Ollama, not the llama.cpp chat server. Check `EMBED_BASE_URL`. |
+| Everything returns 401 | `JWT_SECRET` changed, invalidating existing tokens. Sign in again. |
+| Parser results never appear | `SERVICE_API_KEY` mismatch between the gateway and ediparser/llm-service. |
+| Docs pages blank | A CDN reference crept back in. Run `scripts/check_docs_offline.sh`. |
 
 ## License
 
-Proprietary — Internal Use Only
+Proprietary — internal use only.
