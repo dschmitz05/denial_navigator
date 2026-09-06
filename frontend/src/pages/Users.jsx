@@ -88,31 +88,39 @@ export default function Users() {
   }
 
   const handleToggleActive = async (userId) => {
+    const target = users.find(u => u.id === userId)
+    if (!target) return
+
+    // Deactivating blocks sign-in AND hands their open work back to the pool,
+    // so it is worth confirming. Reactivating is harmless and is not.
+    if (target.is_active && !confirm(
+      `Deactivate ${target.username}?\n\n` +
+      'They will not be able to sign in, and any open queue items assigned to ' +
+      'them return to the unassigned pool so the work is not stranded.'
+    )) return
+
     try {
-      const user = users.find(u => u.id === userId)
       const resp = await fetch(`${API_BASE}/users/${userId}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${localStorage.getItem('auth_token')}`,
         },
-        body: JSON.stringify({ is_active: !user.is_active }),
+        body: JSON.stringify({ is_active: !target.is_active }),
       })
-      if (!resp.ok) throw new Error('Update failed')
-      loadUsers()
-    } catch (err) {
-      setMsg({ type: 'error', text: err.message })
-    }
-  }
+      const data = await resp.json().catch(() => ({}))
+      if (!resp.ok) throw new Error(data.detail || 'Update failed')
 
-  const handleDelete = async (userId) => {
-    if (!confirm('Deactivate this user?')) return
-    try {
-      const resp = await fetch(`${API_BASE}/users/${userId}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${localStorage.getItem('auth_token')}` },
+      // The API reports how many items it released; saying so is how the
+      // admin knows work was redistributed rather than lost.
+      const released = Number(data.queue_items_released || 0)
+      setMsg({
+        type: 'success',
+        text: target.is_active
+          ? `${target.username} deactivated` +
+            (released ? `; ${released} open item${released === 1 ? '' : 's'} returned to the pool` : '')
+          : `${target.username} reactivated`,
       })
-      if (!resp.ok) throw new Error('Delete failed')
       loadUsers()
     } catch (err) {
       setMsg({ type: 'error', text: err.message })
@@ -252,14 +260,30 @@ export default function Users() {
                       {u.last_login ? new Date(u.last_login).toLocaleDateString() : 'Never'}
                     </td>
                     <td style={{ whiteSpace: 'nowrap' }}>
-                      {u.id !== user?.id && (
-                        <div style={{ display: 'flex', gap: 4 }}>
-                          <button className="btn btn-sm" onClick={() => setResetForm({...resetForm, userId: u.id})}>🔑</button>
-                          <button className="btn btn-sm" onClick={() => handleToggleActive(u.id)}>
-                            {u.is_active ? '⏸' : '▶️'}
+                      {u.id !== user?.id ? (
+                        <div style={{ display: 'flex', gap: 6 }}>
+                          <button className="btn btn-sm"
+                                  title="Set a new password for this user"
+                                  onClick={() => setResetForm({ ...resetForm, userId: u.id })}>
+                            Reset password
                           </button>
-                          <button className="btn btn-sm" onClick={() => handleDelete(u.id)} style={{ color: 'var(--danger)' }}>🗑</button>
+                          {/* One action, not two. The trash button that used to
+                              sit here called DELETE, which is a soft delete -
+                              its own prompt said "Deactivate this user?" - so
+                              it did exactly what this button does. */}
+                          <button className="btn btn-sm"
+                                  style={u.is_active ? { color: 'var(--danger)' } : undefined}
+                                  title={u.is_active
+                                    ? 'Block sign-in and return their open queue items to the pool'
+                                    : 'Allow this user to sign in again'}
+                                  onClick={() => handleToggleActive(u.id)}>
+                            {u.is_active ? 'Deactivate' : 'Reactivate'}
+                          </button>
                         </div>
+                      ) : (
+                        <span style={{ color: 'var(--gray-400)', fontSize: '0.85rem' }}>
+                          your account
+                        </span>
                       )}
                     </td>
                   </tr>
