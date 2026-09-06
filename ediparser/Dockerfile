@@ -17,6 +17,17 @@ COPY . .
 # Create dropzone and output directories
 RUN mkdir -p /app/dropzone /app/output
 
+# Run as an unprivileged user. A remote-code bug in a parser should not
+# start life as root inside the container.
+#
+# The source files are mode 600 in the repository and COPY preserves that,
+# so without the chmod the app user cannot read its own code.
+RUN adduser --system --group --no-create-home app \
+ && chown -R app:app /app \
+ && chmod -R u=rwX,go=rX /app
+RUN mkdir -p /app/dropzone /app/output && chown -R app:app /app/dropzone /app/output
+USER app
+
 EXPOSE 8000
 
 # --workers 1 is deliberate. The dropzone FileWatcher is a background

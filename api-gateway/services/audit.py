@@ -17,6 +17,7 @@ describe WHO REACHED THE DATA. A compliance reviewer needs both.
 import ipaddress
 import json
 import logging
+import os
 import time
 import uuid
 from typing import Optional
@@ -81,29 +82,71 @@ VERB_ACTIONS = {
 }
 
 
+# Networks whose forwarded headers we believe. Anything else sets those
+# headers for itself, so believing them lets a caller choose what the audit
+# log records about them - and evade any per-address limit by rotating it.
+# Defaults to RFC1918 + loopback, which covers the Docker network nginx sits
+# on. Narrow it with TRUSTED_PROXIES if the app is reachable directly.
+_TRUSTED_PROXY_NETS = [
+    ipaddress.ip_network(n.strip())
+    for n in os.environ.get(
+        "TRUSTED_PROXIES", "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+    ).split(",")
+    if n.strip()
+]
+
+
+def _is_trusted_proxy(addr: Optional[str]) -> bool:
+    if not addr:
+        return False
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    return any(ip in net for net in _TRUSTED_PROXY_NETS)
+
+
 def _client_ip(request) -> Optional[str]:
-    """The end user's IP, not nginx's.
+    """The end user's IP, not nginx's - and not one the caller invented.
 
     The frontend proxies through nginx, so request.client.host is the proxy on
-    every single request - useless for tracing an access back to a person. The
-    forwarded headers carry the real address; they are also trivially spoofed,
-    so the value is validated before it reaches an INET column.
+    every request, which is useless for tracing an access back to a person.
+    The forwarded headers carry the real address, but anyone can set them: a
+    forged X-Forwarded-For put 203.0.113.99 into the compliance log during an
+    audit of this system. So they are honoured only when the request actually
+    arrived from a proxy we trust, and validated before reaching an INET
+    column either way.
     """
-    candidates = []
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        candidates.append(forwarded.split(",")[0].strip())
-    real_ip = request.headers.get("x-real-ip")
-    if real_ip:
-        candidates.append(real_ip.strip())
-    if request.client:
-        candidates.append(request.client.host)
+    peer = request.client.host if request.client else None
 
-    for candidate in candidates:
+    if _is_trusted_proxy(peer):
+        # X-Real-IP first: nginx sets it to $remote_addr, its own view of the
+        # peer, which the caller cannot influence.
+        real_ip = request.headers.get("x-real-ip")
+        if real_ip:
+            try:
+                return str(ipaddress.ip_address(real_ip.strip()))
+            except ValueError:
+                pass
+
+        # X-Forwarded-For is built with $proxy_add_x_forwarded_for, which
+        # APPENDS our peer to whatever the client sent. The left-most entry is
+        # therefore still attacker-controlled - reading it that way recorded a
+        # forged 203.0.113.99 even after this function started checking the
+        # peer. The last entry is the one our own proxy added.
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            candidate = forwarded.split(",")[-1].strip()
+            try:
+                return str(ipaddress.ip_address(candidate))
+            except ValueError:
+                pass
+
+    if peer:
         try:
-            return str(ipaddress.ip_address(candidate))
+            return str(ipaddress.ip_address(peer))
         except ValueError:
-            continue
+            return None
     return None
 
 

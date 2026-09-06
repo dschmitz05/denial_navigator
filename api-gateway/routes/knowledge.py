@@ -19,6 +19,8 @@ rag_client = RAGEngineClient()
 # content-type guess - both of which are trivially wrong.
 PDF_MAGIC = b"%PDF"
 
+MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
+
 
 def _extract_pdf_text(raw: bytes) -> tuple[str, int]:
     """Extract text from a PDF. Returns (text, page_count).
@@ -225,7 +227,21 @@ async def upload_document(
     source_type: str = Query("payer_policy"),
 ):
     """Upload a policy document (PDF, plain text or markdown) and index it."""
-    raw = await file.read()
+    # Policy documents are text and PDFs; 25 MB is generous. Without a limit
+    # this endpoint read an arbitrarily large body straight into memory.
+    raw, total = [], 0
+    while True:
+        chunk = await file.read(1 << 20)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_DOCUMENT_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large: maximum {MAX_DOCUMENT_BYTES // (1024 * 1024)} MB",
+            )
+        raw.append(chunk)
+    raw = b"".join(raw)
     if not raw:
         raise HTTPException(status_code=400, detail="File is empty")
 

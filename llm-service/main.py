@@ -43,13 +43,19 @@ app = FastAPI(
     version="1.0.0",
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# This service is reached by the API gateway over the Docker network, never
+# by a browser, so it needs no CORS at all. `allow_origins=["*"]` together
+# with `allow_credentials=True` told any site on the internet it could make
+# credentialed requests here; set CORS_ORIGINS explicitly if that ever changes.
+_cors_origins = [o for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 
 # ── llama.cpp Client (OpenAI-compatible) ──

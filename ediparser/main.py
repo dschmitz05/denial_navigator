@@ -45,13 +45,19 @@ app = FastAPI(
     version="2.0.0",
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# This service is reached by the API gateway over the Docker network, never
+# by a browser, so it needs no CORS at all. `allow_origins=["*"]` together
+# with `allow_credentials=True` told any site on the internet it could make
+# credentialed requests here; set CORS_ORIGINS explicitly if that ever changes.
+_cors_origins = [o for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 # ── Pydantic Models ──
 class HealthResponse(BaseModel):
@@ -201,9 +207,17 @@ async def ingest_file(request: Request, file: UploadFile = File(...)):
     ext = "." + file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"Invalid file type. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}")
-    content = await file.read()
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=413, detail=f"File too large: max {MAX_FILE_SIZE} bytes")
+    # Read with a cap rather than reading everything and measuring afterwards.
+    chunks, total = [], 0
+    while True:
+        chunk = await file.read(1 << 20)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_FILE_SIZE:
+            raise HTTPException(status_code=413, detail=f"File too large: max {MAX_FILE_SIZE} bytes")
+        chunks.append(chunk)
+    content = b"".join(chunks)
     if not content.startswith(b"ISA"):
         raise HTTPException(status_code=400, detail="File does not appear to be a valid X12 file (missing ISA segment)")
     file_name_base = file.filename or "uploaded_file.835"

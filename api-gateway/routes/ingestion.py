@@ -55,6 +55,28 @@ def _check_rate(request: Request) -> None:
         )
 
 
+async def _read_capped(file: UploadFile, limit: int) -> bytes:
+    """Read at most `limit` bytes, then refuse.
+
+    `await file.read()` followed by a length check pulls the whole body into
+    memory before deciding it is too big, which turns the size limit into a
+    memory-exhaustion vector rather than a defence against one.
+    """
+    chunks, total = [], 0
+    while True:
+        chunk = await file.read(1 << 20)      # 1 MiB
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large: maximum {limit // (1024 * 1024)} MB",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def _validate_upload(file: UploadFile) -> None:
     if file.filename is None:
         raise HTTPException(status_code=400, detail="No file name provided")
@@ -234,9 +256,7 @@ async def upload_file(request: Request, file: UploadFile = File(...)):
     """Upload an 835 file for parsing"""
     _check_rate(request)
     _validate_upload(file)
-    content = await file.read()
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=413, detail=f"File too large: max {MAX_FILE_SIZE} bytes")
+    content = await _read_capped(file, MAX_FILE_SIZE)
     if not content.startswith(b"ISA"):
         raise HTTPException(status_code=400, detail="File does not appear to be a valid X12 file (missing ISA segment)")
     file_hash = hashlib.sha256(content).hexdigest()
@@ -260,9 +280,7 @@ async def ingest_file(request: Request, file: UploadFile = File(...)):
     """Upload and parse an 835/837 file, storing results in one step"""
     _check_rate(request)
     _validate_upload(file)
-    content = await file.read()
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=413, detail=f"File too large: max {MAX_FILE_SIZE} bytes")
+    content = await _read_capped(file, MAX_FILE_SIZE)
     if not content.startswith(b"ISA"):
         raise HTTPException(status_code=400, detail="File does not appear to be a valid X12 file (missing ISA segment)")
     file_hash = hashlib.sha256(content).hexdigest()

@@ -51,6 +51,12 @@ services:
     volumes:
       - dropzone:/app/dropzone
       - ./ediparser/output:/app/output
+    # The service no longer runs as root, so both the dropzone volume and the
+    # ./ediparser/output bind mount must be writable by the image's app user.
+    # The volume inherits that ownership from the image; the host directory
+    # does not, and needs chowning once:
+    #   docker run --rm -v "$PWD/ediparser:/e" alpine chown -R 100:101 /e/output
+    user: "100:101"
     environment:
       <<: *common-env
       DATABASE_URL: postgresql://${POSTGRES_USER:-denial_nav}:${POSTGRES_PASSWORD:-denial_nav_pass}@postgres:5432/${POSTGRES_DB:-denial_navigator}
