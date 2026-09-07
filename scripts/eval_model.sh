@@ -29,7 +29,21 @@ if [ "${1:-}" = "ids" ]; then
     exit 0
 fi
 
-exec docker compose -f "$ROOT/docker-compose.yml" run --rm --no-deps \
-    -v "$ROOT/scripts:/eval-scripts:ro" \
-    -v "$ROOT/eval:/app/eval" \
-    api python /eval-scripts/eval_model.py "$@"
+# Runs inside the ALREADY RUNNING api container rather than `docker compose
+# run`, which starts a fresh container that does not join the project network -
+# it cannot resolve postgres or rag-engine, and fails on DNS before doing any
+# work.
+CONTAINER="${API_CONTAINER:-denial-navigator-api}"
+
+docker cp "$ROOT/scripts/eval_model.py" "$CONTAINER:/tmp/eval_model.py" >/dev/null
+docker exec "$CONTAINER" mkdir -p /tmp/eval-results
+
+docker exec "$CONTAINER" python /tmp/eval_model.py "$@" --out-dir /tmp/eval-results
+status=$?
+
+# Bring results back out to the repo, where they can be compared and kept.
+mkdir -p "$ROOT/eval/results"
+for f in $(docker exec "$CONTAINER" sh -c 'ls /tmp/eval-results/*.json 2>/dev/null' || true); do
+    docker cp "$CONTAINER:$f" "$ROOT/eval/results/" >/dev/null 2>&1 || true
+done
+exit $status

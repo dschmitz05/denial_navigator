@@ -32,8 +32,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import asyncpg
-import httpx
+# Imported inside run() rather than here: `compare` only reads two JSON files
+# and should work on the host, where the container's dependencies are absent.
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://denial_nav:denial_nav_pass@postgres:5432/denial_navigator")
 RAG_ENGINE_URL = os.environ.get("RAG_ENGINE_URL", "http://rag-engine:8000")
@@ -168,6 +168,9 @@ def score(parsed, case):
 
 
 async def run(args):
+    import asyncpg
+    import httpx
+
     conn = await asyncpg.connect(DATABASE_URL)
     try:
         cases = await fetch_cases(conn, args.limit, args.denial_ids)
@@ -264,7 +267,7 @@ async def run(args):
         "results": results,
         "summary": summarise(results),
     }
-    path = Path(args.out or f"eval/results/{model_name.replace('/', '_')}.json")
+    path = Path(args.out or f"{args.out_dir}/{model_name.replace('/', '_')}.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(out, indent=2))
     print(f"\nWrote {path}")
@@ -350,6 +353,7 @@ def main():
     r = sub.add_parser("run", help="evaluate the model currently loaded")
     r.add_argument("--limit", type=int, default=20)
     r.add_argument("--out")
+    r.add_argument("--out-dir", default="eval/results")
     r.add_argument("--model", help="override the name sent to llama.cpp")
     r.add_argument("--temperature", type=float, default=0.3)
     r.add_argument("--denial-ids", nargs="*", dest="denial_ids",
@@ -358,6 +362,7 @@ def main():
     c = sub.add_parser("compare", help="compare two result files")
     c.add_argument("a")
     c.add_argument("b")
+    c.add_argument("--out-dir", default="eval/results", help=argparse.SUPPRESS)
 
     args = p.parse_args()
     if args.cmd == "run":
