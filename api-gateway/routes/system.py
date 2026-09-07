@@ -91,11 +91,25 @@ async def _llama_probe() -> str:
     return ", ".join(models[:3]) + (f" (+{len(models) - 3} more)" if len(models) > 3 else "")
 
 
-async def _ollama_probe() -> str:
+async def _embeddings_probe() -> str:
+    """Ask the embedding backend what it serves, whichever backend it is.
+
+    This used to call Ollama's /api/tags, which llama.cpp does not serve - so
+    pointing EMBED_BASE_URL at a llama-server made the card report the backend
+    as down while embeddings worked perfectly. Both speak the OpenAI-compatible
+    /v1/models, so that is tried first and Ollama's own endpoint second.
+    """
     async with httpx.AsyncClient(timeout=PROBE_TIMEOUT) as client:
-        resp = await client.get(f"{EMBED_BASE_URL}/api/tags")
-        resp.raise_for_status()
-        models = [m.get("name") for m in resp.json().get("models", []) if m.get("name")]
+        models = []
+        try:
+            resp = await client.get(f"{EMBED_BASE_URL}/v1/models")
+            resp.raise_for_status()
+            models = [m.get("id") for m in resp.json().get("data", []) if m.get("id")]
+        except Exception:
+            resp = await client.get(f"{EMBED_BASE_URL}/api/tags")
+            resp.raise_for_status()
+            models = [m.get("name") for m in resp.json().get("models", []) if m.get("name")]
+
     if not models:
         raise RuntimeError("reachable but no embedding model is available")
     return ", ".join(models[:3]) + (f" (+{len(models) - 3} more)" if len(models) > 3 else "")
@@ -110,7 +124,7 @@ async def system_health():
         _timed("RAG Engine", True, lambda: _http_probe(f"{RAG_ENGINE_URL}/health", "embedding_model")),
         _timed("LLM Service", True, lambda: _http_probe(f"{LLM_SERVICE_URL}/health", "model")),
         _timed("llama.cpp (reasoning)", False, _llama_probe),
-        _timed("Ollama (embeddings)", False, _ollama_probe),
+        _timed("Embeddings", False, _embeddings_probe),
     ]
     results = await asyncio.gather(*probes)
 

@@ -149,6 +149,35 @@ class LlamaClient:
 # ── Global Client ──
 llama_client = LlamaClient()
 
+# Which model is actually loaded, cached briefly.
+#
+# The host runs one llama-server at a time and the model behind :8080 is
+# swapped by systemd, so a name pinned in .env goes stale the moment someone
+# switches. llama.cpp ignores the `model` field in a request and uses whatever
+# it has loaded, so a stale name never breaks a call - it just records the
+# wrong thing in ai_analyses.model_name, which is exactly the field an audit
+# trail and the feedback loop rely on being true.
+#
+# Set LLM_MODEL to a specific name to pin it; leave it as "auto" to follow.
+_model_cache = {"name": None, "at": 0.0}
+_MODEL_TTL = 60.0
+
+
+async def resolve_model() -> str:
+    if LLM_MODEL.lower() != "auto":
+        return LLM_MODEL
+    import time as _time
+    if _model_cache["name"] and _time.monotonic() - _model_cache["at"] < _MODEL_TTL:
+        return _model_cache["name"]
+    try:
+        names = await llama_client.list_models()
+        if names:
+            _model_cache.update(name=names[0], at=_time.monotonic())
+            return names[0]
+    except Exception as e:
+        logger.warning(f"could not read the loaded model, falling back: {e}")
+    return _model_cache["name"] or "unknown"
+
 
 # ── Database Storage ──
 async def store_analysis(denial_id: str, claim_id: str, raw_prompt: str,
@@ -214,11 +243,12 @@ class HealthResponse(BaseModel):
 # ── Routes ──
 @app.get("/health", response_model=HealthResponse)
 async def health():
-    model_available = await llama_client.check_model_available()
+    resolved = await resolve_model()
+    available = await llama_client.check_model_available(resolved)
     return HealthResponse(
         status="healthy",
-        model=LLM_MODEL,
-        model_available=model_available,
+        model=resolved,
+        model_available=available,
     )
 
 @app.post("/chat", response_model=ChatResponse)
@@ -233,7 +263,7 @@ async def chat(request: ChatRequest):
         completion_tokens = len(response_text.split())
 
         return ChatResponse(
-            model=LLM_MODEL,
+            model=await resolve_model(),
             response=response_text,
             tokens_used=prompt_tokens + completion_tokens,
         )
@@ -250,6 +280,7 @@ async def analyze_denial(request: DenialAnalysisRequest):
         user_prompt = request.prompt.get("user", "")
 
         # Call LLM
+        model_name = await resolve_model()
         result = await llama_client.chat(system_prompt, user_prompt, request.temperature)
         raw_response = result.get("message", {}).get("content", "")
 
@@ -298,14 +329,14 @@ async def analyze_denial(request: DenialAnalysisRequest):
             raw_prompt=f"{system_prompt}\n\n{user_prompt}",
             raw_response=raw_response,
             parsed_result=parsed_json or {},
-            model_name=LLM_MODEL,
+            model_name=model_name,
         )
 
         prompt_tokens = len(system_prompt.split()) + len(user_prompt.split())
         completion_tokens = len(raw_response.split())
 
         return DenialAnalysisResponse(
-            model=LLM_MODEL,
+            model=model_name,
             raw_response=raw_response,
             parsed_json=parsed_json,
             tokens_used=prompt_tokens + completion_tokens,
@@ -320,6 +351,7 @@ async def list_models():
     """List available models"""
     try:
         models = await llama_client.list_models()
-        return {"models": models, "current_model": LLM_MODEL}
+        return {"models": models, "current_model": await resolve_model(),
+                "configured": LLM_MODEL}
     except Exception as e:
         return {"models": [], "error": str(e), "current_model": LLM_MODEL}

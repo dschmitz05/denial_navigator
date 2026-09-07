@@ -85,9 +85,12 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-denial_nav}:${POSTGRES_PASSWORD:-denial_nav_pass}@postgres:5432/${POSTGRES_DB:-denial_navigator}
       LLAMA_BASE_URL: http://10.10.10.98:8080
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
-      # Embeddings come from Ollama, not the chat llama-server on :8080 -
-      # that one answers /v1/embeddings with 501 "does not support embeddings".
-      EMBED_BASE_URL: ${EMBED_BASE_URL:-http://10.10.10.98:11434}
+      # Embeddings come from their OWN llama-server on :8081, not from the
+      # chat model on :8080. Measured: a chat model returns vectors of its own
+      # hidden size (2048 for Qwen3.6, different again for a 27B), so using it
+      # would both break the vector(768) column and silently invalidate every
+      # stored chunk each time the chat model is swapped.
+      EMBED_BASE_URL: ${EMBED_BASE_URL:-http://10.10.10.98:8081}
       API_BASE: http://api:8000
     depends_on:
       postgres:
@@ -142,7 +145,7 @@ services:
       LLAMA_BASE_URL: http://10.10.10.98:8080
       # Health checks probe the embedding backend too; it is a separate
       # server from the chat one (see the rag-engine comment above).
-      EMBED_BASE_URL: ${EMBED_BASE_URL:-http://10.10.10.98:11434}
+      EMBED_BASE_URL: ${EMBED_BASE_URL:-http://10.10.10.98:8081}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:3000}
       JWT_SECRET: ${JWT_SECRET:-change_me_in_production}
       SERVICE_API_KEY: ${SERVICE_API_KEY:-}
