@@ -179,7 +179,7 @@ def _clean_claim(claim, index, seen_numbers):
 def _clean_denial(denial):
     """Normalize denial data from EDIParser for safe DB insertion.
 
-    NOTE: the denials table spells the column `modfier_1` (a typo baked into
+    NOTE: the denials table spells the column `modifier_1` (a typo baked into
     database/init.sql) and stores the free-text reason in `adjustment_reason`.
     The dict keys here stay correctly spelled; the INSERT statements below do
     the translation. Before this was fixed every denial insert failed on an
@@ -230,7 +230,12 @@ _ON_CONFLICT_835 = """
         provider_name    = COALESCE(EXCLUDED.provider_name, claims.provider_name),
         payer_name       = COALESCE(EXCLUDED.payer_name, claims.payer_name),
         payer_id_number  = COALESCE(EXCLUDED.payer_id_number, claims.payer_id_number),
-        total_charge     = EXCLUDED.total_charge,
+        -- An 835 is authoritative for money, but "authoritative" is not the
+        -- same as "overwrite with zero". A remittance that reports no charge
+        -- for a claim the 837 already priced should leave that figure alone;
+        -- otherwise re-ingesting wipes a charge amount the submission supplied.
+        total_charge     = CASE WHEN EXCLUDED.total_charge > 0
+                                THEN EXCLUDED.total_charge ELSE claims.total_charge END,
         total_paid       = EXCLUDED.total_paid,
         total_adjustment = EXCLUDED.total_adjustment,
         service_from     = COALESCE(EXCLUDED.service_from, claims.service_from),
@@ -359,109 +364,121 @@ async def ingest_file(
         }
 
     async with get_connection() as conn:
-        # Create ingestion log first, get its id
-        ingestion_row = await conn.fetchrow(
-            """
-            INSERT INTO ingestion_log
-                (file_name, file_size_bytes, file_hash, status, claims_count, denials_count, raw_response)
-            VALUES ($1, $2, $3, 'completed', $4, $5, $6)
-            RETURNING id
-            """,
-            file.filename or "unknown", file_size, file_hash,
-            len(claims), len(denials), json.dumps(result, default=str),
-        )
-
-        # Store claims and denials (cleaned)
-        seen_numbers = set()
-        cleaned_claims = [_clean_claim(c, i, seen_numbers) for i, c in enumerate(claims)]
-        cleaned_denials = [_clean_denial(d) for d in denials]
-
-        for claim_data in cleaned_claims:
-            await conn.execute(
-                _claim_upsert_sql(transaction_type),
-                claim_data["claim_id"],
-                claim_data["patient_id"],
-                claim_data["patient_name"],
-                claim_data["date_of_birth"],
-                claim_data["provider_npi"],
-                claim_data["provider_name"],
-                claim_data["payer_name"],
-                claim_data["payer_id_number"],
-                claim_data["total_charged"],
-                claim_data["total_paid"],
-                claim_data["total_adjustment"],
-                claim_data["claim_type"],
-                claim_data["service_from"],
-                claim_data["service_to"],
-                claim_data["diagnosis_codes"],
-                json.dumps(claim_data, default=str),
-            )
-
-        denials_written = 0
-        for denial_data in cleaned_denials:
-            # ON CONFLICT DO NOTHING means "offered" and "stored" are different
-            # numbers. Reporting the first as the second told the user five
-            # denials had been stored when none had.
-            result = await conn.execute(
+        # Everything below is one unit of work. Without this a failure partway
+        # through left the file logged as 'completed' with only some of its
+        # claims written and denials referencing claims that were never stored -
+        # and since the file hash was already recorded, the retry was then
+        # refused as a duplicate. The transaction makes a failed ingest a no-op
+        # the user can simply upload again.
+        async with conn.transaction():
+            # Create ingestion log first, get its id
+            ingestion_row = await conn.fetchrow(
                 """
-                INSERT INTO denials
-                    (claim_id, service_line_number, cpt_code, hcpcs_code, modfier_1, modifier_2,
-                     charge_amount, payment_amount, adjustment_amount, cagc, carc_code, rarc_code,
-                     adjustment_reason, denial_date, status, appeal_deadline)
-                VALUES ((SELECT id FROM claims WHERE claim_number = $1), $2, $3, $4, $5, $6,
-                        $7, $8, $9, $10, $11, $12, $13, $14, 'open',
-                        -- The filing clock starts at the remittance date and runs
-                        -- for the payer's window; see migration 006. Computed in
-                        -- SQL so ingestion, backfill and recompute cannot disagree.
-                        appeal_deadline_for(
-                            (SELECT payer_name FROM claims WHERE claim_number = $1),
-                            COALESCE($14, CURRENT_DATE)))
-                -- The same claim can legitimately arrive in two different files
-                -- (a corrected 837 after an 835, say). The hash check cannot see
-                -- that; this does. Skipping the row is right - the adjustment is
-                -- already recorded.
-                ON CONFLICT DO NOTHING
+                INSERT INTO ingestion_log
+                    (file_name, file_size_bytes, file_hash, status, claims_count, denials_count, raw_response)
+                VALUES ($1, $2, $3, 'completed', $4, $5, $6)
+                RETURNING id
                 """,
-                denial_data["claim_id"],
-                denial_data["service_line_number"],
-                denial_data["cpt_code"],
-                denial_data["hcpcs_code"],
-                denial_data["modifier_1"],
-                denial_data["modifier_2"],
-                denial_data["charge_amount"],
-                denial_data["payment_amount"],
-                denial_data["adjustment_amount"],
-                denial_data["cagc"],
-                denial_data["carc_code"],
-                denial_data["rarc_code"],
-                denial_data["denial_reason"],
-                denial_data["denial_date"],
-            )
-            denials_written += 1 if result.endswith(" 1") else 0
-
-        # Reflect adjudication on the claim itself. Ingestion hardcodes
-        # status 'parsed' and nothing ever marked a claim denied, so the
-        # dashboard's "Denied Claims" card read 0 no matter what was loaded.
-        if cleaned_denials:
-            await conn.execute(
-                """
-                UPDATE claims c
-                SET status = CASE WHEN c.total_paid > 0 THEN 'partially_paid' ELSE 'denied' END,
-                    updated_at = NOW()
-                WHERE c.claim_number = ANY($1::text[])
-                  AND EXISTS (SELECT 1 FROM denials d WHERE d.claim_id = c.id)
-                """,
-                [d["claim_id"] for d in cleaned_denials],
+                file.filename or "unknown", file_size, file_hash,
+                len(claims), len(denials), json.dumps(result, default=str),
             )
 
-        return {
-            "status": "stored",
-            "ingestion_id": str(ingestion_row["id"]),
-            "file_name": file.filename or "unknown",
-            "claims_stored": len(cleaned_claims),
-            "denials_stored": denials_written,
-            "denials_skipped_as_duplicates": len(cleaned_denials) - denials_written,
-        }
+            # Store claims and denials (cleaned)
+            seen_numbers = set()
+            cleaned_claims = [_clean_claim(c, i, seen_numbers) for i, c in enumerate(claims)]
+            cleaned_denials = [_clean_denial(d) for d in denials]
+
+            for claim_data in cleaned_claims:
+                await conn.execute(
+                    _claim_upsert_sql(transaction_type),
+                    claim_data["claim_id"],
+                    claim_data["patient_id"],
+                    claim_data["patient_name"],
+                    claim_data["date_of_birth"],
+                    claim_data["provider_npi"],
+                    claim_data["provider_name"],
+                    claim_data["payer_name"],
+                    claim_data["payer_id_number"],
+                    claim_data["total_charged"],
+                    claim_data["total_paid"],
+                    claim_data["total_adjustment"],
+                    claim_data["claim_type"],
+                    claim_data["service_from"],
+                    claim_data["service_to"],
+                    claim_data["diagnosis_codes"],
+                    json.dumps(claim_data, default=str),
+                )
+
+            denials_written = 0
+            for denial_data in cleaned_denials:
+                # ON CONFLICT DO NOTHING means "offered" and "stored" are different
+                # numbers. Reporting the first as the second told the user five
+                # denials had been stored when none had.
+                inserted = await conn.fetchval(
+                    """
+                    INSERT INTO denials
+                        (claim_id, service_line_number, cpt_code, hcpcs_code, modifier_1, modifier_2,
+                         charge_amount, payment_amount, adjustment_amount, cagc, carc_code, rarc_code,
+                         adjustment_reason, denial_date, status, appeal_deadline)
+                    VALUES ((SELECT id FROM claims WHERE claim_number = $1), $2, $3, $4, $5, $6,
+                            $7, $8, $9, $10, $11, $12, $13, $14, 'open',
+                            -- The filing clock starts at the remittance date and runs
+                            -- for the payer's window; see migration 006. Computed in
+                            -- SQL so ingestion, backfill and recompute cannot disagree.
+                            appeal_deadline_for(
+                                (SELECT payer_name FROM claims WHERE claim_number = $1),
+                                COALESCE($14, CURRENT_DATE)))
+                    -- The same claim can legitimately arrive in two different files
+                    -- (a corrected 837 after an 835, say). The hash check cannot see
+                    -- that; this does. Skipping the row is right - the adjustment is
+                    -- already recorded.
+                    ON CONFLICT DO NOTHING
+                    -- RETURNING is empty on a skipped row, which answers "was it
+                    -- inserted?" directly. Parsing the "INSERT 0 1" status tag for
+                    -- a trailing " 1" answered it by inference, and would miscount
+                    -- silently if that tag ever changed shape.
+                    RETURNING id
+                    """,
+                    denial_data["claim_id"],
+                    denial_data["service_line_number"],
+                    denial_data["cpt_code"],
+                    denial_data["hcpcs_code"],
+                    denial_data["modifier_1"],
+                    denial_data["modifier_2"],
+                    denial_data["charge_amount"],
+                    denial_data["payment_amount"],
+                    denial_data["adjustment_amount"],
+                    denial_data["cagc"],
+                    denial_data["carc_code"],
+                    denial_data["rarc_code"],
+                    denial_data["denial_reason"],
+                    denial_data["denial_date"],
+                )
+                denials_written += 1 if inserted else 0
+
+            # Reflect adjudication on the claim itself. Ingestion hardcodes
+            # status 'parsed' and nothing ever marked a claim denied, so the
+            # dashboard's "Denied Claims" card read 0 no matter what was loaded.
+            if cleaned_denials:
+                await conn.execute(
+                    """
+                    UPDATE claims c
+                    SET status = CASE WHEN c.total_paid > 0 THEN 'partially_paid' ELSE 'denied' END,
+                        updated_at = NOW()
+                    WHERE c.claim_number = ANY($1::text[])
+                      AND EXISTS (SELECT 1 FROM denials d WHERE d.claim_id = c.id)
+                    """,
+                    [d["claim_id"] for d in cleaned_denials],
+                )
+
+            return {
+                "status": "stored",
+                "ingestion_id": str(ingestion_row["id"]),
+                "file_name": file.filename or "unknown",
+                "claims_stored": len(cleaned_claims),
+                "denials_stored": denials_written,
+                "denials_skipped_as_duplicates": len(cleaned_denials) - denials_written,
+            }
 
 
 @router.post("/ingestion/log", response_model=list[dict])
@@ -560,7 +577,7 @@ async def store_parsed_data(payload: StoreIngestion):
             result = await conn.execute(
                 """
                 INSERT INTO denials
-                    (claim_id, service_line_number, cpt_code, hcpcs_code, modfier_1, modifier_2,
+                    (claim_id, service_line_number, cpt_code, hcpcs_code, modifier_1, modifier_2,
                      charge_amount, payment_amount, adjustment_amount, cagc, carc_code, rarc_code,
                      adjustment_reason, denial_date, status, appeal_deadline)
                 VALUES ((SELECT id FROM claims WHERE claim_number = $1), $2, $3, $4, $5, $6,

@@ -9,10 +9,11 @@ Two separate concerns, deliberately kept apart:
 Both are needed. An address limit alone falls to a botnet; a username limit
 alone lets someone spray one password across every account.
 
-In-process and per-worker: with `--workers 4` an attacker gets four times the
-stated budget. That is a real limitation, and the right fix is a shared store
-(Redis) if this is ever exposed to the internet. It is still the difference
-between thousands of guesses a minute and a handful.
+This module is the in-process, per-worker layer. With `--workers 4` an
+attacker gets four times the stated budget here, which is why login throttling
+does NOT rely on it: routes/auth.py counts failures out of audit_log instead,
+so the limit is shared across every worker. This layer stays as cheap
+first-line damping in front of that.
 """
 
 import logging

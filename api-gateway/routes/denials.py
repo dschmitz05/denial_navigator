@@ -1,6 +1,8 @@
 """API Gateway — Denials routes"""
 
 import logging
+from uuid import UUID
+from datetime import date
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -85,7 +87,8 @@ def recommended_resolution(
 
 class DenialUpdate(BaseModel):
     status: Optional[str] = None
-    appeal_deadline: Optional[str] = None
+    # date, not str: asyncpg rejects a string for a DATE placeholder.
+    appeal_deadline: Optional[date] = None
 
 
 @router.get("/denials", response_model=list[dict])
@@ -359,7 +362,7 @@ async def set_appeal_window(body: PayerWindow):
 
 
 @router.get("/denials/{denial_id}", response_model=dict)
-async def get_denial(denial_id: str):
+async def get_denial(denial_id: UUID):
     """Get a single denial with full context"""
     async with get_connection() as conn:
         row = await conn.fetchrow(
@@ -411,7 +414,7 @@ async def get_denial(denial_id: str):
 
 
 @router.patch("/denials/{denial_id}", response_model=dict)
-async def update_denial(denial_id: str, update: DenialUpdate):
+async def update_denial(denial_id: UUID, update: DenialUpdate):
     """Update a denial"""
     async with get_connection() as conn:
         updates = []

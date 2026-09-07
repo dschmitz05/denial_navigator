@@ -2,6 +2,8 @@
 
 import json
 import logging
+from uuid import UUID
+from datetime import date
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File
@@ -109,7 +111,11 @@ class DocumentCreate(BaseModel):
     title: str
     source_type: str
     payer_id: Optional[str] = None
-    effective_date: Optional[str] = None
+    # Which payer this document governs. NULL/blank means it applies to every
+    # payer (a CMS coverage determination), and the analysis path's payer
+    # filter keeps those in scope for every denial.
+    payer_name: Optional[str] = None
+    effective_date: Optional[date] = None
     # The whole point of a knowledge base. Without this a document was created
     # as a metadata row with no text and stayed 'pending' forever.
     content: Optional[str] = None
@@ -173,11 +179,12 @@ async def create_document(doc: DocumentCreate):
         row = await conn.fetchrow(
             """
             INSERT INTO knowledge_documents
-                (title, source_type, payer_id, effective_date, status)
-            VALUES ($1, $2, $3, $4, 'pending')
+                (title, source_type, payer_id, payer_name, effective_date, status)
+            VALUES ($1, $2, $3, NULLIF(btrim($4), ''), $5, 'pending')
             RETURNING *
             """,
-            doc.title, doc.source_type, doc.payer_id, doc.effective_date,
+            doc.title, doc.source_type, doc.payer_id, doc.payer_name,
+            doc.effective_date,
         )
         created = dict(row)
 
@@ -200,7 +207,7 @@ async def create_document(doc: DocumentCreate):
 
 
 @router.post("/knowledge/documents/{document_id}/content", response_model=dict)
-async def add_document_content(document_id: str, body: DocumentContent):
+async def add_document_content(document_id: UUID, body: DocumentContent):
     """Attach text to an existing document and index it into pgvector."""
     async with get_connection() as conn:
         exists = await conn.fetchval(
@@ -225,6 +232,7 @@ async def upload_document(
     file: UploadFile = File(...),
     title: str = Query(None),
     source_type: str = Query("payer_policy"),
+    payer_name: str = Query(None),
 ):
     """Upload a policy document (PDF, plain text or markdown) and index it."""
     # Policy documents are text and PDFs; 25 MB is generous. Without a limit
@@ -251,11 +259,11 @@ async def upload_document(
         row = await conn.fetchrow(
             """
             INSERT INTO knowledge_documents
-                (title, source_type, status, mime_type, file_size_bytes, metadata)
-            VALUES ($1, $2, 'pending', $3, $4, $5::jsonb)
+                (title, source_type, payer_name, status, mime_type, file_size_bytes, metadata)
+            VALUES ($1, $2, NULLIF(btrim($3), ''), 'pending', $4, $5, $6::jsonb)
             RETURNING *
             """,
-            title or file.filename, source_type,
+            title or file.filename, source_type, payer_name,
             "application/pdf" if meta["format"] == "pdf" else (file.content_type or "text/plain"),
             len(raw), json.dumps(meta),
         )
@@ -278,7 +286,7 @@ async def upload_document(
 
 @router.delete("/knowledge/documents/{document_id}", response_model=dict)
 async def delete_document(
-    document_id: str,
+    document_id: UUID,
     purge: bool = Query(False, description="Permanently delete the record instead of archiving it"),
 ):
     """Retire a knowledge document so it stops feeding denial analysis.
@@ -352,7 +360,7 @@ async def search_knowledge(request: SearchRequest):
 
 
 @router.get("/knowledge/documents/{document_id}", response_model=dict)
-async def get_document(document_id: str):
+async def get_document(document_id: UUID):
     """Get a knowledge document and its full text content (all chunks)."""
     async with get_connection() as conn:
         doc = await conn.fetchrow(

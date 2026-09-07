@@ -196,9 +196,9 @@ export default function Login({ onLogin, onComplete }) {
           </form>
           )}
 
-          <p style={{ marginTop: 24, fontSize: '0.8rem', color: 'var(--gray-500)' }}>
-            Default: admin / admin123
-          </p>
+          {/* Deliberately does not name the default credentials: the
+                login page is reachable by anyone who can reach the app.
+                Settings tells the administrator to change them. */}
         </div>
       </div>
     </div>

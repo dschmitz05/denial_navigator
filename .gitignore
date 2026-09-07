@@ -62,3 +62,6 @@ database/backups/
 # Dropzone holds uploaded remittances
 ediparser/dropzone/
 dropzone/
+
+# Superseded files kept out of the way rather than deleted.
+.attic/

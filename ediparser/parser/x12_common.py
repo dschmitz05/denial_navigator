@@ -73,7 +73,12 @@ def detect_delimiters(content: str) -> Delimiters:
     ISA is the only reliable way to find ISA16, because ISA fields are
     fixed-width and may legitimately contain spaces.
     """
-    isa_at = content.find("ISA")
+    # Anchored, not searched: content.find("ISA") would happily match the
+    # "ISA" inside a subscriber name several segments in and then read
+    # delimiters out of the middle of a data field. A conforming interchange
+    # opens with ISA, so anything else is not one.
+    stripped = content.lstrip()
+    isa_at = (len(content) - len(stripped)) if stripped.startswith("ISA") else -1
     if isa_at == -1 or len(content) < isa_at + 4:
         return Delimiters(DEFAULT_ELEMENT_SEP, DEFAULT_COMPONENT_SEP, DEFAULT_SEGMENT_TERM)
 

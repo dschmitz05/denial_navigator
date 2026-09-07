@@ -14,6 +14,10 @@ here, once, so the two tabs cannot drift apart or double-count an item.
 
 import json
 import logging
+from uuid import UUID
+
+from asyncpg.exceptions import UniqueViolationError
+from datetime import date, datetime
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -90,8 +94,9 @@ class AppealCreate(BaseModel):
 class AppealUpdate(BaseModel):
     outcome_status: Optional[str] = None
     notes: Optional[str] = None
-    submitted_at: Optional[str] = None
-    payer_response: Optional[str] = None
+    # Typed so pydantic parses them and asyncpg receives real objects.
+    submitted_at: Optional[datetime] = None
+    payer_response: Optional[date] = None
     payer_response_text: Optional[str] = None
     final_outcome: Optional[str] = None
 
@@ -194,6 +199,13 @@ async def create_appeal(appeal: AppealCreate, http_request: Request):
 
         # One open item per denial. Without this, clicking "Queue appeal"
         # twice silently creates two queue entries for the same work.
+        #
+        # This check is the fast path for a clear 409; it cannot be the
+        # guarantee, because check and insert are two round trips and two
+        # simultaneous clicks can both pass it. Migration 009 adds a partial
+        # unique index over open rows, and the insert below catches its
+        # violation - so the second request loses the race in the database
+        # and still gets the same 409 rather than a 500.
         existing = await conn.fetchrow(
             """
             SELECT id FROM appeals_queue
@@ -225,17 +237,24 @@ async def create_appeal(appeal: AppealCreate, http_request: Request):
         if assigned_to is None and _queue_owner(http_request):
             assigned_to = _queue_owner(http_request)
 
-        row = await conn.fetchrow(
-            """
-            INSERT INTO appeals_queue
-                (denial_id, claim_id, ai_analysis_id, resolution_type,
-                 assigned_user_id, notes, outcome_status)
-            VALUES ($1, $2, $3, $4, $5::uuid, $6, 'queued')
-            RETURNING *
-            """,
-            appeal.denial_id, denial["claim_id"], analysis_id,
-            appeal.resolution_type, assigned_to, appeal.notes,
-        )
+        try:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO appeals_queue
+                    (denial_id, claim_id, ai_analysis_id, resolution_type,
+                     assigned_user_id, notes, outcome_status)
+                VALUES ($1, $2, $3, $4, $5::uuid, $6, 'queued')
+                RETURNING *
+                """,
+                appeal.denial_id, denial["claim_id"], analysis_id,
+                appeal.resolution_type, assigned_to, appeal.notes,
+            )
+        except UniqueViolationError:
+            # The other click got there first between our check and this insert.
+            raise HTTPException(
+                status_code=409,
+                detail="An open appeal already exists for this denial",
+            )
 
         # Reflect it on the denial so the two views cannot disagree. A
         # corrected claim or a records request is work in progress, NOT an
@@ -255,7 +274,7 @@ async def create_appeal(appeal: AppealCreate, http_request: Request):
 
 
 @router.patch("/appeals/{appeal_id}", response_model=dict)
-async def update_appeal(appeal_id: str, appeal: AppealUpdate, http_request: Request):
+async def update_appeal(appeal_id: UUID, appeal: AppealUpdate, http_request: Request):
     """Update an appeal"""
     async with get_connection() as conn:
         # Get current outcome before updating
@@ -358,7 +377,7 @@ async def update_appeal(appeal_id: str, appeal: AppealUpdate, http_request: Requ
 
 
 @router.get("/appeals/{appeal_id}/letter")
-async def get_appeal_letter(appeal_id: str, http_request: Request):
+async def get_appeal_letter(appeal_id: UUID, http_request: Request):
     """Get the draft appeal letter for an appeal"""
     async with get_connection() as conn:
         row = await conn.fetchrow(
@@ -415,48 +434,60 @@ async def bulk_queue(body: BulkQueue, http_request: Request):
     )
 
     async with get_connection() as conn:
+        # Three lookups per denial meant a forty-claim batch cost a hundred and
+        # twenty round trips before a single row was written. The batch is one
+        # decision over one cluster, so resolve the whole cluster up front and
+        # let the loop do only the writing.
+        rows = await conn.fetch(
+            """SELECT d.id, d.claim_id, c.claim_number,
+                      EXISTS (SELECT 1 FROM appeals_queue aq
+                               WHERE aq.denial_id = d.id
+                                 AND (aq.outcome_status IS NULL
+                                      OR aq.outcome_status <> ALL($2::text[]))) AS has_open,
+                      (SELECT a.id FROM ai_analyses a
+                        WHERE a.denial_id = d.id
+                        ORDER BY a.created_at DESC LIMIT 1) AS analysis_id
+                 FROM denials d JOIN claims c ON c.id = d.claim_id
+                WHERE d.id = ANY($1::uuid[])""",
+            list(body.denial_ids), list(TERMINAL_OUTCOMES),
+        )
+        found = {str(r["id"]): r for r in rows}
+
         for denial_id in body.denial_ids:
-            denial = await conn.fetchrow(
-                """SELECT d.id, d.claim_id, c.claim_number
-                     FROM denials d JOIN claims c ON c.id = d.claim_id
-                    WHERE d.id = $1::uuid""",
-                denial_id,
-            )
+            denial = found.get(str(denial_id))
             if not denial:
                 skipped.append({"denial_id": denial_id, "reason": "not found"})
                 continue
 
-            existing = await conn.fetchval(
-                f"""SELECT claim_number FROM appeals_queue aq
-                      JOIN denials d ON d.id = aq.denial_id
-                      JOIN claims c ON c.id = d.claim_id
-                     WHERE aq.denial_id = $1::uuid
-                       AND (aq.outcome_status IS NULL
-                            OR aq.outcome_status <> ALL($2::text[]))""",
-                denial_id, list(TERMINAL_OUTCOMES),
-            )
-            if existing:
+            if denial["has_open"]:
                 skipped.append({
                     "denial_id": denial_id, "claim_number": denial["claim_number"],
                     "reason": "already has open work",
                 })
                 continue
 
-            analysis_id = await conn.fetchval(
-                "SELECT id FROM ai_analyses WHERE denial_id = $1 ORDER BY created_at DESC LIMIT 1",
-                denial_id,
-            )
-            row = await conn.fetchrow(
-                """
-                INSERT INTO appeals_queue
-                    (denial_id, claim_id, ai_analysis_id, resolution_type,
-                     assigned_user_id, notes, outcome_status)
-                VALUES ($1::uuid, $2, $3, $4, $5::uuid, $6, 'queued')
-                RETURNING id
-                """,
-                denial_id, denial["claim_id"], analysis_id,
-                body.resolution_type, assigned_to, body.notes,
-            )
+            analysis_id = denial["analysis_id"]
+            try:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO appeals_queue
+                        (denial_id, claim_id, ai_analysis_id, resolution_type,
+                         assigned_user_id, notes, outcome_status)
+                    VALUES ($1::uuid, $2, $3, $4, $5::uuid, $6, 'queued')
+                    RETURNING id
+                    """,
+                    denial_id, denial["claim_id"], analysis_id,
+                    body.resolution_type, assigned_to, body.notes,
+                )
+            except UniqueViolationError:
+                # Someone queued this denial between our read and this write.
+                # Skipping matches how an already-queued denial is treated a
+                # few lines above; failing the batch would be worse.
+                skipped.append({
+                    "denial_id": denial_id, "claim_number": denial["claim_number"],
+                    "reason": "already has open work",
+                })
+                continue
             await conn.execute(
                 "UPDATE denials SET status = $2, updated_at = NOW() WHERE id = $1",
                 denial["id"], denial_status,
@@ -504,7 +535,7 @@ def _json_field(value):
 
 
 @router.get("/appeals/{appeal_id}", response_model=dict)
-async def get_appeal(appeal_id: str, http_request: Request):
+async def get_appeal(appeal_id: UUID, http_request: Request):
     """Full context for one queue item.
 
     The Appeals tab needs a letter; the Worklist needs the action plan and the
@@ -554,7 +585,7 @@ class AppealAssign(BaseModel):
 
 
 @router.post("/appeals/{appeal_id}/assign", response_model=dict)
-async def assign_appeal(appeal_id: str, body: AppealAssign, http_request: Request):
+async def assign_appeal(appeal_id: UUID, body: AppealAssign, http_request: Request):
     """Assign a queue item to a user, or return it to the pool.
 
     Kept separate from PATCH /appeals/{id} rather than folded into it: routing

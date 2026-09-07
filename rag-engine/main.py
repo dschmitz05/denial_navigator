@@ -22,11 +22,14 @@ EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "nomic-embed-text")
 #   501 "This server does not support embeddings. Start it with `--embeddings`"
 # Ollama on the same host serves nomic-embed-text (768 dims), which matches the
 # vector(768) column and its ivfflat cosine index.
-EMBED_BASE_URL = os.environ.get("EMBED_BASE_URL", "http://10.10.10.98:11434")
+# 8081 is the llama.cpp embedding server. This defaulted to 11434 - the
+# Ollama port, retired when embeddings moved to llama.cpp - so a run
+# without the env var pointed at nothing.
+EMBED_BASE_URL = os.environ.get("EMBED_BASE_URL", "http://10.10.10.98:8081")
 CHUNK_CHARS = int(os.environ.get("CHUNK_CHARS", "1500"))
 CHUNK_OVERLAP = int(os.environ.get("CHUNK_OVERLAP", "200"))
 MIN_SIMILARITY = float(os.environ.get("MIN_SIMILARITY", "0.25"))
-API_BASE = os.environ.get("API_BASE", "http://localhost:8000")
+EMBED_BATCH = int(os.environ.get("EMBED_BATCH", "16"))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ragengine")
@@ -56,37 +59,35 @@ if _cors_origins:
 async def generate_embeddings(texts: list[str], model: str = None) -> list[list[float]]:
     """Generate embeddings using llama.cpp OpenAI-compatible API"""
     model = model or EMBEDDING_MODEL
-    all_embeddings = []
+    if not texts:
+        return []
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        for text in texts:
+    # The endpoint accepts a list, and sending one text at a time meant a
+    # forty-chunk document cost forty sequential round trips - the bulk of
+    # ingest time. Batched, with a cap so a very large document cannot build
+    # a request the server will reject outright.
+    all_embeddings: list[list[float]] = []
+    async with httpx.AsyncClient(timeout=180) as client:
+        for i in range(0, len(texts), EMBED_BATCH):
+            batch = texts[i:i + EMBED_BATCH]
             resp = await client.post(
                 f"{EMBED_BASE_URL}/v1/embeddings",
-                json={"model": model, "input": text},
+                json={"model": model, "input": batch},
             )
             resp.raise_for_status()
-            data = resp.json()
-            embedding = data.get("data", [])[0].get("embedding") if data.get("data") else None
-            if embedding:
+            data = resp.json().get("data") or []
+            if len(data) != len(batch):
+                raise ValueError(
+                    f"Embedding server returned {len(data)} vectors for {len(batch)} inputs"
+                )
+            # Order is not promised by the API, only the index field is.
+            for item in sorted(data, key=lambda d: d.get("index", 0)):
+                embedding = item.get("embedding")
+                if not embedding:
+                    raise ValueError("Embedding server returned an empty vector")
                 all_embeddings.append(embedding)
-            else:
-                raise ValueError(f"No embedding returned for text: {text[:50]}...")
 
     return all_embeddings
-
-
-# ── Vector Store Operations ──
-async def store_embeddings(document_id: str, chunks: list[dict], embeddings: list[list[float]]):
-    """Store text chunks with embeddings in the database"""
-    payload = {
-        "document_id": document_id,
-        "chunks": chunks,
-        "embeddings": embeddings,
-    }
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(f"{API_BASE}/api/v1/knowledge/embed", json=payload)
-        resp.raise_for_status()
-        return resp.json()
 
 
 async def _db():
@@ -154,6 +155,18 @@ async def search_similar(query: str, top_k: int = 5, filters: dict = None) -> li
     if filters.get("source_type"):
         params.append(filters["source_type"])
         sql += f" AND kd.source_type = ${len(params)}"
+    if filters.get("payer"):
+        # The analysis path has always sent this and it was always discarded,
+        # so an Aetna denial could be argued from a Cigna policy.
+        #
+        # Payer-agnostic documents (a CMS coverage determination, a CPT
+        # guideline) carry a NULL payer_name and stay in scope - filtering them
+        # out would leave most denials with nothing to cite. Matched loosely on
+        # case because payer names arrive from the 835 in whatever case the
+        # payer felt like sending.
+        params.append(filters["payer"])
+        sql += (f" AND (kd.payer_name IS NULL"
+                f" OR lower(kd.payer_name) = lower(${len(params)}))")
     params.append(MIN_SIMILARITY)
     sql += f" AND 1 - (kc.embedding <=> $1::vector) >= ${len(params)}"
     params.append(top_k)
@@ -325,10 +338,3 @@ async def build_prompt(request: PromptRequest):
         retrieved_policies=request.retrieved_policies,
     )
     return PromptResponse(**prompt)
-
-@app.post("/embed/generate")
-async def generate_and_store(texts: list[str]):
-    """Generate embeddings for a list of texts and return them"""
-    logger.info(f"Generating embeddings for {len(texts)} texts")
-    embeddings = await generate_embeddings(texts)
-    return {"embeddings_count": len(embeddings), "model": EMBEDDING_MODEL}

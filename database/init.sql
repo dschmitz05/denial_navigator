@@ -57,7 +57,7 @@ CREATE TABLE denials (
     service_line_number INTEGER,
     cpt_code VARCHAR(20),
     hcpcs_code VARCHAR(20),
-    modfier_1 VARCHAR(10),
+    modifier_1 VARCHAR(10),
     modifier_2 VARCHAR(10),
     charge_amount DECIMAL(12, 2) NOT NULL DEFAULT 0,
     payment_amount DECIMAL(12, 2) NOT NULL DEFAULT 0,

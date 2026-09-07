@@ -1,6 +1,7 @@
 """API Gateway — Claims routes"""
 
 import logging
+from uuid import UUID
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -83,7 +84,7 @@ async def list_claims(
 
 
 @router.get("/claims/{claim_id}", response_model=dict)
-async def get_claim(claim_id: str):
+async def get_claim(claim_id: UUID):
     """Get a single claim with its denials"""
     async with get_connection() as conn:
         row = await conn.fetchrow("SELECT * FROM claims WHERE id = $1", claim_id)
@@ -120,7 +121,7 @@ async def create_claim(claim: ClaimCreate):
 
 
 @router.patch("/claims/{claim_id}", response_model=dict)
-async def update_claim(claim_id: str, claim: ClaimUpdate):
+async def update_claim(claim_id: UUID, claim: ClaimUpdate):
     """Update a claim"""
     async with get_connection() as conn:
         updates = []

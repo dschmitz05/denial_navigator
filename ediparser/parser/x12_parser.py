@@ -53,8 +53,6 @@ from parser.schema import (
 # denial rows (they remain visible on the claim).
 VALID_GROUP_CODES = {"PR", "CO", "OA", "PI", "AB", "AS"}
 
-# CLP02 values that mean the payer denied the claim outright.
-DENIED_CLAIM_STATUS = {"4"}
 
 
 class X12Parser:

@@ -2,6 +2,7 @@
 
 import json
 import logging
+from uuid import UUID
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -13,6 +14,9 @@ from api_gateway.services.auth import hash_password, verify_password, decode_tok
 logger = logging.getLogger("api_gateway.users")
 
 router = APIRouter()
+
+VALID_ROLES = ("billing_specialist", "billing_manager", "rcm_director", "admin")
+MIN_PASSWORD_LENGTH = 8
 
 
 def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
@@ -152,7 +156,7 @@ async def list_assignable_users(current_user = Depends(require_manager_up)):
 
 @router.get("/users/{user_id}", response_model=dict)
 async def get_user(
-    user_id: str,
+    user_id: UUID,
     current_user = Depends(require_admin),
 ):
     """Get a single user by ID (admin only)"""
@@ -168,7 +172,7 @@ async def get_user(
 
 @router.patch("/users/{user_id}", response_model=dict)
 async def update_user(
-    user_id: str,
+    user_id: UUID,
     update: UserUpdate,
     current_user = Depends(require_admin),
 ):
@@ -194,15 +198,23 @@ async def update_user(
         for field in ["email", "full_name", "role", "is_active"]:
             if getattr(update, field) is not None:
                 if field == "role":
-                    valid_roles = ["billing_specialist", "billing_manager", "rcm_director", "admin"]
-                    if getattr(update, field) not in valid_roles:
-                        raise HTTPException(status_code=400, detail=f"Invalid role. Must be one of: {valid_roles}")
+                    if getattr(update, field) not in VALID_ROLES:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Invalid role. Must be one of: {list(VALID_ROLES)}")
                 updates.append(f"{field} = ${idx}")
                 params.append(getattr(update, field))
                 idx += 1
 
         if not updates:
             raise HTTPException(status_code=400, detail="No updates provided")
+
+        # A role change ends existing sessions, like a password change does.
+        # The per-request role check in services/access.py already catches a
+        # stale token, but invalidating here means the two never have to
+        # disagree, and matches what every other credential change does.
+        if update.role is not None:
+            updates.append("sessions_valid_from = date_trunc('second', NOW())")
 
         updates.append("updated_at = NOW()")
         params.append(user_id)
@@ -244,7 +256,7 @@ async def update_user(
 
 @router.post("/users/{user_id}/password", status_code=200)
 async def reset_user_password(
-    user_id: str,
+    user_id: UUID,
     pwd: UserPasswordUpdate,
     current_user = Depends(require_admin),
 ):
@@ -282,7 +294,7 @@ async def reset_user_password(
 
 @router.delete("/users/{user_id}", status_code=200)
 async def delete_user(
-    user_id: str,
+    user_id: UUID,
     purge: bool = Query(False, description="Permanently erase the account instead of deactivating it"),
     confirm_username: Optional[str] = Query(
         None, description="Required with purge=true; must equal the target's username"
@@ -415,7 +427,7 @@ class TotpPolicy(BaseModel):
 
 @router.post("/users/{user_id}/totp", response_model=dict)
 async def set_totp_policy(
-    user_id: str,
+    user_id: UUID,
     body: TotpPolicy,
     http_request: Request,
     current_user = Depends(require_admin),
@@ -470,7 +482,7 @@ async def set_totp_policy(
 
 @router.post("/users/{user_id}/totp/reset", response_model=dict)
 async def reset_totp(
-    user_id: str,
+    user_id: UUID,
     http_request: Request,
     current_user = Depends(require_admin),
 ):

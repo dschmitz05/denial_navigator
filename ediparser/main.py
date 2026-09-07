@@ -175,13 +175,25 @@ async def process_file(file_path: Path) -> dict:
     output_file = Path(OUTPUT_PATH) / f"{file_name}.json"
     output_file.write_text(orjson.dumps(parsed.model_dump(), option=orjson.OPT_INDENT_2).decode("utf-8"))
 
-    logger.info(f"Processed {file_name}: {len(parsed.claims)} claims, {len(parsed.denials)} denials")
+    # The store result was computed and then discarded, so a file whose store
+    # call failed still reported "completed" - the one status a watcher-driven
+    # pipeline must get right, because nobody is watching the return value.
+    store_status = (result or {}).get("status")
+    stored_ok = store_status not in ("store_failed", None) or bool((result or {}).get("claims_stored") is not None)
+    status = "completed" if stored_ok else "store_failed"
+
+    logger.info(
+        f"Processed {file_name}: {len(parsed.claims)} claims, "
+        f"{len(parsed.denials)} denials, store={status}"
+    )
     return {
         "file_name": file_name,
         "file_hash": file_hash,
         "claims_count": len(parsed.claims),
         "denials_count": len(parsed.denials),
-        "status": "completed",
+        "status": status,
+        "store_result": store_status,
+        "error": (result or {}).get("error"),
         "processed_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -192,7 +204,7 @@ async def health():
         status="healthy",
         version="1.0.0",
         dropzone_path=DROPZONE_PATH,
-        parsed_files_count=0,
+        parsed_files_count=len(list(Path(OUTPUT_PATH).glob("*.json"))) if Path(OUTPUT_PATH).is_dir() else 0,
     )
 
 @app.post("/ingest", response_model=IngestResponse)
@@ -275,7 +287,9 @@ async def list_files():
             file_name=f.name,
             file_size=f.stat().st_size,
             file_hash="",
-            status="processed" if (dropzone / f"{f.name}.json").exists() else "pending",
+            # Parsed output lives in OUTPUT_PATH, not the dropzone - checking
+            # the wrong directory meant every file reported "pending" forever.
+            status="processed" if (Path(OUTPUT_PATH) / f"{f.name}.json").exists() else "pending",
             claims_count=0,
             denials_count=0,
         ))
@@ -289,17 +303,73 @@ async def get_output(file_name: str):
         raise HTTPException(status_code=404, detail="Output not found")
     return json.loads(output_file.read_text())
 
+# ── Retention ──
+# Both directories hold PHI: the dropzone holds the raw 835s (patient names,
+# member IDs, dates of birth), and the output holds the parsed form of the
+# same thing. Neither was ever cleaned, so a deployment accumulated an
+# ever-growing pile of unencrypted PHI on disk beside a database that has
+# retention rules. The database is the record of the ingest; these files are
+# a working copy and a debugging aid.
+#
+# Pruned together, or a dropzone file whose output has been removed would be
+# reparsed on the next restart. 0 disables the sweep.
+PARSED_RETENTION_DAYS = int(os.environ.get("PARSED_RETENTION_DAYS", "30"))
+
+
+def prune_old_files() -> int:
+    """Remove dropzone and output files past the retention window."""
+    if PARSED_RETENTION_DAYS <= 0:
+        return 0
+    cutoff = time.time() - PARSED_RETENTION_DAYS * 86400
+    removed = 0
+    for directory in (DROPZONE_PATH, OUTPUT_PATH):
+        d = Path(directory)
+        if not d.is_dir():
+            continue
+        for f in d.iterdir():
+            try:
+                if f.is_file() and f.stat().st_mtime < cutoff:
+                    f.unlink()
+                    removed += 1
+            except OSError as e:
+                logger.warning(f"Could not prune {f.name}: {e}")
+    if removed:
+        logger.info(
+            f"Pruned {removed} file(s) older than {PARSED_RETENTION_DAYS} days"
+        )
+    return removed
+
+
+async def _retention_loop():
+    """Sweep daily. The parser is long-lived, so startup alone is not enough."""
+    while True:
+        try:
+            prune_old_files()
+        except Exception as e:
+            logger.error(f"Retention sweep failed: {e}")
+        await asyncio.sleep(86400)
+
+
 # ── Startup ──
 @app.on_event("startup")
 async def startup():
     dropzone = Path(DROPZONE_PATH)
     dropzone.mkdir(parents=True, exist_ok=True)
+    Path(OUTPUT_PATH).mkdir(parents=True, exist_ok=True)
+
+    # Before seeding, so the watcher does not treat a just-pruned output as
+    # proof that its dropzone file still needs parsing.
+    prune_old_files()
 
     global watcher
     watcher = FileWatcher(DROPZONE_PATH, process_file)
     watcher.seed_from_outputs(OUTPUT_PATH)
     watcher.start()
-    logger.info(f"File watcher started on {DROPZONE_PATH}")
+    asyncio.create_task(_retention_loop())
+    logger.info(
+        f"File watcher started on {DROPZONE_PATH}; "
+        f"retention {PARSED_RETENTION_DAYS} days"
+    )
 
 @app.on_event("shutdown")
 async def shutdown():

@@ -11,7 +11,7 @@ export default function KnowledgeBase() {
   const [documents, setDocuments] = useState([])
   const [sourceFilter, setSourceFilter] = useState('')
   const [loading, setLoading] = useState(true)
-  const [newDoc, setNewDoc] = useState({ title: '', source_type: 'payer_policy', content: '' })
+  const [newDoc, setNewDoc] = useState({ title: '', source_type: 'payer_policy', payer_name: '', content: '' })
   const [indexing, setIndexing] = useState(false)
   const [busyId, setBusyId] = useState(null)
   const [notice, setNotice] = useState(null)
@@ -58,7 +58,7 @@ export default function KnowledgeBase() {
       } else {
         setNotice({ error: false, text: `Indexed ${data.chunks_indexed ?? 0} chunks.` })
         setShowForm(false)
-        setNewDoc({ title: '', source_type: 'payer_policy', content: '' })
+        setNewDoc({ title: '', source_type: 'payer_policy', payer_name: '', content: '' })
       }
       loadDocuments()
     } catch (err) {
@@ -198,6 +198,19 @@ export default function KnowledgeBase() {
                   onChange={e => setNewDoc({ ...newDoc, content: e.target.value })}
                   placeholder="Paste the policy text here. It is chunked, embedded and stored in pgvector so denial analysis can cite it."
                 />
+              </div>
+              <div className="form-group">
+                <label>Payer</label>
+                <input
+                  className="form-input"
+                  value={newDoc.payer_name}
+                  onChange={e => setNewDoc({ ...newDoc, payer_name: e.target.value })}
+                  placeholder="Leave blank if it applies to every payer (e.g. a CMS LCD)"
+                />
+                <div className="form-hint">
+                  Analysis for a denial only cites documents for that claim's payer,
+                  plus anything left blank here.
+                </div>
               </div>
               <div className="form-group">
                 <label>Source Type</label>

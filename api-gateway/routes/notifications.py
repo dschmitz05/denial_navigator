@@ -17,6 +17,7 @@ rather than an assumption about how often this is called.
 
 import json
 import logging
+from uuid import UUID
 import os
 from typing import Optional
 
@@ -80,7 +81,7 @@ async def list_notifications(
 
 
 @router.post("/notifications/{notification_id}/read", response_model=dict)
-async def mark_read(notification_id: str, http_request: Request):
+async def mark_read(notification_id: UUID, http_request: Request):
     """Mark one as read. Scoped to the owner, so an id is not enough."""
     user_id = _me(http_request)
     async with get_connection() as conn:

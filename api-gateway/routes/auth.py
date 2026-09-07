@@ -2,6 +2,7 @@
 
 import json
 import logging
+from uuid import UUID
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request, Depends, Header, Query
@@ -10,8 +11,12 @@ from pydantic import BaseModel
 from api_gateway.services.db import get_connection
 from api_gateway.services.auth import (
     hash_password, verify_password, create_token, create_mfa_token, decode_token,
+    # The shared, bearer-only dependency. This module used to define its own
+    # copy that also accepted a token in x-api-key.
+    get_current_user,
 )
 from api_gateway.services import totp as totp_service
+from api_gateway.routes import users as users_routes
 from api_gateway.services.audit import _client_ip, record as audit_record
 
 logger = logging.getLogger("api_gateway.auth")
@@ -101,26 +106,6 @@ class RegisterRequest(BaseModel):
 
 
 # ── Auth Helpers ──
-
-def get_current_user(request: Request, x_api_key: str = Header(None)):
-    """Extract and validate the current user from Authorization header or API key"""
-    auth_header = request.headers.get("Authorization", "")
-    token = None
-
-    if auth_header.startswith("Bearer "):
-        token = auth_header[7:]
-    elif x_api_key:
-        token = x_api_key
-
-    if not token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-
-    try:
-        payload = decode_token(token)
-        return payload
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-
 
 # ── Routes ──
 
@@ -274,6 +259,20 @@ async def register(request: RegisterRequest, current_user = Depends(get_current_
     """Register a new user (admin only)"""
     if current_user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
+
+    # The same rules the rest of the app enforces. Without these a 3-character
+    # password was accepted with a 201, and an unrecognised role reached the
+    # users.role CHECK constraint and surfaced as an unhandled 500.
+    if len(request.password) < users_routes.MIN_PASSWORD_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Password must be at least {users_routes.MIN_PASSWORD_LENGTH} characters",
+        )
+    if request.role not in users_routes.VALID_ROLES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid role. Must be one of: {list(users_routes.VALID_ROLES)}",
+        )
 
     async with get_connection() as conn:
         # Check if username or email already exists
@@ -455,11 +454,52 @@ async def totp_enroll(http_request: Request):
     }
 
 
+# A six-digit code is 10^6 possibilities and the MFA token lives for ten
+# minutes. Without a limit the only thing standing between an attacker and the
+# second factor is that each 30-second step has one valid code - which is not a
+# limit, it is arithmetic. The password step has a throttle; this needs one.
+TOTP_FAILURE_LIMIT = 5
+TOTP_WINDOW_MINUTES = 10
+
+
+async def _totp_failures(conn, user_id: str) -> int:
+    """Failed code attempts for this account since its last successful one."""
+    return int(await conn.fetchval(
+        f"""
+        SELECT COUNT(*) FROM audit_log
+         WHERE action = 'totp_failed'
+           AND resource_id = $1::uuid
+           AND created_at > NOW() - INTERVAL '{TOTP_WINDOW_MINUTES} minutes'
+           AND created_at > COALESCE((
+                 SELECT MAX(created_at) FROM audit_log
+                  WHERE action IN ('login', 'totp_enrolled') AND resource_id = $1::uuid
+               ), 'epoch'::timestamptz)
+        """,
+        user_id,
+    ) or 0)
+
+
 async def _complete_totp(http_request: Request, body: TotpCode, confirming: bool) -> dict:
     """Shared by enrolment confirmation and ordinary sign-in."""
     user = await _mfa_user(http_request)
     ip = _client_ip(http_request)
     user_agent = http_request.headers.get("user-agent")
+
+    async with get_connection() as conn:
+        if await _totp_failures(conn, str(user["id"])) >= TOTP_FAILURE_LIMIT:
+            await audit_record(
+                action="totp_blocked",
+                resource_type="user",
+                resource_id=str(user["id"]),
+                user_id=str(user["id"]),
+                details={"username": user["username"], "reason": "rate_limited"},
+                ip_address=ip, user_agent=user_agent,
+            )
+            raise HTTPException(
+                status_code=429,
+                detail="Too many incorrect codes. Sign in again to start over.",
+                headers={"Retry-After": str(TOTP_WINDOW_MINUTES * 60)},
+            )
 
     if not user["totp_secret"]:
         raise HTTPException(status_code=409, detail="No authenticator is set up for this account")

@@ -4,6 +4,7 @@ Handles denial analysis reasoning and appeal letter generation
 """
 
 import json
+import asyncio
 import logging
 import os
 from typing import Optional
@@ -243,8 +244,28 @@ class HealthResponse(BaseModel):
 # ── Routes ──
 @app.get("/health", response_model=HealthResponse)
 async def health():
-    resolved = await resolve_model()
-    available = await llama_client.check_model_available(resolved)
+    """Answer inside the gateway's probe budget, always.
+
+    The gateway gives each health probe 3 seconds; this endpoint called out to
+    llama.cpp with a 5 second timeout, and twice (resolve_model, then
+    check_model_available). A busy llama-server generating a long answer could
+    make this outlast the probe, so the settings page reported the LLM as down
+    while it was in fact working. Bounded to 2 seconds here, and a timeout is
+    reported as "model not confirmed" rather than as the service being dead -
+    which is what it actually means.
+    """
+    try:
+        resolved = await asyncio.wait_for(resolve_model(), timeout=2.0)
+        available = await asyncio.wait_for(
+            llama_client.check_model_available(resolved), timeout=2.0
+        )
+    except asyncio.TimeoutError:
+        logger.warning("llama.cpp did not answer the health probe in time")
+        return HealthResponse(
+            status="healthy",
+            model=_model_cache["name"] or LLM_MODEL,
+            model_available=False,
+        )
     return HealthResponse(
         status="healthy",
         model=resolved,
@@ -321,8 +342,13 @@ async def analyze_denial(request: DenialAnalysisRequest):
                     normalised.append({"step": i, "action": text})
             parsed_json["steps"] = normalised
 
-        # Store in database. The result is reported honestly below; this used
-        # to return stored=True even when the POST failed.
+        # Counted BEFORE the store call, not after. These were computed on the
+        # lines below the store and so never reached the database: every row
+        # kept the parameter defaults of 0, while the HTTP response returned
+        # the real numbers. The Insights page reads those columns.
+        prompt_tokens = len(system_prompt.split()) + len(user_prompt.split())
+        completion_tokens = len(raw_response.split())
+
         stored_ok = await store_analysis(
             denial_id=request.denial_id,
             claim_id=request.claim_id,
@@ -330,10 +356,10 @@ async def analyze_denial(request: DenialAnalysisRequest):
             raw_response=raw_response,
             parsed_result=parsed_json or {},
             model_name=model_name,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
         )
-
-        prompt_tokens = len(system_prompt.split()) + len(user_prompt.split())
-        completion_tokens = len(raw_response.split())
 
         return DenialAnalysisResponse(
             model=model_name,

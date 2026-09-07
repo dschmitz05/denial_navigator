@@ -1,327 +1,268 @@
-# Denial Navigator — Architecture Documentation
+# Denial Navigator — Architecture
 
-## System Overview
+Denial Navigator is a self-hosted denial-management system for a billing team.
+It ingests X12 835 remittance (and 837 submission) files, explains each denial
+with a local LLM grounded in the practice's own payer policies, and gives
+billing staff a worklist to act on. No PHI leaves the deployment.
 
-Denial Navigator is a self-hosted, decoupled healthcare denial management system that processes EDI 835 Electronic Remittance Advice (ERA) files, analyzes claim denials using a local LLM with RAG-powered policy retrieval, and provides a human-in-the-loop UI for billing teams to resolve and appeal denied claims.
+This document describes what the system actually does today. Where a design
+choice is non-obvious, the reason is given — those are the parts that get
+"corrected" back into bugs otherwise.
 
-## Architecture Diagram
+---
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        DENIAL NAVIGATOR                             │
-│                                                                     │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐             │
-│  │ EDI Parser  │    │  RAG Engine │    │  LLM Service│             │
-│  │  Port 8001  │    │  Port 8002  │    │  Port 8003  │             │
-│  └──────┬──────┘    └──────┬──────┘    └──────┬──────┘             │
-│         │                  │                  │                      │
-│         ▼                  ▼                  ▼                      │
-│  ┌─────────────────────────────────────────────────────┐             │
-│  │              API Gateway (Port 8000)                │             │
-│  │  Claims │ Denials │ Appeals │ Analyses │ Knowledge  │             │
-│  └─────────────────────────┬───────────────────────────┘             │
-│                            │                                         │
-│                            ▼                                          │
-│  ┌─────────────────────────────────────────────────────┐             │
-│  │         PostgreSQL + pgvector (Port 5432)           │             │
-│  │  claims │ denials │ ai_analyses │ appeals_queue     │             │
-│  │  carc_codes │ rarc_codes │ knowledge_chunks         │             │
-│  └─────────────────────────────────────────────────────┘             │
-│                                                                     │
-│  ┌──────────────┐  ┌──────────────────────────────────┐            │
-│  │ llama.cpp    │  │       Frontend (Port 3080)       │            │
-│  │   Port 8080  │  │   React + Vite + Nginx           │            │
-│  │  qwen2.5:7b  │  │   Denial Triage │ Appeals │ KB   │            │
-│  │ nomic-embed  │  └──────────────────────────────────┘            │
-│  └──────────────┘                                                  │
-│                                                                     │
-│  ┌──────────────┐                                                  │
-│  │   Dropzone   │                                                  │
-│  │  (Volume)    │ ← .835 files land here → auto-parsed            │
-│  └──────────────┘                                                  │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-## Component Details
-
-### 1. EDI Parser Service (`ediparser/`)
-
-**Purpose:** Parse ANSI X12 835 ERA files into structured JSON data.
-
-**Key Features:**
-- File system watcher monitors dropzone directory for new `.835` or `.txt` files
-- Parses X12 segments: ISA, GS, ST, BPR, N1, CLP, SVC, CAS, MIA, MOA, LQ, SE, GE, IEA
-- Extracts payment info (BPR), claim details (CLP), service lines (SVC), and adjustments (CAS)
-- Maps CARC/RARC codes to their definitions
-- Derives denial records from claim adjustment data
-- Stores results via API Gateway
-
-**X12 Segment Mapping:**
-
-| Segment | Purpose | Fields Extracted |
-|---------|---------|-----------------|
-| BPR | Payment summary | Method, amount, claim count, payer control number |
-| CLP | Claim header | Claim ID, status, charges, paid, patient info, DOB, diagnosis codes |
-| SVC | Service line | CPT/HCPCS, modifiers, charge, service date |
-| CAS | Adjustments | Group code (PR/CO/OA), CARC, RARC, amount, reason |
-
-### 2. RAG Engine (`rag-engine/`)
-
-**Purpose:** Provide semantic search over payer policies and medical guidelines.
-
-**Key Features:**
-- Text chunking (512 tokens, 10% overlap)
-- Embedding generation via llama.cpp (`nomic-embed-text` → 768-dim vectors)
-- pgvector cosine similarity search
-- Prompt construction for denial analysis with retrieved policy context
-- Knowledge document lifecycle management
-
-**Vector Store:**
-- Uses pgvector with IVFFlat indexing (`lists = 100`)
-- Cosine similarity metric: `<=>` operator
-- Metadata filtering by payer, date, source type
-
-### 3. LLM Service (`llm-service/`)
-
-**Purpose:** Self-hosted LLM integration for denial reasoning and appeal generation.
-
-**Key Features:**
-- llama.cpp integration via OpenAI-compatible API (`qwen2.5:7b` or `qwen2.5:14b`)
-- Structured JSON output for analysis results
-- Automatic parsing and validation of LLM responses
-- Storage of raw prompts and responses for audit
-- Token counting for cost tracking
-
-**Prompt Architecture:**
+## Request path
 
 ```
-System: Expert RCM Denial Analyst persona
-User: Structured denial context + retrieved policies
-Output: JSON with explanation, category, action plan, steps, appeal draft
+        .835 / .837 upload                        browser
+                │                                    │
+                ▼                                    ▼
+        ┌───────────────┐                  ┌────────────────────┐
+        │  EDI Parser   │                  │  Frontend (nginx)  │
+        │   :8000/int   │                  │  TLS :3443         │
+        └───────┬───────┘                  └─────────┬──────────┘
+                │ parsed JSON                        │ /api/* proxied
+                └──────────────┐        ┌────────────┘
+                               ▼        ▼
+                     ┌────────────────────────────┐
+                     │       API Gateway          │
+                     │  auth · RBAC · audit · CRUD│
+                     └───┬──────────┬─────────┬───┘
+                         │          │         │
+              ┌──────────┘          │         └──────────┐
+              ▼                     ▼                    ▼
+      ┌──────────────┐      ┌──────────────┐    ┌─────────────────┐
+      │  RAG Engine  │      │ LLM Service  │    │ PostgreSQL 17   │
+      │  retrieval   │─────▶│  reasoning   │    │  + pgvector     │
+      └───────┬──────┘      └───────┬──────┘    └─────────────────┘
+              │                     │
+              ▼                     ▼
+   llama.cpp embeddings      llama.cpp chat
+   10.10.10.98:8081          10.10.10.98:8080
+   nomic-embed-text          Qwen3.x (switchable)
 ```
 
-### 4. API Gateway (`api-gateway/`)
+Only the frontend publishes a port. Every other service is reachable on the
+Docker network alone — the gateway, parser, RAG engine and database are not
+bound to a host interface, so the TLS listener on `:3443` is the entire
+external surface.
 
-**Purpose:** Central REST API orchestrating all microservices.
+---
 
-**Endpoints:**
+## Services
 
-| Prefix | Route | Description |
-|--------|-------|-------------|
-| `/api/v1/claims` | GET, POST, PATCH | Claim CRUD + dashboard stats |
-| `/api/v1/denials` | GET, PATCH | Denial list with filters + detail |
-| `/api/v1/appeals` | GET, POST, PATCH | Appeals queue management |
-| `/api/v1/analyses` | GET, POST, store, generate | AI analysis + generation |
-| `/api/v1/knowledge` | GET, POST, embed, search | Knowledge base + vector search |
-| `/api/v1/ingestion` | POST, GET | File upload + ingestion log |
-| `/api/v1/feedback` | GET, POST, analytics | Human feedback loop |
+### Frontend (`frontend/`)
 
-### 5. Frontend (`frontend/`)
+React 19 + Vite, served by nginx, which also terminates TLS and proxies
+`/api/*` to the gateway. `TLS_MODE` selects `self-signed` (generated at
+container start), `provided` (mount your own cert), or `off` (behind an
+existing reverse proxy).
 
-**Purpose:** React-based billing dashboard for human-in-the-loop operations.
+Pages: Dashboard, Claims, Denials, Worklist, Appeals, Upload, Knowledge Base,
+Insights, Audit, Users, Profile, Settings, Login.
 
-**Pages:**
-- **Dashboard:** Stats, priority denials, CARC code aggregation
-- **Claims:** Claim list with status filtering
-- **Denials:** Denial triage with AI analysis generation, detail modal with appeal preview
-- **Appeals:** Queue management, status updates, letter preview
-- **Knowledge Base:** Document management, semantic search
-- **Settings:** Service status, model management, security notes
+`npm run smoke` renders every page in a headless browser and fails on a console
+error. It exists because a temporal-dead-zone bug — a `useState` declared below
+the `useEffect` that read it — shipped a white screen that no unit test caught.
 
-## Database Schema
+### API Gateway (`api-gateway/`)
 
-### Core Tables
+FastAPI on asyncpg, `--workers 4`. Everything the browser touches goes through
+here; the browser never speaks to another service directly.
 
-| Table | Purpose | Key Indexes |
-|-------|---------|-------------|
-| `claims` | Claim records | status, payer_id, created_at |
-| `denials` | Individual denials | claim_id, status, carc_code, appeal_deadline |
-| `ai_analyses` | LLM outputs | denial_id, claim_id, denial_category |
-| `appeals_queue` | Operational queue | denial_id, outcome_status, assigned_user_id |
-| `feedback_loop` | Success/failure logging | ai_analysis_id, accepted, was_paid |
+Middleware, outermost first: `AuditMiddleware` → CORS → `AccessControlMiddleware`.
+Audit is outermost deliberately, so a request rejected by access control is
+still recorded.
 
-### Reference Tables
+Routes: `claims`, `denials`, `appeals`, `analyses`, `knowledge`, `ingestion`,
+`feedback`, `audit`, `auth`, `users`, `notifications`, `retention`, `system`.
 
-| Table | Purpose |
-|-------|---------|
-| `carc_codes` | WPC Claim Adjustment Reason Codes |
-| `rarc_codes` | WPC Remittance Advice Remark Codes |
-| `knowledge_documents` | Payer policies, CMS LCDs, fee schedules |
-| `knowledge_chunks` | Vector embeddings for policy text |
+### EDI Parser (`ediparser/`)
 
-### Compliance Tables
+Parses X12 835 and 837 into structured JSON. Delimiters are read from the ISA
+rather than assumed, and the ISA must be at the start of the file — searching
+for the string "ISA" anywhere would happily read delimiters out of a subscriber
+name.
 
-| Table | Purpose |
-|-------|---------|
-| `audit_log` | HIPAA-compliant access logging |
-| `users` | RBAC user management |
-| `ingestion_log` | File processing audit trail |
+A polling watcher picks up files dropped into the dropzone. It only considers
+`.835`, `.837`, `.edi` and `.txt`, and waits for a file's size to stop changing
+before parsing, so a half-copied upload is not parsed into a silently truncated
+claim set. Already-parsed files are seeded from the output directory at
+startup, because the processed set is in memory and a restart would otherwise
+reparse the entire history.
 
-## Security & Compliance
+Both directories hold PHI and are pruned on a daily sweep
+(`PARSED_RETENTION_DAYS`, default 30). The database is the record; these files
+are a working copy.
 
-### PHI Protection
-- All processing occurs within the Docker network
-- No external API calls for PHI data
-- llama.cpp models run entirely within the container
+### RAG Engine (`rag-engine/`)
 
-### Audit Logging
-- Every access event logged to `audit_log` table
-- Timestamps, user IDs, IP addresses tracked
-- All data modifications recorded with before/after state
+Chunks policy text, embeds it with `nomic-embed-text` (768-dim) through
+llama.cpp's OpenAI-compatible endpoint, and ranks chunks by cosine distance in
+pgvector with an **HNSW** index. Embeddings are requested in batches — one
+request per chunk made a forty-chunk document forty sequential round trips.
 
-### RBAC Framework
-- `billing_specialist`: Queue operations, view claims
-- `billing_manager`: Policy management, bulk operations
-- `rcm_director`: Full access, reporting
-- `admin`: System configuration
+Retrieval is filtered by payer: a denial is argued from documents whose
+`payer_name` matches the claim's payer, plus documents with a NULL
+`payer_name`, which are payer-agnostic (a CMS LCD, a CPT guideline) and stay in
+scope for every denial. Archived documents are excluded, and results below
+`MIN_SIMILARITY` are dropped rather than padded out with weak matches.
 
-### Production Checklist
-- [ ] Change default database password in `.env`
-- [ ] Configure JWT authentication
-- [ ] Enable HTTPS/TLS termination
-- [ ] Set up automated backups for PostgreSQL
-- [ ] Configure rate limiting on API
-- [ ] Review and adjust CORS origins
-- [ ] Set up log aggregation (ELK, Grafana Loki)
+### LLM Service (`llm-service/`)
 
-## Deployment
+Builds the denial prompt, calls llama.cpp, parses the JSON answer, and stores
+prompt, response, model name and token counts in `ai_analyses` for audit.
 
-### Local Development
+`LLM_MODEL=auto` follows whatever model llama.cpp currently has loaded rather
+than trusting a name pinned in `.env`. The host runs one `llama-server` at a
+time and systemd swaps the model; llama.cpp ignores the `model` field in a
+request, so a stale name never breaks a call — it just records the wrong model
+against the analysis, which is the one field the audit trail must not lie about.
+
+The health endpoint is bounded to two seconds because the gateway's probe
+budget is three; an unbounded probe made a busy model look like a dead service.
+
+---
+
+## Data model
+
+Core tables:
+
+| Table | Holds |
+|---|---|
+| `claims` | one row per claim, with a status rolled up from its denials |
+| `denials` | one row per denied service line, with the filing deadline |
+| `ai_analyses` | LLM output, prompt, response, model, token counts |
+| `appeals_queue` | the operational worklist: appeals *and* non-appeal work |
+| `feedback_loop` | whether a recommendation was accepted and whether it paid |
+
+Reference: `carc_codes`, `rarc_codes`, `knowledge_documents`,
+`knowledge_chunks`. Compliance: `audit_log`, `users`, `ingestion_log`,
+`notifications`.
+
+Constraints that carry real weight:
+
+- A **partial unique index** on `appeals_queue(denial_id)` over open rows. The
+  application also checks before inserting, but check-and-insert is two round
+  trips; the index is what actually prevents two clicks creating two queue
+  items, and the insert catches its violation and returns the same 409.
+- `ai_analyses.claim_id` has a foreign key to `claims`, like its siblings.
+- `appeal_deadline_for(payer, remit_date)` computes filing deadlines in SQL, so
+  ingestion, backfill and recompute cannot disagree.
+
+Schema changes live in `database/migrations/`, numbered, and every one is
+idempotent — they are applied by re-running, not by a version table.
+
+---
+
+## Security
+
+**Authentication.** JWT (HS256, PyJWT), bcrypt cost 12, optional TOTP with
+Fernet-encrypted secrets. Sessions are revocable: `users.sessions_valid_from`
+is compared against the token's `iat`, and it is stored via
+`date_trunc('second', NOW())` because `iat` truncates to whole seconds — a
+sub-second timestamp revoked every token the instant it was issued.
+
+**Authorisation.** Roles are `billing_specialist`, `billing_manager`,
+`rcm_director`, `admin`, enforced by `PERMISSIONS`/`PATH_PERMISSIONS` and, for
+specialists, by row-level queue scoping. The role is baked into the token, so
+every request re-checks it against the account: a demotion takes effect
+immediately rather than at the next login. Changing a user's role also bumps
+`sessions_valid_from`.
+
+**Service credentials.** `SERVICE_API_KEY` authenticates service-to-service
+calls through `X-Service-Key` only. It is not accepted as a user credential —
+when it was, a leaked key could act as whatever user the request claimed.
+
+**Login throttling** counts failures out of `audit_log`, not in process memory,
+because with `--workers 4` an in-process counter gives an attacker four times
+the stated budget. TOTP verification is throttled the same way.
+
+**Client IP** is taken from `X-Real-IP`, falling back to the *right-most*
+`X-Forwarded-For` entry. nginx appends with `$proxy_add_x_forwarded_for`, so
+the left-most entry is whatever the client sent — checking only the peer
+address is not enough to make the left-most entry trustworthy.
+
+**Audit.** Every action against a claim is recorded with actor, IP, user agent
+and the affected record's *claim number*, not just its UUID. The UI renders
+entries in plain English.
+
+**Containers** run as a non-root user. PHI never leaves the deployment: no
+outbound calls, and the models run on the operator's own llama.cpp host.
+
+---
+
+## Reliability
+
+- **Ingestion is one transaction.** A failure partway through used to leave the
+  file logged as `completed` with only some of its claims written — and because
+  the file hash was already recorded, the retry was refused as a duplicate.
+- **835 upserts never overwrite a non-zero charge with zero.** A remittance
+  reports what was paid, not always what was billed.
+- **Duplicate denials are skipped, not re-inserted**, and the reported count
+  comes from `RETURNING`, so "offered" and "stored" are separate numbers.
+- **Bulk queueing resolves the whole batch in one query** instead of three per
+  denial, and reports partial success rather than failing the batch.
+- **The connection pool** is checked with the public `is_closing()`, and is
+  created lazily on first use; there is no lifespan handler.
+
+---
+
+## Operations
+
 ```bash
-./scripts/setup.sh
+./scripts/setup.sh                     # first run
+docker compose ps                      # service state
+docker compose logs -f <service>
+./scripts/backup.sh                    # verified pg_dump
+./scripts/restore.sh <file>
+./scripts/eval_model.py                # score a model against known denials
+./scripts/send_deadline_digests.sh     # filing-deadline notifications
+./scripts/check_docs_offline.sh        # docs must work air-gapped
 ```
 
-### Production
+Migrations:
+
 ```bash
-# Build with production settings
-docker-compose -f docker-compose.yml up -d
-
-# Verify
-curl http://localhost:8000/health        # gateway, bound to loopback
-curl -k https://localhost:3443/          # the application over TLS
+docker exec -i denial-navigator-postgres \
+  psql -U denial_nav -d denial_navigator -v ON_ERROR_STOP=1 \
+  < database/migrations/0NN_name.sql
 ```
 
-### Monitoring
-- Docker Compose healthchecks for all services
-- PostgreSQL connection pooling (min 2, max 20)
-- llama.cpp model availability checks
+Health: `GET /api/v1/system/health` reports every dependency with latency, and
+distinguishes essential services from optional ones.
 
-## Extensibility
+API docs are fully self-contained — Swagger UI and ReDoc assets are vendored,
+not pulled from a CDN, because this is expected to run air-gapped.
 
-### Adding New CARC/RARC Codes
-Edit `database/seed/carc_codes.sql` and `database/seed/rarc_codes.sql`, then:
-```bash
-docker-compose exec postgres psql -U denial_nav -d denial_navigator -f /docker-entrypoint-initdb.d/200-seed/carc_codes.sql
-```
+---
 
-### Adding New Payer Policies
-1. Add document via Knowledge Base UI or API
-2. Upload PDF/text content
-3. System auto-chunks and generates embeddings
-4. Searchable via RAG engine
-
-### Adding New LLM Models
-Load the model on your llama.cpp server, then update `.env`:
-```bash
-# Update .env: LLM_MODEL=your-model
-docker-compose restart llm-service api
-```
-
-## Troubleshooting
-
-### Common Issues
-
-| Issue | Solution |
-|-------|----------|
-| PostgreSQL won't start | Check `pgdata` volume permissions |
-| llama.cpp models not loading | Check GPU memory, verify model is loaded on host |
-| EDI parsing fails | Verify file is valid X12 format, check dropzone permissions |
-| Frontend can't reach API | Check CORS settings, verify API is running |
-| Vector search returns nothing | Ensure embeddings exist, check pgvector extension |
-
-### Useful Commands
-```bash
-# Check all service status
-docker-compose ps
-
-# View service logs
-docker-compose logs -f <service-name>
-
-# Restart a specific service
-docker-compose restart <service-name>
-
-# Access PostgreSQL shell
-docker-compose exec postgres psql -U denial_nav -d denial_navigator
-
-# Check vector store size
-docker-compose exec postgres psql -c "SELECT COUNT(*) FROM knowledge_chunks;"
-
-# Check loaded models on llama.cpp
-curl http://10.10.10.98:8080/v1/models
-```
-
-## File Structure
+## Layout
 
 ```
 denial-navigator/
-├── docker-compose.yml          # Service orchestration
-├── .env.example                # Environment template
-├── README.md                   # Getting started
-├── docs/
-│   └── ARCHITECTURE.md         # This file
+├── docker-compose.yml
 ├── database/
-│   ├── init.sql                # Schema + views + triggers
-│   ├── seed/
-│   │   ├── carc_codes.sql      # CARC code reference
-│   │   ├── rarc_codes.sql      # RARC code reference
-│   │   └── sample_data.sql     # Demo data
-├── ediparser/                  # EDI 835 parsing service
-│   ├── main.py                 # FastAPI entry point
-│   ├── parser/
-│   │   ├── x12_parser.py       # Core X12 segment parser
-│   │   ├── schema.py           # Pydantic data models
-│   │   └── __init__.py
-│   ├── watch/
-│   │   └── watcher.py          # File system watcher
-├── rag-engine/                 # RAG/vector search service
-│   ├── main.py                 # FastAPI entry point
-│   ├── embedding.py            # llama.cpp embedding client
-│   ├── vector_store.py         # pgvector operations
-│   └── prompts/
-│       └── denial_analysis.py  # Prompt templates
-├── llm-service/                # LLM reasoning service
-│   └── main.py                 # FastAPI + llama.cpp integration
-├── api-gateway/                # Main API orchestration
-│   ├── main.py                 # FastAPI entry point
-│   ├── services/
-│   │   ├── db.py               # PostgreSQL connection pool
-│   │   └── __init__.py         # Service HTTP clients
-│   └── routes/
-│       ├── claims.py           # Claim endpoints
-│       ├── denials.py          # Denial endpoints
-│       ├── appeals.py          # Appeals endpoints
-│       ├── analyses.py         # AI analysis endpoints
-│       ├── knowledge.py        # Knowledge base endpoints
-│       ├── ingestion.py        # File upload endpoints
-│       └── feedback.py         # Feedback loop endpoints
-├── frontend/                   # React billing dashboard
-│   ├── src/
-│   │   ├── main.jsx
-│   │   ├── App.jsx
-│   │   ├── components/
-│   │   │   └── Layout.jsx
-│   │   ├── pages/
-│   │   │   ├── Dashboard.jsx
-│   │   │   ├── Claims.jsx
-│   │   │   ├── Denials.jsx
-│   │   │   ├── Appeals.jsx
-│   │   │   ├── KnowledgeBase.jsx
-│   │   │   └── Settings.jsx
-│   │   └── styles/
-│   │       └── main.css
-│   └── Dockerfile
-└── scripts/
-    ├── setup.sh                # Initial setup
-    ├── upload_sample.sh        # Upload test file
-    └── teardown.sh             # Stop services
+│   ├── init.sql                    schema, views, triggers
+│   ├── migrations/                 numbered, idempotent
+│   └── seed/                       CARC/RARC reference data
+├── ediparser/
+│   ├── main.py                     FastAPI + retention sweep
+│   ├── parser/                     x12_parser, x12_common, schema
+│   └── watch/watcher.py            dropzone poller
+├── rag-engine/
+│   ├── main.py                     chunk, embed, vector search
+│   └── prompts/denial_analysis.py
+├── llm-service/main.py
+├── api-gateway/
+│   ├── main.py
+│   ├── routes/                     13 route modules
+│   └── services/                   db, audit, access, totp, ratelimit,
+│                                   claim_status, notifications
+├── frontend/
+│   ├── src/pages/                  13 pages
+│   ├── src/lib/                    authFetch, auditText
+│   └── scripts/smoke-render.mjs    npm run smoke
+├── scripts/
+└── docs/
 ```

@@ -2,6 +2,7 @@
 
 import json
 import logging
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Query
@@ -96,8 +97,10 @@ async def list_audit_log(
     resource_type: Optional[str] = Query(None),
     user_id: Optional[str] = Query(None),
     username: Optional[str] = Query(None, description="Actor name, including 'service:*' and 'anonymous'"),
-    start_date: Optional[str] = Query(None),
-    end_date: Optional[str] = Query(None),
+    # Typed, so a query string becomes a datetime before it reaches asyncpg -
+    # /audit?start_date=... returned 500 on the compliance log's own filter.
+    start_date: Optional[datetime] = Query(None),
+    end_date: Optional[datetime] = Query(None),
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     current_user = Depends(require_admin_or_manager),

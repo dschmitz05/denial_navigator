@@ -61,6 +61,8 @@ services:
       <<: *common-env
       DATABASE_URL: postgresql://${POSTGRES_USER:-denial_nav}:${POSTGRES_PASSWORD:-denial_nav_pass}@postgres:5432/${POSTGRES_DB:-denial_navigator}
       DROPZONE_PATH: /app/dropzone
+      # Raw and parsed 835s are PHI; they are a working copy, not the record.
+      PARSED_RETENTION_DAYS: ${PARSED_RETENTION_DAYS:-30}
       OUTPUT_PATH: /app/output
       SERVICE_API_KEY: ${SERVICE_API_KEY:-}
     depends_on:

@@ -12,9 +12,14 @@ _pool: Optional[asyncpg.Pool] = None
 
 
 async def get_pool() -> asyncpg.Pool:
-    """Get or create the database connection pool"""
+    """Get or create the database connection pool.
+
+    `is_closing()` is the public form of the check; `_pool._closed` was a
+    private attribute that asyncpg is free to rename in any release, and it
+    would have failed with an AttributeError on every request if it did.
+    """
     global _pool
-    if _pool is None or _pool._closed:
+    if _pool is None or _pool.is_closing():
         _pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=20)
     return _pool
 
@@ -30,16 +35,14 @@ async def get_connection():
         await pool.release(conn)
 
 
-async def init_db():
-    """Initialize the database pool on startup"""
-    global _pool
-    _pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=20)
-    print("Database pool initialized")
-
-
 async def close_db():
-    """Close the database pool on shutdown"""
+    """Close the database pool on shutdown.
+
+    There is no init_db: the app has no lifespan handler, and get_pool()
+    creates the pool lazily on first use. The old init_db() was never wired to
+    anything and only offered a second, divergent place to configure the pool.
+    """
     global _pool
     if _pool:
         await _pool.close()
-        print("Database pool closed")
+        _pool = None

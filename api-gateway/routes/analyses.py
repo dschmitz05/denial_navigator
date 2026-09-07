@@ -2,6 +2,7 @@
 
 import json
 import logging
+from uuid import UUID
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -38,7 +39,7 @@ class GenerateAnalysisRequest(BaseModel):
 
 @router.get("/analyses", response_model=list[dict])
 async def list_analyses(
-    denial_id: str = Query(None),
+    denial_id: Optional[UUID] = Query(None),
     claim_id: str = Query(None),
     limit: int = Query(50),
 ):
@@ -129,7 +130,12 @@ async def generate_analysis(request: GenerateAnalysisRequest, http_request: Requ
         if not denial:
             raise HTTPException(status_code=404, detail="Denial not found")
 
-        icd = denial["icd_10_codes"][0] if denial.get("icd_10_codes") else ""
+        # All of them, not just the first. Medical-necessity denials usually
+        # turn on a secondary diagnosis - the one that justifies the service -
+        # and searching on icd_10_codes[0] alone dropped exactly the code the
+        # policy would have been found by. Capped so a long list cannot drown
+        # out the CPT and CARC terms.
+        icd = " ".join((denial.get("icd_10_codes") or [])[:5])
         search_query = f"{denial['payer_name']} {denial['cpt_code']} {icd} {denial['carc_code']}"
 
         try:

@@ -79,7 +79,11 @@ def principal(request) -> Principal:
         return Principal("anonymous", reason="invalid_service_key")
 
     header = request.headers.get("authorization") or ""
-    token = header[7:] if header.lower().startswith("bearer ") else request.headers.get("x-api-key")
+    # Only a bearer token is a user credential. x-api-key used to fall through
+    # to here, so a leaked SERVICE_API_KEY could act as whatever user its
+    # payload claimed - conflating machine identity with a person's. Services
+    # authenticate above, with X-Service-Key, and get a service principal.
+    token = header[7:] if header.lower().startswith("bearer ") else None
     if not token:
         return Principal("anonymous", reason="no_credentials")
 
@@ -281,7 +285,7 @@ async def account_is_current(who: "Principal") -> tuple[bool, str]:
     try:
         async with get_connection() as conn:
             row = await conn.fetchrow(
-                "SELECT is_active, sessions_valid_from FROM users WHERE id = $1::uuid",
+                "SELECT is_active, sessions_valid_from, role FROM users WHERE id = $1::uuid",
                 who.user_id,
             )
     except Exception as e:
@@ -296,6 +300,15 @@ async def account_is_current(who: "Principal") -> tuple[bool, str]:
         return False, "account_deactivated"
 
     valid_from = row["sessions_valid_from"]
+    # The role is baked into the token at sign-in, and every authorisation
+    # decision reads it from there. Without this check a demotion did not take
+    # effect until the token expired: an admin demoted to billing_specialist
+    # kept answering 200 on /users for up to eight hours. Comparing against the
+    # account closes it immediately, and does not depend on every future write
+    # path remembering to invalidate sessions.
+    if who.role != row["role"]:
+        return False, "role_changed"
+
     if valid_from is not None and who.issued_at is not None:
         # Compared exactly. An earlier version allowed a one-second grace to
         # avoid rejecting a token minted in the same second as the bump - but
