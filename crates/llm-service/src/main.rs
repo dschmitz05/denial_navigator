@@ -387,8 +387,7 @@ fn build_router(state: AppState) -> Router {
         let cors = CorsLayer::new()
             .allow_origin(AllowOrigin::list(origins))
             .allow_methods(Any)
-            .allow_headers(Any)
-            .allow_credentials(true);
+            .allow_headers(Any);
         app = app.layer(cors);
     }
 

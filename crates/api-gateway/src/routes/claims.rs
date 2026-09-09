@@ -276,22 +276,22 @@ pub async fn dashboard_stats(
     .map_err(AppError::Db)?;
 
     let total_denied: (Option<f64>,) =
-        sqlx::query_as("SELECT COALESCE(SUM(adjustment_amount), 0) FROM denials")
+        sqlx::query_as("SELECT COALESCE(SUM(adjustment_amount), 0)::float8 FROM denials")
             .fetch_one(&state.pool)
             .await
             .map_err(AppError::Db)?;
 
     let open_denied: (Option<f64>,) = sqlx::query_as(
-        "SELECT COALESCE(SUM(adjustment_amount), 0) FROM denials WHERE status = 'open'",
+        "SELECT COALESCE(SUM(adjustment_amount), 0)::float8 FROM denials WHERE status = 'open'",
     )
     .fetch_one(&state.pool)
     .await
     .map_err(AppError::Db)?;
 
     let financial = sqlx::query(
-        "SELECT COALESCE(SUM(total_charge), 0) as total_charges, \
-         COALESCE(SUM(total_paid), 0) as total_paid, \
-         COALESCE(SUM(total_adjustment), 0) as total_adjustments \
+        "SELECT COALESCE(SUM(total_charge), 0)::float8 as total_charges, \
+         COALESCE(SUM(total_paid), 0)::float8 as total_paid, \
+         COALESCE(SUM(total_adjustment), 0)::float8 as total_adjustments \
          FROM claims WHERE id IN (SELECT DISTINCT claim_id FROM denials)",
     )
     .fetch_one(&state.pool)

@@ -81,3 +81,6 @@ dropzone/
 /.uhc835.pdf
 /.uhc835.txt
 /.tree.json
+
+# Local Rust-stack test rig (parallel to the Python compose stack)
+/.rust-stack/

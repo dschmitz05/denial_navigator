@@ -566,7 +566,7 @@ fn build_router(state: AppState) -> Router {
         .route("/ingest", post(ingest_file))
         .route("/ingest-dropzone", post(ingest_dropzone))
         .route("/files", get(list_files))
-        .route("/output/:file_name", get(get_output));
+        .route("/output/{file_name}", get(get_output));
 
     // This service is reached by the gateway over the Docker network, never
     // by a browser, so it needs no CORS by default. Add it only if configured.
@@ -580,8 +580,7 @@ fn build_router(state: AppState) -> Router {
         let cors = CorsLayer::new()
             .allow_origin(AllowOrigin::list(origins))
             .allow_methods(Any)
-            .allow_headers(Any)
-            .allow_credentials(true);
+            .allow_headers(Any);
         app = app.layer(cors);
     }
 

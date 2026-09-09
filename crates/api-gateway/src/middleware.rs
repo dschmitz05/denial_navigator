@@ -70,33 +70,6 @@ pub async fn access(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    if MFA_ONLY_PATHS.contains(&path.as_str()) {
-        let claims = match &authorization {
-            Some(auth) if auth.starts_with("Bearer ") => {
-                let token = &auth["Bearer ".len()..];
-                denial_common::auth::decode_token(token, &config.jwt_secret)
-                    .map_err(|_| AppError::Unauthorized)?
-            }
-            _ => return Err(AppError::Unauthorized),
-        };
-        if claims.scope != "mfa" {
-            return Err(AppError::Forbidden);
-        }
-        let principal = Principal {
-            kind: PrincipalKind::User,
-            user_id: Some(claims.sub.clone()),
-            username: claims.username.clone(),
-            role: Some(claims.role.clone()),
-            reason: None,
-            issued_at: Some(claims.iat),
-            scope: Some(claims.scope.clone()),
-            ip: None,
-        };
-        let mut req = req;
-        req.extensions_mut().insert(principal);
-        return Ok(next.run(req).await);
-    }
-
     let principal = resolve_from(
         authorization.as_deref(),
         service_name.as_deref(),
@@ -105,6 +78,17 @@ pub async fn access(
     );
 
     if matches!(principal.kind, PrincipalKind::Anonymous) {
+        return Err(AppError::Unauthorized);
+    }
+
+    // A token that has only cleared the password step (scope "mfa") is confined
+    // to the endpoints that complete the second factor. A full-scope token is
+    // free to use those same endpoints and everything else. Mirrors
+    // `access.py`: `if who.scope == "mfa" and path not in MFA_ONLY_PATHS`.
+    if principal.kind == PrincipalKind::User
+        && principal.scope.as_deref() == Some("mfa")
+        && !MFA_ONLY_PATHS.contains(&path.as_str())
+    {
         return Err(AppError::Unauthorized);
     }
 
