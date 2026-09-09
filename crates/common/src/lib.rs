@@ -13,5 +13,6 @@ pub mod audit;
 pub mod ratelimit;
 pub mod clients;
 pub mod error;
+pub mod pgjson;
 
 pub use error::AppError;

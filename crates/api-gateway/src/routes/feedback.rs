@@ -9,10 +9,10 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
-use chrono::{DateTime, NaiveDate, Utc};
 use denial_common::error::AppError;
+use denial_common::pgjson::{row_to_json, value_at};
 use serde::Deserialize;
-use sqlx::{Column, QueryBuilder, Row};
+use sqlx::{QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -40,57 +40,6 @@ pub struct ListFeedbackQuery {
 
 fn default_limit() -> i64 {
     50
-}
-
-/// A column reader that copes with every Postgres type this schema puts on the
-/// wire, not just the four `String`/`i64`/`f64`/`bool` cases the other route
-/// modules handle.
-fn json_value_at(row: &sqlx::postgres::PgRow, name: &str) -> serde_json::Value {
-    use serde_json::Value;
-    if let Ok(v) = row.try_get::<Option<String>, _>(name) {
-        return v.map(Value::String).unwrap_or(Value::Null);
-    }
-    if let Ok(v) = row.try_get::<Option<bool>, _>(name) {
-        return v.map(Value::from).unwrap_or(Value::Null);
-    }
-    if let Ok(v) = row.try_get::<Option<i16>, _>(name) {
-        return v.map(Value::from).unwrap_or(Value::Null);
-    }
-    if let Ok(v) = row.try_get::<Option<i32>, _>(name) {
-        return v.map(Value::from).unwrap_or(Value::Null);
-    }
-    if let Ok(v) = row.try_get::<Option<i64>, _>(name) {
-        return v.map(Value::from).unwrap_or(Value::Null);
-    }
-    if let Ok(v) = row.try_get::<Option<f64>, _>(name) {
-        return v.map(Value::from).unwrap_or(Value::Null);
-    }
-    if let Ok(v) = row.try_get::<Option<Uuid>, _>(name) {
-        return v.map(|u| Value::String(u.to_string())).unwrap_or(Value::Null);
-    }
-    if let Ok(v) = row.try_get::<Option<DateTime<Utc>>, _>(name) {
-        return v.map(|t| Value::String(t.to_rfc3339())).unwrap_or(Value::Null);
-    }
-    if let Ok(v) = row.try_get::<Option<NaiveDate>, _>(name) {
-        return v.map(|d| Value::String(d.to_string())).unwrap_or(Value::Null);
-    }
-    if let Ok(v) = row.try_get::<Option<Vec<String>>, _>(name) {
-        return v
-            .map(|xs| Value::Array(xs.into_iter().map(Value::String).collect()))
-            .unwrap_or(Value::Null);
-    }
-    if let Ok(v) = row.try_get::<Option<serde_json::Value>, _>(name) {
-        return v.unwrap_or(Value::Null);
-    }
-    Value::Null
-}
-
-fn row_to_json(row: &sqlx::postgres::PgRow) -> serde_json::Value {
-    let mut map = serde_json::Map::new();
-    for col in row.columns().iter() {
-        map.insert(col.name().to_string(), json_value_at(row, col.name()));
-    }
-    serde_json::Value::Object(map)
 }
 
 fn f64_col(row: &sqlx::postgres::PgRow, col: &str) -> Option<f64> {
@@ -294,7 +243,7 @@ pub async fn feedback_analytics(
                 let paid = i64_col(r, "paid_count");
                 let known = i64_col(r, "outcome_known");
                 let mut obj = serde_json::json!({
-                    key: json_value_at(r, key),
+                    key: value_at(r, key),
                     "feedback_count": i64_col(r, "feedback_count"),
                     "avg_rating": f64_col(r, "avg_rating"),
                     "paid_count": paid,
@@ -305,7 +254,7 @@ pub async fn feedback_analytics(
                     obj["recovered_amount"] = serde_json::json!(f64_col(r, "recovered_amount").unwrap_or(0.0));
                 }
                 if key == "carc_code" {
-                    obj["carc_description"] = json_value_at(r, "carc_description");
+                    obj["carc_description"] = value_at(r, "carc_description");
                 }
                 obj
             })
@@ -324,7 +273,7 @@ pub async fn feedback_analytics(
             let paid = i64_col(r, "paid_count");
             let known = i64_col(r, "outcome_known");
             serde_json::json!({
-                "month": json_value_at(r, "month"),
+                "month": value_at(r, "month"),
                 "feedback_count": i64_col(r, "feedback_count"),
                 "avg_rating": f64_col(r, "avg_rating"),
                 "paid_count": paid,

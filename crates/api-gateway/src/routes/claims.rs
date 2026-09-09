@@ -1,11 +1,10 @@
 use axum::extract::{Query, State};
-use axum::routing::{get, patch, post};
-use axum::{Extension, Json, Router};
-use chrono::DateTime;
+use axum::routing::get;
+use axum::{Json, Router};
 use denial_common::error::AppError;
-use denial_common::rbac::Principal;
-use serde::{Deserialize, Serialize};
-use sqlx::{Column, QueryBuilder, Row};
+use denial_common::pgjson::row_to_json;
+use serde::Deserialize;
+use sqlx::{QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -98,31 +97,6 @@ pub async fn list_claims(
     Ok(Json(values))
 }
 
-fn row_to_json(row: &sqlx::postgres::PgRow) -> serde_json::Value {
-    let mut map = serde_json::Map::new();
-    for col in row.columns().iter() {
-        let name = col.name();
-        let val = row
-            .try_get::<Option<String>, _>(name)
-            .map(|v| v.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null))
-            .or_else(|_| {
-                row.try_get::<Option<i64>, _>(name)
-                    .map(|v| v.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null))
-            })
-            .or_else(|_| {
-                row.try_get::<Option<f64>, _>(name)
-                    .map(|v| v.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null))
-            })
-            .or_else(|_| {
-                row.try_get::<Option<bool>, _>(name)
-                    .map(|v| v.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null))
-            })
-            .unwrap_or(serde_json::Value::Null);
-        map.insert(name.to_string(), val);
-    }
-    serde_json::Value::Object(map)
-}
-
 pub async fn get_claim(
     State(state): State<AppState>,
     axum::extract::Path(claim_id): axum::extract::Path<Uuid>,
@@ -167,7 +141,6 @@ pub async fn create_claim(
     State(state): State<AppState>,
     Json(body): Json<ClaimCreate>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), AppError> {
-    let icd = serde_json::to_string(&body.icd_10_codes).map_err(|e| AppError::Internal(e.to_string()))?;
     let row = sqlx::query(
         "INSERT INTO claims (claim_number, patient_id, payer_name, total_charge, icd_10_codes, status) \
          VALUES ($1, $2, $3, $4, $5, 'ingested') RETURNING *",
@@ -176,7 +149,9 @@ pub async fn create_claim(
     .bind(&body.patient_id)
     .bind(&body.payer_name)
     .bind(body.total_charge)
-    .bind(&icd)
+    // icd_10_codes is a Postgres text[]; bind the Vec directly. (It was being
+    // JSON-encoded to a string, which the text[] column rejected.)
+    .bind(&body.icd_10_codes)
     .fetch_one(&state.pool)
     .await
     .map_err(AppError::Db)?;

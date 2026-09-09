@@ -14,6 +14,8 @@
 
 use std::net::{IpAddr, SocketAddr};
 
+use ipnet::IpNet;
+
 use axum::extract::Request;
 use axum::http::header;
 use axum::http::StatusCode;
@@ -348,7 +350,9 @@ pub async fn account_is_current(pool: &PgPool, who: &Principal) -> Result<(), St
     };
 
     let row = sqlx::query(
-        "SELECT is_active, EXTRACT(EPOCH FROM sessions_valid_from), role \
+        // EXTRACT(EPOCH FROM ...) is NUMERIC in Postgres; cast so it decodes
+        // into f64 rather than panicking the worker on every request.
+        "SELECT is_active, EXTRACT(EPOCH FROM sessions_valid_from)::float8 AS valid_from, role \
          FROM users WHERE id = $1::uuid",
     )
     .bind(user_id)
@@ -370,9 +374,15 @@ pub async fn account_is_current(pool: &PgPool, who: &Principal) -> Result<(), St
         return Err("account_deleted".to_string());
     };
 
-    let is_active: bool = row.get(0);
-    let valid_from: Option<f64> = row.get(1);
-    let role: String = row.get(2);
+    // Never panic in the access path: a decode error here would drop the
+    // connection and surface as a 502, not a 401.
+    let (Ok(is_active), Ok(valid_from), Ok(role)) = (
+        row.try_get::<bool, _>("is_active"),
+        row.try_get::<Option<f64>, _>("valid_from"),
+        row.try_get::<String, _>("role"),
+    ) else {
+        return Err("account_check_unavailable".to_string());
+    };
 
     if !is_active {
         return Err("account_deactivated".to_string());
@@ -400,30 +410,74 @@ pub enum Decision {
     Authorized(Principal),
 }
 
+/// The parts of a request the access decision needs, lifted out of the
+/// `axum::Request` before any `.await`. `axum::body::Body` is `!Sync`, so a
+/// middleware future that held `&Request` across the account-currency query
+/// would not be `Send` - hence this owned snapshot.
+#[derive(Clone, Debug, Default)]
+pub struct RequestCtx {
+    pub method: String,
+    pub path: String,
+    pub authorization: Option<String>,
+    pub service_name: Option<String>,
+    pub service_key: Option<String>,
+    pub x_real_ip: Option<String>,
+    pub x_forwarded_for: Option<String>,
+    pub peer: Option<SocketAddr>,
+}
+
+impl RequestCtx {
+    /// Extract everything the decision needs. Pure and synchronous.
+    pub fn from_request(req: &Request, peer: Option<SocketAddr>) -> Self {
+        let h = |name: &str| {
+            req.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+        };
+        Self {
+            method: req.method().to_string(),
+            path: req.uri().path().to_string(),
+            authorization: h("authorization"),
+            service_name: h("x-service-name"),
+            service_key: h("x-service-key"),
+            x_real_ip: h("x-real-ip"),
+            x_forwarded_for: h("x-forwarded-for"),
+            peer,
+        }
+    }
+}
+
 /// Run the complete decision for one request, in order:
 /// public → identity → MFA confinement → account currency → role authorisation.
 pub async fn decide(
     pool: &PgPool,
-    req: &Request,
+    ctx: &RequestCtx,
     config: &GatewayConfig,
-    peer: Option<SocketAddr>,
-    trusted_proxies: &[IpAddr],
+    trusted_proxies: &[IpNet],
 ) -> Decision {
-    let path = req.uri().path().to_string();
-    let method = req.method().to_string();
-
-    if is_public(&path, &method) {
+    if is_public(&ctx.path, &ctx.method) {
         return Decision::Public;
     }
 
-    let mut who = resolve_principal(req, config);
-    who.ip = client_ip(peer, req, trusted_proxies);
+    let mut who = resolve_from(
+        ctx.authorization.as_deref(),
+        ctx.service_name.as_deref(),
+        ctx.service_key.as_deref(),
+        config,
+    );
+    who.ip = client_ip_from(
+        ctx.peer,
+        ctx.x_real_ip.as_deref(),
+        ctx.x_forwarded_for.as_deref(),
+        trusted_proxies,
+    );
 
     // A token that has only cleared the password step is confined to the
     // endpoints that complete the second factor.
     if who.kind == PrincipalKind::User
         && who.scope.as_deref() == Some("mfa")
-        && !MFA_ONLY_PATHS.contains(&path.as_str())
+        && !MFA_ONLY_PATHS.contains(&ctx.path.as_str())
     {
         return Decision::Unauthorized(
             "Two-factor authentication has not been completed".to_string(),
@@ -434,17 +488,7 @@ pub async fn decide(
     // entitled to it. Services hold no account, so they skip this.
     if who.kind == PrincipalKind::User {
         if let Err(why) = account_is_current(pool, &who).await {
-            let ip = who.ip.clone();
-            who = Principal {
-                kind: PrincipalKind::Anonymous,
-                user_id: None,
-                username: who.username.clone(),
-                role: None,
-                reason: Some(why),
-                issued_at: None,
-                scope: None,
-                ip,
-            };
+            return Decision::Unauthorized(format!("Not authenticated: {why}"));
         }
     }
 
@@ -452,7 +496,7 @@ pub async fn decide(
         return Decision::Unauthorized("Not authenticated".to_string());
     }
 
-    match authorize(&who, &method, &path) {
+    match authorize(&who, &ctx.method, &ctx.path) {
         Ok(()) => Decision::Authorized(who),
         Err(reason) => Decision::Forbidden(format!("Access denied: {reason}")),
     }
@@ -465,7 +509,7 @@ pub async fn decide(
 /// `X-Real-IP` is preferred (nginx sets it to `$remote_addr`, which the caller
 /// cannot influence). `X-Forwarded-For` is read from the right-most entry, the
 /// one our own proxy appended; the left-most is attacker-controlled.
-pub fn client_ip(peer: Option<SocketAddr>, req: &Request, trusted: &[IpAddr]) -> Option<String> {
+pub fn client_ip(peer: Option<SocketAddr>, req: &Request, trusted: &[IpNet]) -> Option<String> {
     let real = req.headers().get("x-real-ip").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
     let fwd = req
         .headers()
@@ -481,11 +525,13 @@ pub fn client_ip_from(
     peer: Option<SocketAddr>,
     x_real_ip: Option<&str>,
     x_forwarded_for: Option<&str>,
-    trusted: &[IpAddr],
+    trusted: &[IpNet],
 ) -> Option<String> {
     let peer_ip: Option<IpAddr> = peer.map(|p| p.ip());
 
-    let is_trusted = peer_ip.map(|ip| trusted.contains(&ip)).unwrap_or(false);
+    let is_trusted = peer_ip
+        .map(|ip| trusted.iter().any(|net| net.contains(&ip)))
+        .unwrap_or(false);
     if is_trusted {
         if let Some(real) = x_real_ip {
             if let Ok(ip) = real.trim().parse::<IpAddr>() {

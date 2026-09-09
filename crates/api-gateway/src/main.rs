@@ -59,6 +59,7 @@ async fn main() -> anyhow::Result<()> {
         .layer(cors)
         .layer(axum::middleware::from_fn_with_state(
             middleware::AccessState {
+                pool: state.pool.clone(),
                 config: state.config.clone(),
                 trusted: state.config.trusted_proxies.clone(),
             },

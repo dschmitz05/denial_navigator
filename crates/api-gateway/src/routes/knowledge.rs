@@ -14,9 +14,10 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use chrono::{DateTime, NaiveDate, Utc};
 use denial_common::error::AppError;
+use denial_common::pgjson::row_to_json;
 use denial_common::rbac::{Principal, PrincipalKind};
 use serde::Deserialize;
-use sqlx::{Column, QueryBuilder, Row};
+use sqlx::{QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -36,51 +37,6 @@ fn limit_key(principal: &Principal) -> String {
 
 const PDF_MAGIC: &[u8] = b"%PDF";
 const MAX_DOCUMENT_BYTES: usize = 25 * 1024 * 1024;
-
-// ── Column rendering ────────────────────────────────────────────────────
-
-fn json_value_at(row: &sqlx::postgres::PgRow, name: &str) -> serde_json::Value {
-    use serde_json::Value;
-    if let Ok(v) = row.try_get::<Option<String>, _>(name) {
-        return v.map(Value::String).unwrap_or(Value::Null);
-    }
-    if let Ok(v) = row.try_get::<Option<bool>, _>(name) {
-        return v.map(Value::from).unwrap_or(Value::Null);
-    }
-    if let Ok(v) = row.try_get::<Option<i16>, _>(name) {
-        return v.map(Value::from).unwrap_or(Value::Null);
-    }
-    if let Ok(v) = row.try_get::<Option<i32>, _>(name) {
-        return v.map(Value::from).unwrap_or(Value::Null);
-    }
-    if let Ok(v) = row.try_get::<Option<i64>, _>(name) {
-        return v.map(Value::from).unwrap_or(Value::Null);
-    }
-    if let Ok(v) = row.try_get::<Option<f64>, _>(name) {
-        return v.map(Value::from).unwrap_or(Value::Null);
-    }
-    if let Ok(v) = row.try_get::<Option<Uuid>, _>(name) {
-        return v.map(|u| Value::String(u.to_string())).unwrap_or(Value::Null);
-    }
-    if let Ok(v) = row.try_get::<Option<DateTime<Utc>>, _>(name) {
-        return v.map(|t| Value::String(t.to_rfc3339())).unwrap_or(Value::Null);
-    }
-    if let Ok(v) = row.try_get::<Option<NaiveDate>, _>(name) {
-        return v.map(|d| Value::String(d.to_string())).unwrap_or(Value::Null);
-    }
-    if let Ok(v) = row.try_get::<Option<serde_json::Value>, _>(name) {
-        return v.unwrap_or(Value::Null);
-    }
-    Value::Null
-}
-
-fn row_to_json(row: &sqlx::postgres::PgRow) -> serde_json::Value {
-    let mut map = serde_json::Map::new();
-    for col in row.columns().iter() {
-        map.insert(col.name().to_string(), json_value_at(row, col.name()));
-    }
-    serde_json::Value::Object(map)
-}
 
 // ── PDF / upload decoding ───────────────────────────────────────────────
 

@@ -1,11 +1,12 @@
 use axum::extract::{Query, State};
-use axum::routing::{get, patch, put};
+use axum::routing::get;
 use axum::Json;
 use axum::Router;
 use chrono::{DateTime, NaiveDate, Utc};
 use denial_common::error::AppError;
+use denial_common::pgjson::row_to_json;
 use serde::Deserialize;
-use sqlx::{Column, QueryBuilder, Row};
+use sqlx::{QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -42,31 +43,6 @@ pub struct PayerWindow {
     pub payer_name: String,
     pub appeal_window_days: u32,
     pub notes: Option<String>,
-}
-
-fn row_to_json(row: &sqlx::postgres::PgRow) -> serde_json::Value {
-    let mut map = serde_json::Map::new();
-    for col in row.columns().iter() {
-        let name = col.name();
-        let val = row
-            .try_get::<Option<String>, _>(name)
-            .map(|v| v.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null))
-            .or_else(|_| {
-                row.try_get::<Option<i64>, _>(name)
-                    .map(|v| v.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null))
-            })
-            .or_else(|_| {
-                row.try_get::<Option<f64>, _>(name)
-                    .map(|v| v.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null))
-            })
-            .or_else(|_| {
-                row.try_get::<Option<bool>, _>(name)
-                    .map(|v| v.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null))
-            })
-            .unwrap_or(serde_json::Value::Null);
-        map.insert(name.to_string(), val);
-    }
-    serde_json::Value::Object(map)
 }
 
 fn recommended_resolution(

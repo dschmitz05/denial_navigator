@@ -6,6 +6,8 @@
 //! in-memory fallbacks.
 
 use std::net::IpAddr;
+
+use ipnet::IpNet;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -39,6 +41,21 @@ pub fn env_f64(key: &str, default: f64) -> f64 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+/// Parse one `TRUSTED_PROXY_NETWORKS` entry. Accepts a CIDR ("10.0.0.0/8")
+/// or a bare address ("192.168.1.5", taken as a host route). The old code
+/// parsed every entry as an `IpAddr`, which silently dropped every CIDR - so
+/// the trusted list came out empty and no forwarded-IP header was ever
+/// honoured.
+fn parse_trusted_net(s: &str) -> Option<IpNet> {
+    if s.is_empty() {
+        return None;
+    }
+    if let Ok(net) = s.parse::<IpNet>() {
+        return Some(net);
+    }
+    s.parse::<IpAddr>().ok().map(IpNet::from)
 }
 
 /// Placeholder values that must never be accepted as a real secret.
@@ -119,7 +136,7 @@ pub struct GatewayConfig {
     pub totp_issuer: String,
     pub jwt_expire_minutes: i64,
     pub audit_enabled: bool,
-    pub trusted_proxies: Vec<IpAddr>,
+    pub trusted_proxies: Vec<IpNet>,
     pub public_base_url: String,
     pub rate_limit: RateLimitConfig,
     pub cors_origins: Vec<String>,
@@ -136,7 +153,7 @@ impl GatewayConfig {
     pub fn from_env() -> Self {
         let trusted = env_or("TRUSTED_PROXY_NETWORKS", "127.0.0.1/32,172.16.0.0/12,10.0.0.0/8")
             .split(',')
-            .filter_map(|s| s.trim().parse::<IpAddr>().ok())
+            .filter_map(|s| parse_trusted_net(s.trim()))
             .collect();
 
         Self {
@@ -226,4 +243,30 @@ pub static GATEWAY_CONFIG: OnceLock<GatewayConfig> = OnceLock::new();
 
 pub fn gateway_config() -> &'static GatewayConfig {
     GATEWAY_CONFIG.get_or_init(GatewayConfig::from_env)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_cidr_and_bare_ip_trusted_entries() {
+        assert!(parse_trusted_net("10.0.0.0/8").unwrap().contains(&"10.20.30.40".parse::<IpAddr>().unwrap()));
+        assert!(parse_trusted_net("127.0.0.1/32").unwrap().contains(&"127.0.0.1".parse::<IpAddr>().unwrap()));
+        // Bare address -> host route.
+        let host = parse_trusted_net("192.168.1.5").unwrap();
+        assert!(host.contains(&"192.168.1.5".parse::<IpAddr>().unwrap()));
+        assert!(!host.contains(&"192.168.1.6".parse::<IpAddr>().unwrap()));
+        assert!(parse_trusted_net("").is_none());
+        assert!(parse_trusted_net("not-an-ip").is_none());
+    }
+
+    #[test]
+    fn the_default_trusted_list_is_not_empty() {
+        let nets: Vec<_> = "127.0.0.1/32,172.16.0.0/12,10.0.0.0/8"
+            .split(',')
+            .filter_map(|s| parse_trusted_net(s.trim()))
+            .collect();
+        assert_eq!(nets.len(), 3, "the shipped default must all parse");
+    }
 }

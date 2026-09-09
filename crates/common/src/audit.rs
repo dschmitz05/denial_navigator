@@ -8,7 +8,9 @@
 //! The audit layer sits OUTSIDE the access-control middleware, so it also
 //! records the 401/403 attempts that access control rejects.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
+
+use ipnet::IpNet;
 use std::time::Instant;
 
 use axum::extract::{ConnectInfo, Request, State};
@@ -244,7 +246,7 @@ pub async fn record(
 pub struct AuditState {
     pub pool: PgPool,
     pub config: GatewayConfig,
-    pub trusted: Vec<IpAddr>,
+    pub trusted: Vec<IpNet>,
 }
 
 /// Audit middleware. Sits outside the access-control layer so it also records
