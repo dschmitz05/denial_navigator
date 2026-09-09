@@ -10,6 +10,356 @@ const STATUS_LOOK = {
   down:     { icon: '❌', word: 'Not reachable', tone: 'danger' },
 }
 
+const KIND_LABEL = {
+  carc: 'CARC — adjustment reason codes',
+  rarc: 'RARC — remark codes',
+  icd10: 'ICD-10 — diagnosis codes',
+  cpt: 'CPT — procedure codes',
+  hcpcs: 'HCPCS — Level II codes',
+  modifier: 'Modifiers — HCPCS modifiers',
+}
+
+const ACTION_LABEL = {
+  add: 'new',
+  update: 'updated',
+  deactivate: 'deactivated',
+  reactivate: 'reactivated',
+  unchanged: 'unchanged',
+}
+
+// Reference-list refresh (CARC, RARC, ICD-10, CPT). The server does the
+// parsing and the diffing; this is a preview-then-apply form around it, so
+// a bad file is always seen before it touches the list everyone else reads.
+function ReferenceCodes({ canEdit }) {
+  const [summary, setSummary] = useState(null)
+  const [kind, setKind] = useState('carc')
+  const [file, setFile] = useState(null)
+  const [preview, setPreview] = useState(null)   // dry-run result for file+kind
+  const [busy, setBusy] = useState(null)         // 'preview' | 'apply'
+  const [error, setError] = useState(null)
+  const [notice, setNotice] = useState(null)
+  // Search & manage: one shared `kind` drives both the import target and the
+  // list being searched, so there is a single selector for the section.
+  const [query, setQuery] = useState('')
+  const [page, setPage] = useState(1)
+  const [results, setResults] = useState(null)   // search response for kind+query+page
+  const [selected, setSelected] = useState([])   // codes checked in the current page
+  const [bump, setBump] = useState(0)            // force a re-search after mutations
+  const [busyDelete, setBusyDelete] = useState(null)  // 'delete' | 'clear'
+  const PAGE_SIZE = 50
+
+  const loadSummary = useCallback(async () => {
+    try {
+      const resp = await fetch(`${API_BASE}/reference/summary`)
+      if (!resp.ok) throw new Error(`Could not load reference status (HTTP ${resp.status})`)
+      setSummary(await resp.json())
+    } catch {
+      // Status is a nicety; the import form still works without it.
+    }
+  }, [])
+
+  useEffect(() => { loadSummary() }, [loadSummary])
+
+  // Debounced search: typing settles for 300 ms before the request goes out,
+  // and a settled list is just a search with an empty query.
+  useEffect(() => {
+    const t = setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({ page: String(page), page_size: String(PAGE_SIZE) })
+        if (query.trim()) params.set('q', query.trim())
+        const resp = await fetch(`${API_BASE}/reference/${kind}/search?${params}`)
+        if (resp.ok) {
+          setResults(await resp.json())
+          setSelected([])
+        }
+      } catch {
+        // Browsing is a nicety; the import form does not depend on it.
+      }
+    }, 300)
+    return () => clearTimeout(t)
+  }, [kind, query, page, bump])
+
+  const invalidate = () => { setPreview(null); setNotice(null) }
+
+  const doDelete = async (clearAll) => {
+    if (busyDelete || !results) return
+    if (clearAll && !window.confirm(`Delete ALL ${results.total} code(s) in ${KIND_LABEL[kind]}?`)) return
+    if (!clearAll && selected.length === 0) return
+    if (!clearAll && !window.confirm(`Delete ${selected.length} selected code(s) from ${KIND_LABEL[kind]}?`)) return
+    setBusyDelete(clearAll ? 'clear' : 'delete')
+    setError(null)
+    try {
+      const url = clearAll ? `${API_BASE}/reference/${kind}/clear` : `${API_BASE}/reference/${kind}/delete`
+      const resp = await fetch(url, clearAll ? { method: 'POST' } : {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ codes: selected }),
+      })
+      const data = await resp.json()
+      if (!resp.ok) throw new Error(data.detail || `Request failed (HTTP ${resp.status})`)
+      setNotice(clearAll
+        ? `Cleared ${KIND_LABEL[kind]}: ${data.deleted} code(s) deleted.`
+        : `Deleted ${data.deleted} code(s)${data.not_found ? `; ${data.not_found} not in the list` : ''}.`)
+      setSelected([])
+      setPage(1)
+      setBump(b => b + 1)
+      await loadSummary()
+    } catch (err) {
+      setError(err.message)
+    }
+    setBusyDelete(null)
+  }
+
+  const toggleSelect = (code) => {
+    setSelected(s => s.includes(code) ? s.filter(c => c !== code) : [...s, code])
+  }
+
+  const run = async (apply) => {
+    if (!file || busy) return
+    setBusy(apply ? 'apply' : 'preview')
+    setError(null)
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      fd.append('apply', String(apply))
+      const resp = await fetch(`${API_BASE}/reference/${kind}/import`, { method: 'POST', body: fd })
+      const data = await resp.json()
+      if (!resp.ok) throw new Error(data.detail || `Import request failed (HTTP ${resp.status})`)
+      if (apply) {
+        const c = data.changes
+        setNotice(`Imported ${data.filename}: ${c.add} added, ` +
+          `${c.update + c.deactivate + c.reactivate} changed, ` +
+          `${c.unchanged} unchanged. ${data.codes_not_in_file} code(s) not in the file were left untouched.`)
+        setPreview(null)
+        setFile(null)
+        await loadSummary()
+      } else {
+        setPreview(data)
+      }
+    } catch (err) {
+      setError(err.message)
+    }
+    setBusy(null)
+  }
+
+  return (
+    <>
+      <h4 style={{ marginTop: 24, marginBottom: 8 }}>Reference codes (CARC / RARC / ICD-10 / CPT / HCPCS / Modifiers)</h4>
+      <p style={{ color: 'var(--text-muted)', marginBottom: 12, fontSize: '0.9rem' }}>
+        X12 revises the claim adjustment reason codes a few times a year, the remark code
+        list grows as payers are added, ICD-10 and CPT are updated every October, and CMS
+        refreshes the HCPCS and modifier lists the same way. Upload the updated list as CSV
+        — at minimum a code and a description per row, plus optionally category, status/active,
+        applicable CAGC, and effective/expiration dates. The official ICD-10-CM, CPT, HCPCS and
+        modifier download files (up to ~50 MB) work too. Codes missing from the file are left
+        untouched. Preview first; nothing changes until you apply. You can also search any list
+        below and delete individual codes or clear a whole list.
+      </p>
+      {error && <div className="callout callout-danger" style={{ marginBottom: 12 }}>{error}</div>}
+      {notice && <div className="callout callout-info" style={{ marginBottom: 12 }}>{notice}</div>}
+
+      {summary && (
+        <div className="stats-grid" style={{ marginBottom: 16 }}>
+          {Object.entries(summary).map(([k, s]) => (
+            <div key={k} className="stat-card">
+              <div className="stat-label">{KIND_LABEL[k]}</div>
+              <div className="stat-value">{s.total}</div>
+              <div className="stat-subtitle" style={{ wordBreak: 'break-word' }}>
+                {s.active} active
+                {s.last_import && (
+                  <> · last import {new Date(s.last_import.at).toLocaleString()} by {s.last_import.by}
+                    {s.last_import.filename ? ` (${s.last_import.filename})` : ''}</>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ border: '1px solid var(--gray-200)', borderRadius: 'var(--radius)', padding: 16, marginBottom: 16 }}>
+        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 12 }}>
+          <label>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 4 }}>List</div>
+            <select className="form-select" style={{ width: 250 }}
+                    value={kind}
+                    onChange={e => { setKind(e.target.value); setPage(1); invalidate() }}>
+              {Object.entries(KIND_LABEL).map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+          </label>
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 4 }}>Search</div>
+            <input className="form-input" style={{ width: '100%' }}
+                   placeholder="Search by code or description…"
+                   value={query}
+                   onChange={e => { setQuery(e.target.value); setPage(1) }} />
+          </div>
+          {canEdit && results && results.total > 0 && (
+            <>
+              <button className="btn btn-danger" disabled={selected.length === 0 || !!busyDelete}
+                      onClick={() => doDelete(false)}>
+                {busyDelete === 'delete' ? 'Deleting…' : `Delete selected (${selected.length})`}
+              </button>
+              <button className="btn btn-danger" disabled={!!busyDelete} onClick={() => doDelete(true)}>
+                {busyDelete === 'clear' ? 'Clearing…' : `Clear all ${results.total}`}
+              </button>
+            </>
+          )}
+        </div>
+        {results ? (
+          <>
+            <div className="table-container">
+              <table>
+                <thead>
+                  <tr>
+                    {canEdit && <th style={{ width: 32 }} />}
+                    <th>Code</th>
+                    <th>Description</th>
+                    <th>Status</th>
+                    <th>Effective</th>
+                    <th>Expires</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {results.items.map(i => (
+                    <tr key={i.code}>
+                      {canEdit && (
+                        <td>
+                          <input type="checkbox"
+                                 checked={selected.includes(i.code)}
+                                 onChange={() => toggleSelect(i.code)} />
+                        </td>
+                      )}
+                      <td style={{ fontFamily: 'monospace' }}>{i.code}</td>
+                      <td>{i.description}</td>
+                      <td>
+                        <span style={{
+                          background: i.is_active ? 'var(--success-light)' : 'var(--danger-light)',
+                          color: i.is_active ? 'var(--success-text)' : 'var(--danger-text)',
+                          borderRadius: 999, padding: '2px 10px', fontSize: '0.75rem', fontWeight: 600,
+                        }}>
+                          {i.is_active ? 'active' : 'inactive'}
+                        </span>
+                      </td>
+                      <td>{i.effective_date || '—'}</td>
+                      <td>{i.expiration_date || '—'}</td>
+                    </tr>
+                  ))}
+                  {results.items.length === 0 && (
+                    <tr>
+                      <td colSpan={canEdit ? 6 : 5} style={{ color: 'var(--text-muted)' }}>
+                        No codes found{query.trim() ? ` for “${query.trim()}”` : ''}.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8, fontSize: '0.85rem' }}>
+              <button className="btn btn-sm" disabled={results.page <= 1} onClick={() => setPage(p => p - 1)}>← Prev</button>
+              <span style={{ color: 'var(--text-muted)' }}>
+                Page {results.page} of {Math.max(results.pages, 1)} · {results.total} code(s)
+              </span>
+              <button className="btn btn-sm" disabled={results.page >= results.pages} onClick={() => setPage(p => p + 1)}>Next →</button>
+            </div>
+          </>
+        ) : (
+          <div style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Loading list…</div>
+        )}
+      </div>
+
+      {canEdit ? (
+        <div style={{ border: '1px solid var(--gray-200)', borderRadius: 'var(--radius)', padding: 16, marginBottom: 24 }}>
+          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 12 }}>
+            <label>
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 4 }}>
+                File (CSV) — imported into {KIND_LABEL[kind].split(' — ')[0]}
+              </div>
+              <input type="file" accept=".csv,.txt,text/csv" className="form-input"
+                     onChange={e => { setFile(e.target.files[0] || null); invalidate() }} />
+            </label>
+            <button className="btn" disabled={!file || !!busy} onClick={() => run(false)}>
+              {busy === 'preview' ? 'Previewing…' : 'Preview changes'}
+            </button>
+            <button className="btn btn-primary" disabled={!preview || !!busy} onClick={() => run(true)}>
+              {busy === 'apply' ? 'Importing…' : 'Apply import'}
+            </button>
+          </div>
+
+          {preview && (
+            <div>
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginBottom: 8, fontSize: '0.9rem' }}>
+                <span>{preview.valid_rows} of {preview.rows_parsed} row(s) usable</span>
+                <span style={{ background: 'var(--success-light)', color: 'var(--success-text)', borderRadius: 999, padding: '2px 10px', fontWeight: 600 }}>
+                  +{preview.changes.add} new
+                </span>
+                {preview.changes.update > 0 && (
+                  <span style={{ background: 'var(--warning-light)', color: 'var(--warning-text)', borderRadius: 999, padding: '2px 10px', fontWeight: 600 }}>
+                    {preview.changes.update} updated
+                  </span>
+                )}
+                {preview.changes.deactivate > 0 && (
+                  <span style={{ background: 'var(--danger-light)', color: 'var(--danger-text)', borderRadius: 999, padding: '2px 10px', fontWeight: 600 }}>
+                    {preview.changes.deactivate} deactivated
+                  </span>
+                )}
+                {preview.changes.reactivate > 0 && (
+                  <span style={{ background: 'var(--success-light)', color: 'var(--success-text)', borderRadius: 999, padding: '2px 10px', fontWeight: 600 }}>
+                    {preview.changes.reactivate} reactivated
+                  </span>
+                )}
+                <span style={{ color: 'var(--text-muted)' }}>
+                  {preview.changes.unchanged} unchanged · {preview.codes_not_in_file} existing code(s) not in file (left untouched)
+                </span>
+              </div>
+
+              {preview.row_errors.length > 0 && (
+                <details style={{ marginBottom: 8 }}>
+                  <summary style={{ cursor: 'pointer', color: 'var(--danger)', fontSize: '0.85rem' }}>
+                    {preview.row_errors.length} row(s) rejected
+                  </summary>
+                  <ul style={{ fontSize: '0.85rem', color: 'var(--gray-700)' }}>
+                    {preview.row_errors.slice(0, 50).map((e, i) => (
+                      <li key={i}>row {e.row}{e.code ? ` (${e.code})` : ''}: {e.reason}</li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+
+              {preview.sample.length > 0 && (
+                <details open>
+                  <summary style={{ cursor: 'pointer', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                    First {preview.sample.length} row(s)
+                  </summary>
+                  <div className="table-container" style={{ marginTop: 8 }}>
+                    <table>
+                      <thead><tr><th>Code</th><th>Description</th><th>Action</th></tr></thead>
+                      <tbody>
+                        {preview.sample.map(s => (
+                          <tr key={s.code}>
+                            <td style={{ fontFamily: 'monospace' }}>{s.code}</td>
+                            <td>{s.description}</td>
+                            <td>{ACTION_LABEL[s.action] || s.action}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </details>
+              )}
+            </div>
+          )}
+        </div>
+      ) : (
+        <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: -8, marginBottom: 24 }}>
+          Reference lists are updated by managers and above.
+        </p>
+      )}
+    </>
+  )
+}
+
 export default function Settings() {
   const { can } = useAuth()
   const canEdit = can.manageKnowledge()      // policy curation, same as documents
@@ -191,6 +541,8 @@ export default function Settings() {
               Filing windows are edited by managers and above.
             </p>
           )}
+
+          <ReferenceCodes canEdit={canEdit} />
 
           <h4 style={{ marginTop: 24, marginBottom: 16 }}>Quick Links</h4>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>

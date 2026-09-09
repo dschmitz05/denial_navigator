@@ -99,33 +99,6 @@ class LlamaClient:
                 "finish_reason": data["choices"][0].get("finish_reason"),
             }
 
-    async def generate(self, prompt: str, system: str = None, temperature: float = 0.3) -> dict:
-        """Send a text generation request to llama.cpp"""
-        async with httpx.AsyncClient(timeout=120) as client:
-            messages = []
-            if system:
-                messages.append({"role": "system", "content": system})
-            messages.append({"role": "user", "content": prompt})
-
-            resp = await client.post(
-                f"{self.base_url}/v1/chat/completions",
-                json={
-                    "model": self.model,
-                    "messages": messages,
-                    "stream": False,
-                    "temperature": temperature,
-                    "max_tokens": LLM_MAX_TOKENS,
-                    **({"chat_template_kwargs": {"enable_thinking": False}}
-                       if LLM_DISABLE_THINKING else {}),
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return {
-                "message": {"content": data["choices"][0]["message"]["content"]},
-                "usage": data.get("usage", {}),
-            }
-
     async def list_models(self) -> list[str]:
         """List available models via OpenAI-compatible API"""
         async with httpx.AsyncClient(timeout=10) as client:

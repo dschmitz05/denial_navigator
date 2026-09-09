@@ -1,0 +1,37 @@
+[package]
+name = "denial_common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "denial_common"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+sqlx = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+jsonwebtoken = { workspace = true }
+bcrypt = { workspace = true }
+reqwest = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+base64 = { workspace = true }
+data-encoding = { workspace = true }
+hmac = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+aes = { workspace = true }
+cbc = { workspace = true }
+qrcode = { workspace = true }
+ipnet = { workspace = true }
+rand = { workspace = true }
+futures = { workspace = true }
+url = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }

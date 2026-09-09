@@ -152,7 +152,6 @@ export default function Login({ onLogin, onComplete }) {
                 border: '1px solid var(--danger)',
                 marginBottom: 20,
                 fontSize: '0.85rem',
-                color: 'var(--danger)',
               }}>
                 {error}
               </div>

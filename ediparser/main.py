@@ -113,8 +113,8 @@ class _RateLimiter:
 _rate_limiter = _RateLimiter(RATE_LIMIT, RATE_WINDOW)
 
 # ── Database Helper (lightweight asyncpg-style via http to API) ──
-async def store_parsed_data(parsed: Parsed835Response, file_hash: str, file_name: str, file_size: int = 0) -> dict:
-    """Store parsed results via the API gateway"""
+async def store_parsed_data(parsed: Parsed835Response, file_hash: str, file_name: str, file_size: int = 0) -> tuple[int, dict]:
+    """Store parsed results via the API gateway; returns (http_status, body)"""
     payload = {
         "file_name": file_name,
         "file_hash": file_hash,
@@ -132,7 +132,10 @@ async def store_parsed_data(parsed: Parsed835Response, file_hash: str, file_name
         )
         if resp.status_code != 200:
             logger.error(f"Failed to store parsed data: HTTP {resp.status_code} {resp.text}")
-        return resp.json()
+        # The status code travels with the body: a 409 duplicate has a body
+        # that looks like an error but means "already stored", and only the
+        # caller knows which of those two to report.
+        return resp.status_code, resp.json()
 
 # ── EDI File Processing ──
 DROPZONE_PATTERNS = ("*.835", "*.837", "*.edi", "*.txt")
@@ -166,20 +169,23 @@ async def process_file(file_path: Path) -> dict:
 
     # Store via API
     try:
-        result = await store_parsed_data(parsed, file_hash, file_name, len(content.encode("utf-8", errors="replace")))
+        http_status, result = await store_parsed_data(parsed, file_hash, file_name, len(content.encode("utf-8", errors="replace")))
     except Exception as e:
         logger.error(f"Store error for {file_name}: {e}")
-        result = {"file_name": file_name, "status": "store_failed", "error": str(e)}
+        http_status, result = None, {"error": str(e)}
 
     # Save output
     output_file = Path(OUTPUT_PATH) / f"{file_name}.json"
     output_file.write_text(orjson.dumps(parsed.model_dump(), option=orjson.OPT_INDENT_2).decode("utf-8"))
 
-    # The store result was computed and then discarded, so a file whose store
-    # call failed still reported "completed" - the one status a watcher-driven
-    # pipeline must get right, because nobody is watching the return value.
+    # The store result used to be computed and discarded, so a file whose
+    # store call failed still reported "completed" - the one status a
+    # watcher-driven pipeline must get right. Success is exactly the
+    # gateway's 200 with {"status": "stored"}. A 409 duplicate is NOT a
+    # success of this run: the data is in the DB, but under a different
+    # file name (the detail says which), and the operator should know that.
     store_status = (result or {}).get("status")
-    stored_ok = store_status not in ("store_failed", None) or bool((result or {}).get("claims_stored") is not None)
+    stored_ok = http_status == 200 and store_status == "stored"
     status = "completed" if stored_ok else "store_failed"
 
     logger.info(
@@ -193,7 +199,10 @@ async def process_file(file_path: Path) -> dict:
         "denials_count": len(parsed.denials),
         "status": status,
         "store_result": store_status,
-        "error": (result or {}).get("error"),
+        # A transport failure puts the exception in "error"; an HTTP failure
+        # carries the gateway's explanation in "detail" (a 409 duplicate says
+        # which file name the data was already stored under).
+        "error": (result or {}).get("error") or (result or {}).get("detail"),
         "processed_at": datetime.now(timezone.utc).isoformat(),
     }
 

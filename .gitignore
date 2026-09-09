@@ -65,3 +65,19 @@ dropzone/
 
 # Superseded files kept out of the way rather than deleted.
 .attic/
+
+# ── Rust rewrite (branch rewrite/rust-ts) ──
+/target/
+
+# Large reference-data import samples and scratch remittances used during the
+# rewrite; test inputs, not source.
+/icd10_october2026_0.csv
+/.835cg.pdf
+/.835cg.txt
+/.835fields.tmp
+/.fcso835.pdf
+/.fcso835.txt
+/.hdi835.dat
+/.uhc835.pdf
+/.uhc835.txt
+/.tree.json

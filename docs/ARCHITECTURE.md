@@ -75,7 +75,24 @@ Audit is outermost deliberately, so a request rejected by access control is
 still recorded.
 
 Routes: `claims`, `denials`, `appeals`, `analyses`, `knowledge`, `ingestion`,
-`feedback`, `audit`, `auth`, `users`, `notifications`, `retention`, `system`.
+`feedback`, `audit`, `auth`, `users`, `notifications`, `retention`, `system`,
+`reference`.
+
+`reference` maintains the six code lists: CARC and RARC (X12 revises them a
+few times a year, the in-house RARC list grows as payers are added), ICD-10
+and CPT (updated every October), and HCPCS Level II and modifier codes
+(CMS refreshes them with the annual HCPCS update). Import is an upsert on the
+code: rows in the file are added or updated, codes absent from the file are
+left untouched, and deactivation is only ever explicit via the file's own
+status column. A preview (dry run) is always available before an apply, and
+every apply is logged to `reference_imports`. Header names are matched by
+alias so the official CMS/AMA downloads and hand-typed CSVs both import;
+CARC/RARC/modifier uploads are capped at 1 MB, ICD-10/CPT/HCPCS at 50 MB
+(the official ICD-10-CM download is ~15 MB). ICD-10, CPT, HCPCS and modifier
+lists start empty and are populated by the first import. Lists can also be
+searched (code or description, paginated) and mutated row-by-row: individual
+codes can be deleted and a whole list cleared, with manager-up write access
+and every mutation audit-logged.
 
 ### EDI Parser (`ediparser/`)
 
@@ -136,9 +153,10 @@ Core tables:
 | `appeals_queue` | the operational worklist: appeals *and* non-appeal work |
 | `feedback_loop` | whether a recommendation was accepted and whether it paid |
 
-Reference: `carc_codes`, `rarc_codes`, `knowledge_documents`,
-`knowledge_chunks`. Compliance: `audit_log`, `users`, `ingestion_log`,
-`notifications`.
+Reference: `carc_codes`, `rarc_codes`, `icd10_codes`, `cpt_codes`,
+`hcpcs_codes`, `modifier_codes`, `reference_imports`, `knowledge_documents`,
+`knowledge_chunks`. Compliance:
+`audit_log`, `users`, `ingestion_log`, `notifications`.
 
 Constraints that carry real weight:
 
@@ -248,7 +266,8 @@ denial-navigator/
 │   └── seed/                       CARC/RARC reference data
 ├── ediparser/
 │   ├── main.py                     FastAPI + retention sweep
-│   ├── parser/                     x12_parser, x12_common, schema
+│   ├── parser/                     x12_parser (835), x12_837, x12_common,
+│                                   schema
 │   └── watch/watcher.py            dropzone poller
 ├── rag-engine/
 │   ├── main.py                     chunk, embed, vector search
@@ -256,7 +275,7 @@ denial-navigator/
 ├── llm-service/main.py
 ├── api-gateway/
 │   ├── main.py
-│   ├── routes/                     13 route modules
+│   ├── routes/                     14 route modules
 │   └── services/                   db, audit, access, totp, ratelimit,
 │                                   claim_status, notifications
 ├── frontend/

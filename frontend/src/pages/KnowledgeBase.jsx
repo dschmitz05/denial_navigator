@@ -75,9 +75,13 @@ export default function KnowledgeBase() {
     setNotice(null)
     const form = new FormData()
     form.append('file', file)
+    // The Payer field in the form (above) applies here too: a payer-scoped
+    // upload only feeds analyses for that payer. Blank stays payer-agnostic.
+    const params = new URLSearchParams({ source_type: newDoc.source_type })
+    if (newDoc.payer_name.trim()) params.set('payer_name', newDoc.payer_name.trim())
     try {
       const resp = await fetch(
-        `${API_BASE}/knowledge/documents/upload?source_type=${encodeURIComponent(newDoc.source_type)}`,
+        `${API_BASE}/knowledge/documents/upload?${params}`,
         { method: 'POST', body: form }
       )
       const data = await resp.json()
@@ -209,7 +213,9 @@ export default function KnowledgeBase() {
                 />
                 <div className="form-hint">
                   Analysis for a denial only cites documents for that claim's payer,
-                  plus anything left blank here.
+                  plus anything left blank here. The field also applies to the
+                  Upload button — set it there before uploading a payer-specific
+                  PDF.
                 </div>
               </div>
               <div className="form-group">

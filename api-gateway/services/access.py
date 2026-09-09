@@ -151,6 +151,11 @@ PERMISSIONS = {
     "knowledge": {"read": ALL_ROLES, "write": MANAGER_UP},
     "ingestion": {"read": ALL_ROLES, "write": MANAGER_UP},
 
+    # CARC/RARC reference lists. Everyone reads them (every denial row
+    # shows a code's description), but only managers may refresh the
+    # list everyone else reads - same trust level as policy documents.
+    "reference": {"read": ALL_ROLES, "write": MANAGER_UP},
+
     # The audit trail is evidence: readable by oversight, writable by no one
     # through the API - entries are only ever produced as a side effect.
     "audit":     {"read": MANAGER_UP, "write": NOBODY},

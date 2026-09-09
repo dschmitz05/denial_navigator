@@ -179,12 +179,11 @@ def _clean_claim(claim, index, seen_numbers):
 def _clean_denial(denial):
     """Normalize denial data from EDIParser for safe DB insertion.
 
-    NOTE: the denials table spells the column `modifier_1` (a typo baked into
-    database/init.sql) and stores the free-text reason in `adjustment_reason`.
-    The dict keys here stay correctly spelled; the INSERT statements below do
-    the translation. Before this was fixed every denial insert failed on an
-    undefined column, which is why the table held 0 rows against 91 ingestion
-    runs.
+    Keys match the denials columns one-to-one (the `modifier_1` column was
+    misspelled in the schema until migration 010 - that bug once left the
+    table at 0 rows against 91 ingestion runs). The free-text reason lands in
+    `adjustment_reason`; `denial_reason` below prefers the parser's
+    free-text field over the bare code.
     """
     return {
         "claim_id": denial.get("claim_id", ""),

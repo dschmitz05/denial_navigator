@@ -1,0 +1,20 @@
+[package]
+name = "llm-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "llm-service"
+path = "src/main.rs"
+
+[dependencies]
+denial_common = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+reqwest = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
