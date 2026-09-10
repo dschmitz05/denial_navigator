@@ -1,0 +1,157 @@
+# The Rust rewrite as a full, self-contained stack, parallel to
+# docker-compose.yml (the Python one). Different project name, container
+# names, volumes and host ports, so both can run at once.
+#
+#   # secrets the Rust config refuses to start without:
+#   #   JWT_SECRET, SERVICE_API_KEY, TOTP_FERNET_KEY  (>=16 chars, not a placeholder)
+#   printf 'TOTP_FERNET_KEY=%s\n' "$(openssl rand -base64 32)" >> .env
+#
+#   docker compose -f docker-compose.rust.yml up -d --build
+#   # UI:  https://localhost:3444/     API: http://127.0.0.1:18000/
+#   docker compose -f docker-compose.rust.yml down          # keep data
+#   docker compose -f docker-compose.rust.yml down -v       # drop data
+
+name: denialnav-rust
+
+x-service-secrets: &service-secrets
+  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+  SERVICE_API_KEY: ${SERVICE_API_KEY:?set SERVICE_API_KEY in .env}
+  DATABASE_URL: postgres://${POSTGRES_USER:-denial_nav}:${POSTGRES_PASSWORD:-denial_nav_pass}@postgres:5432/${POSTGRES_DB:-denial_navigator}
+
+x-rust-build: &rust-build
+  context: .
+  dockerfile: Dockerfile.rust
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: denialnav-rust-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-denial_nav}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-denial_nav_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-denial_navigator}
+      INIT_ADMIN_PASSWORD: ${INIT_ADMIN_PASSWORD:-admin123}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./database/docker-initdb.sh:/docker-entrypoint-initdb.d/00-run-all.sh:ro
+      - ./database/init.sql:/opt/dn-sql/init.sql:ro
+      - ./database/migrations:/opt/dn-sql/migrations:ro
+      - ./database/seed:/opt/dn-sql/seed:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-denial_nav} -d $${POSTGRES_DB:-denial_navigator}"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  ediparser:
+    build:
+      <<: *rust-build
+      target: ediparser
+    image: denialnav-rust/ediparser
+    container_name: denialnav-rust-ediparser
+    restart: unless-stopped
+    environment:
+      <<: *service-secrets
+      API_BASE: http://api:8000
+      DROPZONE_PATH: /app/dropzone
+      OUTPUT_PATH: /app/output
+      PARSED_RETENTION_DAYS: ${PARSED_RETENTION_DAYS:-30}
+    volumes:
+      - dropzone:/app/dropzone
+      - parsed_output:/app/output
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  rag-engine:
+    build:
+      <<: *rust-build
+      target: rag-engine
+    image: denialnav-rust/rag-engine
+    container_name: denialnav-rust-rag
+    restart: unless-stopped
+    environment:
+      <<: *service-secrets
+      API_BASE: http://api:8000
+      LLAMA_BASE_URL: ${LLAMA_BASE_URL:-http://10.10.10.98:8080}
+      EMBED_BASE_URL: ${EMBED_BASE_URL:-http://10.10.10.98:8081}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  llm-service:
+    build:
+      <<: *rust-build
+      target: llm-service
+    image: denialnav-rust/llm-service
+    container_name: denialnav-rust-llm
+    restart: unless-stopped
+    environment:
+      <<: *service-secrets
+      API_BASE: http://api:8000
+      LLAMA_BASE_URL: ${LLAMA_BASE_URL:-http://10.10.10.98:8080}
+      LLM_MODEL: ${LLM_MODEL:-auto}
+      LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-2048}
+      LLM_DISABLE_THINKING: ${LLM_DISABLE_THINKING:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      <<: *rust-build
+      target: api-gateway
+    image: denialnav-rust/api-gateway
+    container_name: denialnav-rust-api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:18000:8000"   # loopback only; the browser uses the frontend
+    environment:
+      <<: *service-secrets
+      TOTP_FERNET_KEY: ${TOTP_FERNET_KEY:?set TOTP_FERNET_KEY in .env (openssl rand -base64 32)}
+      EDIPARSER_SERVICE_URL: http://ediparser:8000
+      RAG_ENGINE_URL: http://rag-engine:8000
+      LLM_SERVICE_URL: http://llm-service:8000
+      LLAMA_BASE_URL: ${LLAMA_BASE_URL:-http://10.10.10.98:8080}
+      EMBED_BASE_URL: ${EMBED_BASE_URL:-http://10.10.10.98:8081}
+      CORS_ORIGINS: ${CORS_ORIGINS_RUST:-https://localhost:3444}
+      JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-480}
+      TRUSTED_PROXY_NETWORKS: ${TRUSTED_PROXY_NETWORKS:-127.0.0.1/32,172.16.0.0/12,10.0.0.0/8}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ediparser:
+        condition: service_started
+      rag-engine:
+        condition: service_started
+      llm-service:
+        condition: service_started
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: http://localhost:18000
+    image: denialnav-rust/frontend
+    container_name: denialnav-rust-frontend
+    restart: unless-stopped
+    ports:
+      - "3082:80"     # redirects to HTTPS
+      - "3444:443"    # the application
+    volumes:
+      - ./certs-rust:/etc/nginx/certs
+    environment:
+      TLS_MODE: ${TLS_MODE:-self-signed}
+      TLS_HOSTNAME: ${TLS_HOSTNAME:-localhost}
+      PUBLIC_HTTPS_PORT: "3444"
+    depends_on:
+      api:
+        condition: service_started
+
+volumes:
+  pgdata:
+  dropzone:
+  parsed_output:

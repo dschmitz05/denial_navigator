@@ -1,3 +1,4 @@
+mod docs;
 mod middleware;
 mod routes;
 mod state;
@@ -49,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/", get(root))
         .route("/health", get(health))
+        .merge(docs::routes())
         .nest("/api/v1", routes::api_router())
         // Uploads (EDI files, reference-code CSVs, policy PDFs) stream through
         // handlers that each enforce their own byte cap; axum's 2 MB default

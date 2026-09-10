@@ -1,0 +1,77 @@
+# syntax=docker/dockerfile:1
+#
+# Multi-target build for the Rust rewrite of all four backend services.
+# The whole workspace is compiled once in `builder`; each service is then a
+# thin Debian image carrying just its own binary. Select one with
+# `--target <service>` (or `target:` in docker-compose.rust.yml).
+#
+#   docker build -f Dockerfile.rust --target api-gateway -t denialnav-rust-api .
+#
+# Build context is the repo root because every crate shares `crates/common`.
+
+# ── Build stage ────────────────────────────────────────────────────────────
+# Needs a Cargo new enough for edition-2024 transitive deps (icu_*, via url).
+# Full bookworm (not -slim) for the C toolchain `ring` builds against.
+FROM rust:1.98-bookworm AS builder
+WORKDIR /build
+
+# Dependency manifests first so a source-only change reuses the crate cache.
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=dn-cargo-registry \
+    --mount=type=cache,target=/build/target,id=dn-rust-target,sharing=locked \
+    cargo build --release --locked --workspace \
+ && mkdir -p /out \
+ && cp target/release/api-gateway target/release/ediparser \
+       target/release/rag-engine target/release/llm-service /out/
+
+# ── Common runtime base ───────────────────────────────────────────────────
+FROM debian:bookworm-slim AS runtime-base
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl tini \
+ && rm -rf /var/lib/apt/lists/* \
+ && adduser --system --group --no-create-home app
+# A remote-code bug in a parser should not start life as root.
+USER app
+WORKDIR /app
+EXPOSE 8000
+ENV PORT=8000 RUST_LOG=info
+ENTRYPOINT ["tini", "--"]
+
+# ── API Gateway ──────────────────────────────────────────────────────────
+FROM runtime-base AS api-gateway
+COPY --from=builder /out/api-gateway /usr/local/bin/api-gateway
+# Vendored Swagger UI / ReDoc bundles (shared with the Python service), served
+# at /static/docs/. The OpenAPI document itself is compiled into the binary.
+# Everything is local, so the docs work on an air-gapped host.
+COPY --chown=app:app api-gateway/static /app/static
+ENV API_GATEWAY_ADDR=0.0.0.0:8000 STATIC_DIR=/app/static
+HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=6 \
+  CMD curl -fsS http://localhost:8000/health || exit 1
+CMD ["api-gateway"]
+
+# ── EDI Parser ───────────────────────────────────────────────────────────
+FROM runtime-base AS ediparser
+USER root
+RUN mkdir -p /app/dropzone /app/output && chown -R app:app /app
+USER app
+COPY --from=builder /out/ediparser /usr/local/bin/ediparser
+ENV DROPZONE_PATH=/app/dropzone OUTPUT_PATH=/app/output
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=6 \
+  CMD curl -fsS http://localhost:8000/health || exit 1
+CMD ["ediparser"]
+
+# ── RAG Engine ───────────────────────────────────────────────────────────
+FROM runtime-base AS rag-engine
+COPY --from=builder /out/rag-engine /usr/local/bin/rag-engine
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=6 \
+  CMD curl -fsS http://localhost:8000/health || exit 1
+CMD ["rag-engine"]
+
+# ── LLM Service ──────────────────────────────────────────────────────────
+FROM runtime-base AS llm-service
+COPY --from=builder /out/llm-service /usr/local/bin/llm-service
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=6 \
+  CMD curl -fsS http://localhost:8000/health || exit 1
+CMD ["llm-service"]

@@ -84,3 +84,6 @@ dropzone/
 
 # Local Rust-stack test rig (parallel to the Python compose stack)
 /.rust-stack/
+
+# Rust compose stack self-signed certs
+/certs-rust/
