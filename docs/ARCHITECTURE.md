@@ -60,7 +60,7 @@ external surface. (The Rust stack additionally binds the gateway to
 
 ## Services
 
-### Frontend (`frontend/`)
+### Frontend (`apps/web/`)
 
 React 19 + Vite, served by nginx, which also terminates TLS and proxies
 `/api/*` to the gateway. `TLS_MODE` selects `self-signed` (generated at
@@ -218,13 +218,12 @@ Constraints that carry real weight:
 - `appeal_deadline_for(payer, remit_date)` computes filing deadlines in SQL, so
   ingestion, backfill and recompute cannot disagree.
 
-Schema changes live in `database/migrations/`, numbered — they upgrade an
-existing older database and are applied by hand (`psql < 0NN_name.sql`), not
-by a version table. `init.sql` is always the complete current schema, so
-`database/docker-initdb.sh` bootstraps a fresh container from `init.sql` plus
-the reference seed alone (a stock postgres entrypoint can't run a mounted
-directory, and replaying historical migrations over the current schema is not
-safe — 010 renames a column `init.sql` already ships renamed).
+Schema changes live in `database/migrations/`, numbered and managed by SQLx.
+`init.sql` remains the complete schema snapshot for fresh Compose volumes. On
+first API startup, the gateway verifies that snapshot, records the historical
+migrations in SQLx's ledger, and then applies any later numbered migrations.
+This avoids replaying intermediate historical scripts over the current schema
+while retaining checksum-verified, transactional upgrades going forward.
 
 ---
 
@@ -245,10 +244,12 @@ immediately rather than at the next login. Changing a user's role also bumps
 lookup per request, deliberately not cached — a cache TTL is exactly the
 window in which a revoked session still works.
 
-**Service credentials.** `SERVICE_API_KEY` authenticates service-to-service
-calls through `X-Service-Key` only, compared in constant time. It is not
-accepted as a user credential — when it was, a leaked key could act as
-whatever user the request claimed.
+**Service credentials.** `EDIPARSER_SERVICE_API_KEY` and
+`LLM_SERVICE_API_KEY` authenticate their respective callbacks through
+`X-Service-Key`, compared in constant time. The gateway derives the service
+identity from the key, ignores caller-supplied service names, and limits each
+service to its one callback route. Private parser, RAG, and LLM endpoints use
+separate per-target internal credentials as well.
 
 **Login throttling** counts failures out of `audit_log`, not in process memory,
 because with multiple workers an in-process counter gives an attacker several
@@ -268,8 +269,8 @@ entries in plain English. The audit layer sits outside access control, so
 
 **Containers** run as a non-root user. PHI never leaves the deployment: no
 outbound calls, and the models run on the operator's own llama.cpp host. Rust
-services fail to start if `JWT_SECRET`, `SERVICE_API_KEY` or `TOTP_FERNET_KEY`
-is unset or a known placeholder.
+services fail to start if their required credentials or `TOTP_FERNET_KEY` is
+unset, a known placeholder, or (for Fernet) not an exact 32-byte key.
 
 ---
 
@@ -358,7 +359,7 @@ denial-navigator/
 │   └── llm-service/                llama client
 ├── ediparser/ rag-engine/ llm-service/ api-gateway/
 │                                   the Python services (still shipped)
-├── frontend/
+├── apps/web/
 │   ├── src/pages/                  13 pages
 │   ├── src/lib/                    authFetch, auditText
 │   └── scripts/smoke-render.mjs    npm run smoke

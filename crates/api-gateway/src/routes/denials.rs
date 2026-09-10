@@ -1,17 +1,19 @@
 use axum::extract::{Query, State};
 use axum::routing::get;
-use axum::Json;
 use axum::Router;
+use axum::{Extension, Json};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, NaiveDate, Utc};
+use denial_auth::rbac::Principal;
 use denial_common::error::AppError;
-use denial_common::pgjson::row_to_json;
+use denial_db::pgjson::row_to_json;
+use denial_domain::ACTIVE_DENIAL_STATUSES;
+use denial_engine::recommended_resolution;
 use serde::Deserialize;
 use sqlx::{QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::state::AppState;
-
-const ACTIVE_DENIAL_STATUSES: &[&str] = &["open", "analyzed"];
 
 #[derive(Deserialize)]
 pub struct DenialUpdate {
@@ -23,6 +25,13 @@ pub struct DenialUpdate {
 pub struct ListDenialsQuery {
     pub status: Option<String>,
     pub carc_code: Option<String>,
+    pub payer_name: Option<String>,
+    pub min_amount: Option<f64>,
+    pub max_amount: Option<f64>,
+    pub min_age_days: Option<i32>,
+    pub max_age_days: Option<i32>,
+    pub owner: Option<String>,
+    pub facility_type_code: Option<String>,
     pub cagc: Option<String>,
     pub claim_id: Option<String>,
     pub q: Option<String>,
@@ -32,10 +41,33 @@ pub struct ListDenialsQuery {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
+    pub cursor: Option<String>,
+    pub sort: Option<String>,
+    #[serde(default)]
+    pub descending: bool,
 }
 
 fn default_limit() -> i64 {
     50
+}
+
+fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
+    principal
+        .organization_id
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or(AppError::Forbidden)
+}
+
+fn decode_cursor(cursor: &str) -> Result<i64, AppError> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(cursor)
+        .map_err(|_| AppError::BadRequest("invalid cursor".into()))?;
+    let value =
+        std::str::from_utf8(&bytes).map_err(|_| AppError::BadRequest("invalid cursor".into()))?;
+    value
+        .parse::<i64>()
+        .map_err(|_| AppError::BadRequest("invalid cursor".into()))
 }
 
 #[derive(Deserialize)]
@@ -45,81 +77,21 @@ pub struct PayerWindow {
     pub notes: Option<String>,
 }
 
-fn recommended_resolution(
-    cagc: Option<&str>,
-    required_action: Option<&str>,
-    denial_category: Option<&str>,
-) -> (Option<String>, Option<String>) {
-    let action = required_action.unwrap_or("");
-
-    if cagc == Some("PR") && (action.is_empty() || action == "no_action_required") {
-        return (
-            Some("bill_patient".into()),
-            Some(
-                "This is a PR (patient responsibility) adjustment, so the balance is \
-                 collectible from the patient rather than written off."
-                    .into(),
-            ),
-        );
-    }
-
-    let recoverable: &[&str] = &[
-        "coding_error",
-        "missing_info",
-        "bundled_service",
-        "lack_of_preauth",
-        "medical_necessity",
-        "patient_responsibility",
-    ];
-    let recoverable_map: &[(&str, &str)] = &[
-        ("coding_error", "corrected_claim"),
-        ("missing_info", "corrected_claim"),
-        ("bundled_service", "corrected_claim"),
-        ("lack_of_preauth", "clinical_docs"),
-        ("medical_necessity", "clinical_docs"),
-        ("patient_responsibility", "bill_patient"),
-    ];
-
-    if action == "no_action_required" {
-        if let Some(cat) = denial_category {
-            if recoverable.contains(&cat) {
-                let target = recoverable_map
-                    .iter()
-                    .find(|(k, _)| *k == cat)
-                    .map(|(_, v)| v.to_string());
-                return (
-                    target,
-                    Some(format!(
-                        "The analysis calls this \"{}\", which is something you can act on, so writing it off would contradict its own explanation.",
-                        cat.replace('_', " ")
-                    )),
-                );
-            }
-        }
-    }
-
-    let resolution_map: &[(&str, &str)] = &[
-        ("appeal", "appeal_letter"),
-        ("coding_correction", "corrected_claim"),
-        ("clinical_documentation", "clinical_docs"),
-        ("bill_patient", "bill_patient"),
-        ("no_action_required", "write_off"),
-    ];
-
-    let result = resolution_map
-        .iter()
-        .find(|(k, _)| *k == action)
-        .map(|(_, v)| v.to_string());
-
-    (result, None)
-}
-
 pub async fn list_denials(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Query(params): Query<ListDenialsQuery>,
-) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+) -> Result<Json<serde_json::Value>, AppError> {
+    let organization_id = organization_id(&principal)?;
+    if let (Some(minimum), Some(maximum)) = (params.min_amount, params.max_amount) {
+        if minimum > maximum {
+            return Err(AppError::BadRequest(
+                "min_amount cannot exceed max_amount".into(),
+            ));
+        }
+    }
     let mut qb = QueryBuilder::<sqlx::Postgres>::new(
-        "SELECT * FROM (SELECT DISTINCT ON (d.id) d.*, c.claim_number, c.patient_name, c.payer_name, \
+        "SELECT * FROM (SELECT DISTINCT ON (d.id) d.*, c.claim_number, c.patient_name, c.payer_name, c.facility_type_code, \
          c.total_charge, \
          (d.appeal_deadline - CURRENT_DATE) AS days_until_deadline, \
          (d.appeal_deadline IS NOT NULL AND d.appeal_deadline < CURRENT_DATE) AS deadline_passed, \
@@ -136,16 +108,17 @@ pub async fn list_denials(
              AND (aq.outcome_status IS NULL OR aq.outcome_status NOT IN ('approved','overruled','resolved','denied_again','cancelled'))",
     );
 
-    let mut need_where = true;
-    let mut push_prefix =
-        |qb: &mut QueryBuilder<sqlx::Postgres>, need_where: &mut bool| {
-            if *need_where {
-                qb.push(" WHERE ");
-                *need_where = false;
-            } else {
-                qb.push(" AND ");
-            }
-        };
+    let mut need_where = false;
+    qb.push(" WHERE c.organization_id = ")
+        .push_bind(organization_id);
+    let mut push_prefix = |qb: &mut QueryBuilder<sqlx::Postgres>, need_where: &mut bool| {
+        if *need_where {
+            qb.push(" WHERE ");
+            *need_where = false;
+        } else {
+            qb.push(" AND ");
+        }
+    };
 
     match &params.status {
         Some(s) => {
@@ -165,6 +138,48 @@ pub async fn list_denials(
         push_prefix(&mut qb, &mut need_where);
         qb.push("d.carc_code = ");
         qb.push_bind(carc);
+    }
+    if let Some(ref payer_name) = params.payer_name {
+        push_prefix(&mut qb, &mut need_where);
+        qb.push("c.payer_name ILIKE ");
+        qb.push_bind(format!("%{}%", payer_name.trim()));
+    }
+    if let Some(min_amount) = params.min_amount {
+        push_prefix(&mut qb, &mut need_where);
+        qb.push("d.charge_amount >= ");
+        qb.push_bind(min_amount);
+    }
+    if let Some(max_amount) = params.max_amount {
+        push_prefix(&mut qb, &mut need_where);
+        qb.push("d.charge_amount <= ");
+        qb.push_bind(max_amount);
+    }
+    if let Some(minimum_age) = params.min_age_days {
+        push_prefix(&mut qb, &mut need_where);
+        qb.push("CURRENT_DATE - d.denial_date >= ");
+        qb.push_bind(minimum_age.max(0));
+    }
+    if let Some(maximum_age) = params.max_age_days {
+        push_prefix(&mut qb, &mut need_where);
+        qb.push("CURRENT_DATE - d.denial_date <= ");
+        qb.push_bind(maximum_age.max(0));
+    }
+    if let Some(owner) = params.owner.as_deref() {
+        push_prefix(&mut qb, &mut need_where);
+        if owner == "unassigned" {
+            qb.push("aq.assigned_user_id IS NULL");
+        } else {
+            let owner = Uuid::parse_str(owner).map_err(|_| {
+                AppError::BadRequest("owner must be a user UUID or unassigned".into())
+            })?;
+            qb.push("aq.assigned_user_id = ");
+            qb.push_bind(owner);
+        }
+    }
+    if let Some(facility_type_code) = params.facility_type_code.as_deref() {
+        push_prefix(&mut qb, &mut need_where);
+        qb.push("c.facility_type_code = ");
+        qb.push_bind(facility_type_code);
     }
     if let Some(ref cagc) = params.cagc {
         push_prefix(&mut qb, &mut need_where);
@@ -201,16 +216,36 @@ pub async fn list_denials(
     }
 
     qb.push(" ORDER BY d.id) sub ");
+    let sort_column = match params.sort.as_deref() {
+        Some("deadline") => "sub.appeal_deadline",
+        Some("created") => "sub.created_at",
+        Some("amount") | None => "sub.charge_amount",
+        Some(_) => {
+            return Err(AppError::BadRequest(
+                "sort must be amount, deadline, or created".into(),
+            ))
+        }
+    };
     if params.priority {
         qb.push("ORDER BY sub.appeal_deadline ASC NULLS LAST, sub.charge_amount DESC");
     } else {
-        qb.push("ORDER BY sub.charge_amount DESC");
+        qb.push("ORDER BY ");
+        qb.push(sort_column);
+        qb.push(if params.descending || params.sort.is_none() {
+            " DESC"
+        } else {
+            " ASC"
+        });
+        qb.push(" NULLS LAST, sub.id ASC");
     }
 
     let limit = params.limit.clamp(1, 500);
-    let offset = params.offset.max(0);
+    let offset = match params.cursor.as_deref() {
+        Some(cursor) => decode_cursor(cursor)?.max(0),
+        None => params.offset.max(0),
+    };
     qb.push(" LIMIT ");
-    qb.push_bind(limit);
+    qb.push_bind(limit + 1);
     qb.push(" OFFSET ");
     qb.push_bind(offset);
 
@@ -219,27 +254,217 @@ pub async fn list_denials(
         .fetch_all(&state.pool)
         .await
         .map_err(AppError::Db)?;
-    let values: Vec<serde_json::Value> = rows.iter().map(row_to_json).collect();
-    Ok(Json(values))
+    let has_next = rows.len() > limit as usize;
+    let values: Vec<serde_json::Value> = rows
+        .into_iter()
+        .take(limit as usize)
+        .map(|row| row_to_json(&row))
+        .collect();
+    let next_cursor = has_next.then(|| URL_SAFE_NO_PAD.encode((offset + limit).to_string()));
+    Ok(Json(
+        serde_json::json!({"items": values, "next_cursor": next_cursor}),
+    ))
 }
 
 pub async fn denials_by_carc(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
 ) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    let organization_id = organization_id(&principal)?;
     let rows = sqlx::query(
         "SELECT d.carc_code, COALESCE(cc.description, 'Unknown') as carc_description, \
          d.cagc, COUNT(*) as denial_count, SUM(d.charge_amount) as total_denied_amount, \
          AVG(d.charge_amount) as avg_denial_amount \
-         FROM denials d LEFT JOIN carc_codes cc ON cc.code = d.carc_code \
-         WHERE d.status IN ('open', 'analyzed') \
+         FROM denials d JOIN claims c ON c.id = d.claim_id \
+         LEFT JOIN carc_codes cc ON cc.code = d.carc_code \
+         WHERE c.organization_id = $1 AND d.status IN ('open', 'analyzed') \
          GROUP BY d.carc_code, cc.description, d.cagc \
          ORDER BY total_denied_amount DESC",
     )
+    .bind(organization_id)
     .fetch_all(&state.pool)
     .await
     .map_err(AppError::Db)?;
 
     Ok(Json(rows.iter().map(row_to_json).collect()))
+}
+
+/// Open denial exposure by payer for the active organization.
+pub async fn denials_by_payer(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    let organization_id = organization_id(&principal)?;
+    let rows = sqlx::query(
+        "SELECT COALESCE(NULLIF(btrim(c.payer_name), ''), 'Unknown') AS payer_name, \
+                COUNT(*) AS denial_count, \
+                COALESCE(SUM(d.charge_amount), 0)::float8 AS total_denied_amount, \
+                COALESCE(AVG(d.charge_amount), 0)::float8 AS avg_denial_amount, \
+                COUNT(*) FILTER (WHERE d.appeal_deadline < CURRENT_DATE) AS overdue_count, \
+                MIN(d.appeal_deadline) AS nearest_appeal_deadline \
+         FROM denials d JOIN claims c ON c.id = d.claim_id \
+         WHERE c.organization_id = $1 \
+           AND d.status = ANY(ARRAY['open','analyzed','in_progress','in_appeal']::text[]) \
+         GROUP BY COALESCE(NULLIF(btrim(c.payer_name), ''), 'Unknown') \
+         ORDER BY total_denied_amount DESC, denial_count DESC",
+    )
+    .bind(organization_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(AppError::Db)?;
+    Ok(Json(rows.iter().map(row_to_json).collect()))
+}
+
+/// Open denial exposure by the latest AI-derived root cause.
+pub async fn denials_by_root_cause(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    let organization_id = organization_id(&principal)?;
+    let rows = sqlx::query(
+        "SELECT COALESCE(NULLIF(btrim(aa.root_cause_summary), ''), \
+                         NULLIF(btrim(aa.denial_category), ''), \
+                         'Unclassified') AS root_cause, \
+                COUNT(*) AS denial_count, \
+                COALESCE(SUM(d.charge_amount), 0)::float8 AS total_denied_amount, \
+                COALESCE(AVG(d.charge_amount), 0)::float8 AS avg_denial_amount \
+         FROM denials d JOIN claims c ON c.id = d.claim_id \
+         LEFT JOIN LATERAL ( \
+             SELECT root_cause_summary, denial_category \
+             FROM ai_analyses \
+             WHERE denial_id = d.id \
+             ORDER BY created_at DESC LIMIT 1 \
+         ) aa ON TRUE \
+         WHERE c.organization_id = $1 \
+           AND d.status = ANY(ARRAY['open','analyzed','in_progress','in_appeal']::text[]) \
+         GROUP BY COALESCE(NULLIF(btrim(aa.root_cause_summary), ''), \
+                           NULLIF(btrim(aa.denial_category), ''), 'Unclassified') \
+         ORDER BY total_denied_amount DESC, denial_count DESC",
+    )
+    .bind(organization_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(AppError::Db)?;
+    Ok(Json(rows.iter().map(row_to_json).collect()))
+}
+
+/// Active denial exposure grouped by the age of the payer decision.
+pub async fn denial_aging_buckets(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    let organization_id = organization_id(&principal)?;
+    let rows = sqlx::query(
+        "WITH active AS ( \
+             SELECT d.*, CASE \
+                 WHEN d.denial_date IS NULL THEN 'Unknown' \
+                 WHEN CURRENT_DATE - d.denial_date <= 30 THEN '0–30 days' \
+                 WHEN CURRENT_DATE - d.denial_date <= 60 THEN '31–60 days' \
+                 WHEN CURRENT_DATE - d.denial_date <= 90 THEN '61–90 days' \
+                 ELSE '91+ days' END AS bucket, \
+                 CASE \
+                 WHEN d.denial_date IS NULL THEN 5 \
+                 WHEN CURRENT_DATE - d.denial_date <= 30 THEN 1 \
+                 WHEN CURRENT_DATE - d.denial_date <= 60 THEN 2 \
+                 WHEN CURRENT_DATE - d.denial_date <= 90 THEN 3 \
+                 ELSE 4 END AS bucket_order \
+             FROM denials d JOIN claims c ON c.id = d.claim_id \
+             WHERE c.organization_id = $1 \
+               AND d.status = ANY(ARRAY['open','analyzed','in_progress','in_appeal']::text[]) \
+         ) \
+         SELECT bucket, bucket_order, COUNT(*) AS denial_count, \
+                COALESCE(SUM(charge_amount), 0)::float8 AS total_denied_amount, \
+                COALESCE(AVG(charge_amount), 0)::float8 AS avg_denial_amount \
+         FROM active GROUP BY bucket, bucket_order ORDER BY bucket_order",
+    )
+    .bind(organization_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(AppError::Db)?;
+    Ok(Json(rows.iter().map(row_to_json).collect()))
+}
+
+/// Financial recovery summary using the latest recorded resubmission outcome
+/// for each denial. A missing outcome remains explicitly unresolved.
+pub async fn denial_financial_summary(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let organization_id = organization_id(&principal)?;
+    let row = sqlx::query(
+        "WITH tenant_denials AS ( \
+             SELECT d.id, d.charge_amount \
+             FROM denials d JOIN claims c ON c.id = d.claim_id \
+             WHERE c.organization_id = $1 \
+         ), latest_outcome AS ( \
+             SELECT DISTINCT ON (aa.denial_id) aa.denial_id, fl.was_paid_on_resubmit \
+             FROM feedback_loop fl \
+             JOIN ai_analyses aa ON aa.id = fl.ai_analysis_id \
+             JOIN tenant_denials td ON td.id = aa.denial_id \
+             WHERE fl.was_paid_on_resubmit IS NOT NULL \
+             ORDER BY aa.denial_id, fl.created_at DESC \
+         ) \
+         SELECT COUNT(*) AS total_denials, \
+                COALESCE(SUM(td.charge_amount), 0)::float8 AS denied_dollars, \
+                COALESCE(SUM(td.charge_amount) FILTER (WHERE lo.was_paid_on_resubmit), 0)::float8 AS recovered_dollars, \
+                COALESCE(SUM(td.charge_amount) FILTER (WHERE lo.was_paid_on_resubmit IS FALSE), 0)::float8 AS not_recovered_dollars, \
+                COALESCE(SUM(td.charge_amount) FILTER (WHERE lo.was_paid_on_resubmit IS NULL), 0)::float8 AS unresolved_dollars, \
+                COUNT(*) FILTER (WHERE lo.was_paid_on_resubmit IS NOT NULL) AS outcome_known_count, \
+                COUNT(*) FILTER (WHERE lo.was_paid_on_resubmit) AS recovered_count \
+         FROM tenant_denials td LEFT JOIN latest_outcome lo ON lo.denial_id = td.id",
+    )
+    .bind(organization_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(AppError::Db)?;
+    let known: i64 = row.try_get("outcome_known_count").unwrap_or(0);
+    let recovered: i64 = row.try_get("recovered_count").unwrap_or(0);
+    Ok(Json(serde_json::json!({
+        "total_denials": row.try_get::<i64, _>("total_denials").unwrap_or(0),
+        "denied_dollars": row.try_get::<f64, _>("denied_dollars").unwrap_or(0.0),
+        "recovered_dollars": row.try_get::<f64, _>("recovered_dollars").unwrap_or(0.0),
+        "not_recovered_dollars": row.try_get::<f64, _>("not_recovered_dollars").unwrap_or(0.0),
+        "unresolved_dollars": row.try_get::<f64, _>("unresolved_dollars").unwrap_or(0.0),
+        "outcome_known_count": known,
+        "recovered_count": recovered,
+        "recovery_rate": if known == 0 { serde_json::Value::Null } else { serde_json::json!(recovered as f64 / known as f64) },
+    })))
+}
+
+/// Resolution timing for terminal appeal/worklist outcomes.
+pub async fn denial_resolution_timing(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let organization_id = organization_id(&principal)?;
+    let row = sqlx::query(
+        "WITH resolved AS ( \
+             SELECT DISTINCT ON (d.id) d.id, d.denial_date, aq.updated_at AS resolved_at \
+             FROM denials d \
+             JOIN claims c ON c.id = d.claim_id \
+             JOIN appeals_queue aq ON aq.denial_id = d.id \
+             WHERE c.organization_id = $1 \
+               AND d.denial_date IS NOT NULL \
+               AND aq.outcome_status = ANY(ARRAY['approved','overruled','resolved','denied_again','cancelled']::text[]) \
+             ORDER BY d.id, aq.updated_at DESC \
+         ), intervals AS ( \
+             SELECT GREATEST(0, EXTRACT(EPOCH FROM (resolved_at - denial_date)) / 86400.0) AS resolution_days \
+             FROM resolved \
+         ) \
+         SELECT COUNT(*) AS resolved_count, \
+                AVG(resolution_days)::float8 AS average_resolution_days, \
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY resolution_days)::float8 AS median_resolution_days \
+         FROM intervals",
+    )
+    .bind(organization_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(AppError::Db)?;
+    Ok(Json(serde_json::json!({
+        "resolved_count": row.try_get::<i64, _>("resolved_count").unwrap_or(0),
+        "average_resolution_days": row.try_get::<Option<f64>, _>("average_resolution_days").ok().flatten(),
+        "median_resolution_days": row.try_get::<Option<f64>, _>("median_resolution_days").ok().flatten(),
+    })))
 }
 
 #[derive(Deserialize)]
@@ -310,12 +535,24 @@ pub async fn list_appeal_windows(
 
     let mut out = Vec::new();
     for row in &rows {
-        let id: Uuid = row.try_get("id").map_err(|e| AppError::Internal(e.to_string()))?;
-        let payer_name: String = row.try_get("payer_name").map_err(|e| AppError::Internal(e.to_string()))?;
-        let appeal_window_days: Option<i32> = row.try_get("appeal_window_days").map_err(|e| AppError::Internal(e.to_string()))?;
-        let notes: Option<String> = row.try_get("notes").map_err(|e| AppError::Internal(e.to_string()))?;
-        let updated_at: Option<DateTime<Utc>> = row.try_get("updated_at").map_err(|e| AppError::Internal(e.to_string()))?;
-        let claims_covered: Option<i64> = row.try_get("claims_covered").map_err(|e| AppError::Internal(e.to_string()))?;
+        let id: Uuid = row
+            .try_get("id")
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let payer_name: String = row
+            .try_get("payer_name")
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let appeal_window_days: Option<i32> = row
+            .try_get("appeal_window_days")
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let notes: Option<String> = row
+            .try_get("notes")
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let updated_at: Option<DateTime<Utc>> = row
+            .try_get("updated_at")
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let claims_covered: Option<i64> = row
+            .try_get("claims_covered")
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         out.push(serde_json::json!({
             "id": id.to_string(),
@@ -328,8 +565,12 @@ pub async fn list_appeal_windows(
         }));
     }
     for row in &unconfigured {
-        let payer_name: String = row.try_get("payer_name").map_err(|e| AppError::Internal(e.to_string()))?;
-        let claims: Option<i64> = row.try_get("claims").map_err(|e| AppError::Internal(e.to_string()))?;
+        let payer_name: String = row
+            .try_get("payer_name")
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let claims: Option<i64> = row
+            .try_get("claims")
+            .map_err(|e| AppError::Internal(e.to_string()))?;
         out.push(serde_json::json!({
             "id": null,
             "payer_name": payer_name,
@@ -409,10 +650,12 @@ pub async fn set_appeal_window(
 
 pub async fn get_denial(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     axum::extract::Path(denial_id): axum::extract::Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let organization_id = organization_id(&principal)?;
     let row = sqlx::query(
-        "SELECT d.*, c.claim_number, c.patient_name, c.patient_id, \
+        "SELECT d.*, c.claim_number, c.patient_name, c.patient_id, c.facility_type_code, \
          c.date_of_birth, c.payer_name, c.payer_id_number, \
          c.icd_10_codes, c.total_charge, c.total_paid, \
          cc.description as carc_description, \
@@ -430,9 +673,10 @@ pub async fn get_denial(
          LEFT JOIN LATERAL (SELECT * FROM ai_analyses a WHERE a.denial_id = d.id ORDER BY a.created_at DESC LIMIT 1) aa ON TRUE \
          LEFT JOIN appeals_queue aq ON aq.denial_id = d.id \
              AND (aq.outcome_status IS NULL OR aq.outcome_status NOT IN ('approved','overruled','resolved','denied_again','cancelled')) \
-         WHERE d.id = $1",
+         WHERE d.id = $1 AND c.organization_id = $2",
     )
     .bind(denial_id)
+    .bind(organization_id)
     .fetch_optional(&state.pool)
     .await
     .map_err(AppError::Db)?
@@ -444,22 +688,24 @@ pub async fn get_denial(
     let required_action: Option<String> = row.try_get("required_action").unwrap_or(None);
     let denial_category: Option<String> = row.try_get("denial_category").unwrap_or(None);
 
-    let (resolution, note) = recommended_resolution(
+    let recommendation = recommended_resolution(
         cagc.as_deref(),
         required_action.as_deref(),
         denial_category.as_deref(),
     );
-    denial["recommended_resolution"] = serde_json::to_value(resolution).unwrap();
-    denial["recommendation_note"] = serde_json::to_value(note).unwrap();
+    denial["recommended_resolution"] = serde_json::to_value(recommendation.resolution).unwrap();
+    denial["recommendation_note"] = serde_json::to_value(recommendation.note).unwrap();
 
     Ok(Json(denial))
 }
 
 pub async fn update_denial(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     axum::extract::Path(denial_id): axum::extract::Path<Uuid>,
     Json(body): Json<DenialUpdate>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let organization_id = organization_id(&principal)?;
     let mut sets = Vec::new();
 
     if let Some(ref status) = body.status {
@@ -477,9 +723,10 @@ pub async fn update_denial(
     let id_idx = sets.len() + 1;
 
     let sql = format!(
-        "UPDATE denials SET {} WHERE id = ${} RETURNING *",
+        "UPDATE denials SET {} WHERE id = ${} AND claim_id IN (SELECT id FROM claims WHERE organization_id = ${}) RETURNING *",
         sets.join(", "),
-        id_idx
+        id_idx,
+        id_idx + 1
     );
 
     let mut q = sqlx::query(&sql);
@@ -490,6 +737,7 @@ pub async fn update_denial(
         q = q.bind(d);
     }
     q = q.bind(denial_id);
+    q = q.bind(organization_id);
 
     let row = q
         .fetch_optional(&state.pool)
@@ -504,7 +752,15 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_denials))
         .route("/bulk-carc", get(denials_by_carc))
+        .route("/by-payer", get(denials_by_payer))
+        .route("/by-root-cause", get(denials_by_root_cause))
+        .route("/aging-buckets", get(denial_aging_buckets))
+        .route("/financial-summary", get(denial_financial_summary))
+        .route("/resolution-timing", get(denial_resolution_timing))
         .route("/carc-options", get(carc_options))
-        .route("/appeal-windows", get(list_appeal_windows).put(set_appeal_window))
+        .route(
+            "/appeal-windows",
+            get(list_appeal_windows).put(set_appeal_window),
+        )
         .route("/{denial_id}", get(get_denial).patch(update_denial))
 }

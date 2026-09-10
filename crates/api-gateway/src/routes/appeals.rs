@@ -11,8 +11,9 @@ use axum::extract::{Extension, Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, NaiveDate, Utc};
+use denial_auth::rbac::{Principal, PrincipalKind};
 use denial_common::error::AppError;
-use denial_common::rbac::{Principal, PrincipalKind};
+use denial_domain::{ALL_RESOLUTION_TYPES, APPEAL_RESOLUTION_TYPES, TERMINAL_WORK_OUTCOMES};
 use serde::Deserialize;
 use sqlx::{Column, Row};
 use uuid::Uuid;
@@ -20,20 +21,7 @@ use uuid::Uuid;
 use crate::state::AppState;
 
 const SPECIALIST: &str = "billing_specialist";
-const APPEAL_RESOLUTION_TYPES: &[&str] = &["appeal_letter"];
-#[allow(dead_code)]
-const WORKLIST_RESOLUTION_TYPES: &[&str] =
-    &["corrected_claim", "clinical_docs", "payer_contact", "bill_patient", "write_off"];
-const TERMINAL_OUTCOMES: &[&str] = &["approved", "overruled", "resolved", "denied_again", "cancelled"];
 const SUCCESS_OUTCOMES: &[&str] = &["approved", "overruled", "resolved"];
-const ALL_RESOLUTION_TYPES: &[&str] = &[
-    "appeal_letter",
-    "corrected_claim",
-    "clinical_docs",
-    "payer_contact",
-    "bill_patient",
-    "write_off",
-];
 
 // ── Models ──────────────────────────────────────────────────────────────
 
@@ -95,6 +83,14 @@ fn queue_owner(principal: &Principal) -> Option<String> {
     }
 }
 
+fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
+    principal
+        .organization_id
+        .as_deref()
+        .ok_or(AppError::Forbidden)
+        .and_then(|id| Uuid::parse_str(id).map_err(|_| AppError::Forbidden))
+}
+
 fn assert_may_touch(principal: &Principal, assigned_user_id: Option<Uuid>) -> Result<(), AppError> {
     if let Some(owner) = queue_owner(principal) {
         if let Some(assigned) = assigned_user_id {
@@ -112,30 +108,45 @@ fn row_to_json(row: &sqlx::postgres::PgRow) -> serde_json::Value {
         let name = col.name();
         let val = row
             .try_get::<Option<String>, _>(name)
-            .map(|v| v.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null))
-            .or_else(|_| {
-                row.try_get::<Option<i64>, _>(name)
-                    .map(|v| v.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null))
+            .map(|v| {
+                v.map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null)
             })
             .or_else(|_| {
-                row.try_get::<Option<f64>, _>(name)
-                    .map(|v| v.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null))
+                row.try_get::<Option<i64>, _>(name).map(|v| {
+                    v.map(serde_json::Value::from)
+                        .unwrap_or(serde_json::Value::Null)
+                })
             })
             .or_else(|_| {
-                row.try_get::<Option<bool>, _>(name)
-                    .map(|v| v.map(serde_json::Value::Bool).unwrap_or(serde_json::Value::Null))
+                row.try_get::<Option<f64>, _>(name).map(|v| {
+                    v.map(serde_json::Value::from)
+                        .unwrap_or(serde_json::Value::Null)
+                })
             })
             .or_else(|_| {
-                row.try_get::<Option<Uuid>, _>(name)
-                    .map(|v| v.map(|v| serde_json::Value::String(v.to_string())).unwrap_or(serde_json::Value::Null))
+                row.try_get::<Option<bool>, _>(name).map(|v| {
+                    v.map(serde_json::Value::Bool)
+                        .unwrap_or(serde_json::Value::Null)
+                })
             })
             .or_else(|_| {
-                row.try_get::<Option<NaiveDate>, _>(name)
-                    .map(|v| v.map(|v| serde_json::Value::String(v.to_string())).unwrap_or(serde_json::Value::Null))
+                row.try_get::<Option<Uuid>, _>(name).map(|v| {
+                    v.map(|v| serde_json::Value::String(v.to_string()))
+                        .unwrap_or(serde_json::Value::Null)
+                })
             })
             .or_else(|_| {
-                row.try_get::<Option<DateTime<Utc>>, _>(name)
-                    .map(|v| v.map(|v| serde_json::Value::String(v.to_rfc3339())).unwrap_or(serde_json::Value::Null))
+                row.try_get::<Option<NaiveDate>, _>(name).map(|v| {
+                    v.map(|v| serde_json::Value::String(v.to_string()))
+                        .unwrap_or(serde_json::Value::Null)
+                })
+            })
+            .or_else(|_| {
+                row.try_get::<Option<DateTime<Utc>>, _>(name).map(|v| {
+                    v.map(|v| serde_json::Value::String(v.to_rfc3339()))
+                        .unwrap_or(serde_json::Value::Null)
+                })
             })
             .unwrap_or(serde_json::Value::Null);
         map.insert(name.to_string(), val);
@@ -164,7 +175,12 @@ async fn refresh_claim_status(pool: &sqlx::PgPool, claim_id: &Uuid) -> Result<()
          WHERE c.id = $1 AND s.total > 0 RETURNING c.status",
     )
     .bind(claim_id)
-    .bind(TERMINAL_OUTCOMES.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    .bind(
+        TERMINAL_WORK_OUTCOMES
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
+    )
     .fetch_optional(pool)
     .await
     .map_err(AppError::Db)?;
@@ -188,9 +204,10 @@ async fn record_audit(
     details: &serde_json::Value,
 ) {
     let result = sqlx::query(
-        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details, ip_address) \
-         VALUES ($1::uuid, $2, $3, $4::uuid, $5::jsonb, $6::inet)",
+        "INSERT INTO audit_log (organization_id, user_id, action, resource_type, resource_id, details, ip_address) \
+         VALUES ($1::uuid, $2::uuid, $3, $4, $5::uuid, $6::jsonb, $7::inet)",
     )
+    .bind(principal.organization_id.as_deref())
     .bind(principal.user_id.as_deref())
     .bind(action)
     .bind(resource_type)
@@ -211,6 +228,7 @@ pub async fn list_appeals(
     Extension(principal): Extension<Principal>,
     Query(params): Query<ListAppealsQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    let organization_id = organization_id(&principal)?;
     if let Some(ref cat) = params.category {
         if cat != "appeal" && cat != "worklist" {
             return Err(AppError::BadRequest(
@@ -231,7 +249,9 @@ pub async fn list_appeals(
          LEFT JOIN users assignee ON assignee.id = aq.assigned_user_id",
     );
 
-    let mut need_where = true;
+    let mut need_where = false;
+    qb.push(" WHERE c.organization_id = ");
+    qb.push_bind(organization_id);
     let mut push_prefix = |qb: &mut sqlx::QueryBuilder<sqlx::Postgres>, need_where: &mut bool| {
         if *need_where {
             qb.push(" WHERE ");
@@ -256,7 +276,10 @@ pub async fn list_appeals(
             push_prefix(&mut qb, &mut need_where);
             qb.push("aq.resolution_type = ANY(");
             qb.push_bind(
-                APPEAL_RESOLUTION_TYPES.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                APPEAL_RESOLUTION_TYPES
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>(),
             );
             qb.push("::text[])");
         }
@@ -264,7 +287,10 @@ pub async fn list_appeals(
             push_prefix(&mut qb, &mut need_where);
             qb.push("(aq.resolution_type IS NULL OR NOT (aq.resolution_type = ANY(");
             qb.push_bind(
-                APPEAL_RESOLUTION_TYPES.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                APPEAL_RESOLUTION_TYPES
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>(),
             );
             qb.push("::text[])))");
         }
@@ -318,10 +344,9 @@ pub async fn create_appeal(
     Extension(principal): Extension<Principal>,
     Json(body): Json<AppealCreate>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), AppError> {
+    let organization_id = organization_id(&principal)?;
     if !ALL_RESOLUTION_TYPES.contains(&body.resolution_type.as_str()) {
-        return Err(AppError::BadRequest(
-            "Invalid resolution_type".into(),
-        ));
+        return Err(AppError::BadRequest("Invalid resolution_type".into()));
     }
 
     let pool = &state.pool;
@@ -330,12 +355,16 @@ pub async fn create_appeal(
         .parse()
         .map_err(|_| AppError::BadRequest("Invalid denial_id".into()))?;
 
-    let denial_row = sqlx::query("SELECT claim_id FROM denials WHERE id = $1")
-        .bind(denial_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(AppError::Db)?
-        .ok_or(AppError::NotFound)?;
+    let denial_row = sqlx::query(
+        "SELECT d.claim_id FROM denials d JOIN claims c ON c.id = d.claim_id \
+         WHERE d.id = $1 AND c.organization_id = $2",
+    )
+    .bind(denial_id)
+    .bind(organization_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Db)?
+    .ok_or(AppError::NotFound)?;
     let claim_id: Uuid = denial_row.get("claim_id");
 
     // One open item per denial. This check is the fast path for a clear 409;
@@ -365,9 +394,11 @@ pub async fn create_appeal(
         )
     } else {
         let row = sqlx::query(
-            "SELECT id FROM ai_analyses WHERE denial_id = $1 ORDER BY created_at DESC LIMIT 1",
+            "SELECT aa.id FROM ai_analyses aa JOIN claims c ON c.id = aa.claim_id \
+             WHERE aa.denial_id = $1 AND c.organization_id = $2 ORDER BY aa.created_at DESC LIMIT 1",
         )
         .bind(denial_id)
+        .bind(organization_id)
         .fetch_optional(pool)
         .await
         .map_err(AppError::Db)?;
@@ -414,10 +445,7 @@ pub async fn create_appeal(
 
     refresh_claim_status(pool, &claim_id).await?;
 
-    Ok((
-        axum::http::StatusCode::CREATED,
-        Json(row_to_json(&row)),
-    ))
+    Ok((axum::http::StatusCode::CREATED, Json(row_to_json(&row))))
 }
 
 pub async fn update_appeal(
@@ -427,11 +455,15 @@ pub async fn update_appeal(
     Json(body): Json<AppealUpdate>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let pool = &state.pool;
+    let organization_id = organization_id(&principal)?;
 
     let old_row = sqlx::query(
-        "SELECT outcome_status, assigned_user_id FROM appeals_queue WHERE id = $1",
+        "SELECT aq.outcome_status, aq.assigned_user_id FROM appeals_queue aq \
+         JOIN denials d ON d.id = aq.denial_id JOIN claims c ON c.id = d.claim_id \
+         WHERE aq.id = $1 AND c.organization_id = $2",
     )
     .bind(appeal_id)
+    .bind(organization_id)
     .fetch_optional(pool)
     .await
     .map_err(AppError::Db)?;
@@ -509,18 +541,21 @@ pub async fn update_appeal(
 
     let new_outcome: Option<String> = row.try_get("outcome_status").unwrap_or(None);
     let resolution_type: Option<String> = row.try_get("resolution_type").unwrap_or(None);
-    let denial_id: Uuid = row.try_get("denial_id").map_err(|e| AppError::Internal(e.to_string()))?;
-    let claim_id: Uuid = row.try_get("claim_id").map_err(|e| AppError::Internal(e.to_string()))?;
+    let denial_id: Uuid = row
+        .try_get("denial_id")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let claim_id: Uuid = row
+        .try_get("claim_id")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     // Audit: record what changed.
-    let claim_number: Option<String> =
-        sqlx::query("SELECT claim_number FROM claims WHERE id = $1")
-            .bind(claim_id)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|r| r.try_get("claim_number").ok());
+    let claim_number: Option<String> = sqlx::query("SELECT claim_number FROM claims WHERE id = $1")
+        .bind(claim_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|r| r.try_get("claim_number").ok());
 
     let details = serde_json::json!({
         "username": principal.username,
@@ -542,7 +577,7 @@ pub async fn update_appeal(
     // Close the denial out based on the work that was actually done.
     if old_outcome != new_outcome {
         if let Some(ref outcome) = new_outcome {
-            if TERMINAL_OUTCOMES.contains(&outcome.as_str()) {
+            if TERMINAL_WORK_OUTCOMES.contains(&outcome.as_str()) {
                 let denial_status = if !SUCCESS_OUTCOMES.contains(&outcome.as_str()) {
                     "analyzed"
                 } else if resolution_type.as_deref() == Some("write_off") {
@@ -578,6 +613,7 @@ pub async fn get_appeal(
     Path(appeal_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let pool = &state.pool;
+    let organization_id = organization_id(&principal)?;
 
     let row = sqlx::query(
         "SELECT aq.*, \
@@ -598,9 +634,10 @@ pub async fn get_appeal(
          LEFT JOIN carc_codes cc ON cc.code = d.carc_code \
          LEFT JOIN ai_analyses aa ON aa.id = aq.ai_analysis_id \
          LEFT JOIN users assignee ON assignee.id = aq.assigned_user_id \
-         WHERE aq.id = $1",
+         WHERE aq.id = $1 AND c.organization_id = $2",
     )
     .bind(appeal_id)
+    .bind(organization_id)
     .fetch_optional(pool)
     .await
     .map_err(AppError::Db)?
@@ -622,10 +659,7 @@ pub async fn get_appeal(
             .and_then(|v| v.as_str())
             .map(|rt| APPEAL_RESOLUTION_TYPES.contains(&rt))
             .unwrap_or(false);
-        obj.insert(
-            "is_appeal".into(),
-            serde_json::Value::Bool(is_appeal),
-        );
+        obj.insert("is_appeal".into(), serde_json::Value::Bool(is_appeal));
     }
 
     Ok(Json(item))
@@ -637,6 +671,7 @@ pub async fn get_appeal_letter(
     Path(appeal_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let pool = &state.pool;
+    let organization_id = organization_id(&principal)?;
 
     let row = sqlx::query(
         "SELECT aq.assigned_user_id, \
@@ -649,9 +684,10 @@ pub async fn get_appeal_letter(
          JOIN denials d ON d.id = aq.denial_id \
          JOIN claims c ON c.id = d.claim_id \
          LEFT JOIN ai_analyses aa ON aa.id = aq.ai_analysis_id \
-         WHERE aq.id = $1",
+         WHERE aq.id = $1 AND c.organization_id = $2",
     )
     .bind(appeal_id)
+    .bind(organization_id)
     .fetch_optional(pool)
     .await
     .map_err(AppError::Db)?
@@ -668,6 +704,7 @@ pub async fn bulk_queue(
     Extension(principal): Extension<Principal>,
     Json(body): Json<BulkQueue>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), AppError> {
+    let organization_id = organization_id(&principal)?;
     if body.denial_ids.is_empty() || body.denial_ids.len() > 500 {
         return Err(AppError::BadRequest(
             "denial_ids must contain between 1 and 500 items".into(),
@@ -713,15 +750,16 @@ pub async fn bulk_queue(
            WHERE a.denial_id = d.id \
            ORDER BY a.created_at DESC LIMIT 1) AS analysis_id \
          FROM denials d JOIN claims c ON c.id = d.claim_id \
-         WHERE d.id = ANY($1::uuid[])",
+         WHERE d.id = ANY($1::uuid[]) AND c.organization_id = $3",
     )
     .bind(&valid_ids)
     .bind(
-        TERMINAL_OUTCOMES
+        TERMINAL_WORK_OUTCOMES
             .iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>(),
     )
+    .bind(organization_id)
     .fetch_all(pool)
     .await
     .map_err(AppError::Db)?;
@@ -851,6 +889,7 @@ pub async fn assign_appeal(
     Json(body): Json<AppealAssign>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let pool = &state.pool;
+    let organization_id = organization_id(&principal)?;
 
     let current = sqlx::query(
         "SELECT aq.id, aq.assigned_user_id, aq.resolution_type, aq.denial_id, \
@@ -860,9 +899,10 @@ pub async fn assign_appeal(
          LEFT JOIN users u ON u.id = aq.assigned_user_id \
          JOIN denials d ON d.id = aq.denial_id \
          JOIN claims c ON c.id = d.claim_id \
-         WHERE aq.id = $1",
+         WHERE aq.id = $1 AND c.organization_id = $2",
     )
     .bind(appeal_id)
+    .bind(organization_id)
     .fetch_optional(pool)
     .await
     .map_err(AppError::Db)?
@@ -877,14 +917,13 @@ pub async fn assign_appeal(
 
     if let Some(ref uid) = body.assigned_user_id {
         if !uid.is_empty() {
-            let assignee = sqlx::query(
-                "SELECT id, username, role, is_active FROM users WHERE id = $1::uuid",
-            )
-            .bind(uid)
-            .fetch_optional(pool)
-            .await
-            .map_err(AppError::Db)?
-            .ok_or(AppError::NotFound)?;
+            let assignee =
+                sqlx::query("SELECT id, username, role, is_active FROM users WHERE id = $1::uuid")
+                    .bind(uid)
+                    .fetch_optional(pool)
+                    .await
+                    .map_err(AppError::Db)?
+                    .ok_or(AppError::NotFound)?;
 
             let is_active: bool = assignee.get("is_active");
             let username: String = assignee.get("username");
@@ -895,9 +934,10 @@ pub async fn assign_appeal(
                 )));
             }
 
-            assignee_id = Some(Uuid::parse_str(uid).map_err(|_| {
-                AppError::BadRequest("Invalid assigned_user_id".into())
-            })?);
+            assignee_id = Some(
+                Uuid::parse_str(uid)
+                    .map_err(|_| AppError::BadRequest("Invalid assigned_user_id".into()))?,
+            );
             assignee_username = Some(username);
         }
     }
@@ -947,10 +987,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_appeals).post(create_appeal))
         .route("/bulk", post(bulk_queue))
-        .route(
-            "/{appeal_id}",
-            get(get_appeal).patch(update_appeal),
-        )
+        .route("/{appeal_id}", get(get_appeal).patch(update_appeal))
         .route("/{appeal_id}/letter", get(get_appeal_letter))
         .route("/{appeal_id}/assign", post(assign_appeal))
 }

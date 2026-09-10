@@ -2,6 +2,20 @@
 resolver = "2"
 members = [
     "crates/common",
+    "crates/app",
+    "crates/domain",
+    "crates/audit",
+    "crates/auth",
+    "crates/db",
+    "crates/denial-engine",
+    "crates/edi-core",
+    "crates/edi-835",
+    "crates/edi-837",
+    "crates/ai",
+    "crates/knowledge",
+    "crates/jobs",
+    "crates/storage",
+    "crates/test-support",
     "crates/api-gateway",
     "crates/llm-service",
     "crates/rag-engine",
@@ -12,7 +26,7 @@ members = [
 version = "1.0.0"
 edition = "2021"
 rust-version = "1.75"
-license = "Proprietary"
+license = "MIT"
 
 [profile.release]
 lto = "thin"
@@ -40,6 +54,7 @@ bcrypt = "0.16"
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "multipart",
+    "blocking",
     "rustls-tls",
 ] }
 tracing = "0.1"
@@ -62,3 +77,17 @@ thiserror = "2"
 anyhow = "1"
 csv = "1"
 denial_common = { path = "crates/common" }
+denial_app = { path = "crates/app" }
+denial_domain = { path = "crates/domain" }
+denial_audit = { path = "crates/audit" }
+denial_auth = { path = "crates/auth" }
+denial_db = { path = "crates/db" }
+denial_engine = { path = "crates/denial-engine" }
+denial_edi_core = { path = "crates/edi-core" }
+denial_edi_835 = { path = "crates/edi-835" }
+denial_edi_837 = { path = "crates/edi-837" }
+denial_ai = { path = "crates/ai" }
+denial_knowledge = { path = "crates/knowledge" }
+denial_jobs = { path = "crates/jobs" }
+denial_storage = { path = "crates/storage" }
+denial_test_support = { path = "crates/test-support" }

@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 denial_common = { workspace = true }
+denial_ai = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }

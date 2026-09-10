@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
-use denial_common::config::{env_or, env_u64};
+use denial_common::config::{env_or, env_required_secret, env_u64};
 use denial_common::error::AppError;
 use llama::{cached_model, resolve_model, LlamaClient};
 
@@ -27,6 +27,7 @@ struct Config {
     llm_model: String,
     api_base: String,
     service_api_key: String,
+    internal_service_api_key: String,
     llm_max_tokens: u32,
     llm_disable_thinking: bool,
     cors_origins: Vec<String>,
@@ -38,10 +39,13 @@ impl Config {
             llama_base_url: env_or("LLAMA_BASE_URL", "http://localhost:8080"),
             llm_model: env_or("LLM_MODEL", "qwen2.5:7b"),
             api_base: env_or("API_BASE", "http://api:8000"),
-            service_api_key: std::env::var("SERVICE_API_KEY").unwrap_or_default(),
+            service_api_key: env_required_secret("LLM_SERVICE_API_KEY"),
+            internal_service_api_key: env_required_secret("LLM_INTERNAL_API_KEY"),
             llm_max_tokens: env_u64("LLM_MAX_TOKENS", 2048) as u32,
             llm_disable_thinking: !matches!(
-                env_or("LLM_DISABLE_THINKING", "true").to_lowercase().as_str(),
+                env_or("LLM_DISABLE_THINKING", "true")
+                    .to_lowercase()
+                    .as_str(),
                 "0" | "false" | "no"
             ),
             cors_origins: env_or("CORS_ORIGINS", "")
@@ -90,6 +94,8 @@ struct DenialAnalysisRequest {
     denial_id: String,
     claim_id: String,
     prompt: Value,
+    #[serde(default)]
+    allowed_evidence_ids: Vec<String>,
     #[serde(default = "default_temp")]
     temperature: f64,
 }
@@ -130,6 +136,9 @@ async fn store_analysis(
         "denial_id": denial_id,
         "claim_id": claim_id,
         "model_name": model_name,
+        "provider_name": "openai_compatible",
+        "provider_version": "v1",
+        "prompt_template_version": "denial_analysis_v1",
         "raw_prompt": raw_prompt,
         "raw_response": raw_response,
         "parsed_result": parsed_result,
@@ -149,16 +158,21 @@ async fn store_analysis(
     match result {
         Ok(resp) => {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            // Consume the body to free the connection, but never log it:
+            // provider/API responses can contain PHI or generated text.
+            let _body = resp.text().await.unwrap_or_default();
             if status.is_success() {
                 true
             } else {
-                tracing::error!("Failed to store analysis: HTTP {status} {body}");
+                tracing::error!("analysis store failed: HTTP {status}");
                 false
             }
         }
         Err(e) => {
-            tracing::error!("Database store error: {e}");
+            tracing::error!(
+                "analysis store transport failure: {}",
+                denial_common::logging::safe_error(e)
+            );
             false
         }
     }
@@ -250,7 +264,11 @@ async fn chat(
     State(state): State<AppState>,
     Json(req): Json<ChatRequest>,
 ) -> Result<Json<ChatResponse>, AppError> {
-    let response_text = match state.llama.chat(&req.system, &req.user, req.temperature).await {
+    let response_text = match state
+        .llama
+        .chat(&req.system, &req.user, req.temperature)
+        .await
+    {
         Ok(t) => t,
         Err(e) => {
             tracing::error!("Chat error: {e}");
@@ -308,10 +326,30 @@ async fn analyze_denial(
         }
         cleaned = cleaned.trim().to_string();
         let parsed_json = match serde_json::from_str::<Value>(&cleaned) {
-            Ok(v) => Some(normalize_steps(v)),
+            Ok(v) => {
+                let value = normalize_steps(v);
+                denial_ai::output::validate_recommendation(&value).map_err(|error| {
+                    AppError::BadRequest(format!("AI response failed schema validation: {error}"))
+                })?;
+                if value
+                    .get("evidence_ids")
+                    .and_then(Value::as_array)
+                    .unwrap()
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|id| !req.allowed_evidence_ids.iter().any(|allowed| allowed == id))
+                {
+                    return Err(AppError::BadRequest(
+                        "AI response cited evidence that was not retrieved".into(),
+                    ));
+                }
+                Some(value)
+            }
             Err(_) => {
-                tracing::warn!("Could not parse LLM JSON response, storing raw");
-                Some(serde_json::json!({ "raw": raw_response, "parse_error": true }))
+                return Err(AppError::BadRequest(
+                    "LLM response was not valid JSON; falling back to deterministic guidance"
+                        .into(),
+                ));
             }
         };
 
@@ -369,11 +407,16 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
 // ── Router / main ──
 
 fn build_router(state: AppState) -> Router {
-    let mut app = Router::new()
-        .route("/health", get(health))
+    let key = state.cfg.internal_service_api_key.clone();
+    let protected = Router::new()
         .route("/chat", post(chat))
         .route("/analyze-denial", post(analyze_denial))
-        .route("/models", get(list_models));
+        .route("/models", get(list_models))
+        .layer(axum::middleware::from_fn_with_state(
+            key,
+            denial_common::internal_auth::require_internal_key,
+        ));
+    let mut app = Router::new().route("/health", get(health)).merge(protected);
 
     // This service is reached by the gateway over the Docker network, never by
     // a browser, so it needs no CORS by default. Add it only if configured.
@@ -431,5 +474,7 @@ async fn main() {
         .await
         .expect("failed to bind LLM service port");
     tracing::info!("LLM service listening on {addr}");
-    axum::serve(listener, build_router(state)).await.expect("LLM service error");
+    axum::serve(listener, build_router(state))
+        .await
+        .expect("LLM service error");
 }

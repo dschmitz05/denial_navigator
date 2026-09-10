@@ -1,0 +1,60 @@
+# Production override for docker-compose.rust.yml.
+#
+# Start it only with a reviewed environment file and a trusted certificate:
+#   docker compose --env-file deploy/production.env \
+#     -f docker-compose.rust.yml -f docker-compose.production.yml up -d --build
+#
+# This is an override, not a standalone Compose project. Docker Compose v2.24+
+# is required for `!reset` / `!override`, which remove the development-only
+# loopback API publication and replace the frontend port/certificate mounts.
+
+services:
+  postgres:
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set a production PostgreSQL user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set a production PostgreSQL password}
+      POSTGRES_DB: ${POSTGRES_DB:?set a production PostgreSQL database name}
+      INIT_ADMIN_PASSWORD: ${INIT_ADMIN_PASSWORD:?set a one-time bootstrap admin password}
+
+  ediparser:
+    environment:
+      EDIPARSER_SERVICE_API_KEY: ${EDIPARSER_SERVICE_API_KEY:?set EDIPARSER_SERVICE_API_KEY}
+      EDIPARSER_INTERNAL_API_KEY: ${EDIPARSER_INTERNAL_API_KEY:?set EDIPARSER_INTERNAL_API_KEY}
+
+  rag-engine:
+    environment:
+      RAG_INTERNAL_API_KEY: ${RAG_INTERNAL_API_KEY:?set RAG_INTERNAL_API_KEY}
+
+  llm-service:
+    environment:
+      LLM_SERVICE_API_KEY: ${LLM_SERVICE_API_KEY:?set LLM_SERVICE_API_KEY}
+      LLM_INTERNAL_API_KEY: ${LLM_INTERNAL_API_KEY:?set LLM_INTERNAL_API_KEY}
+
+  api:
+    ports: !reset []
+    environment:
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
+      EDIPARSER_SERVICE_API_KEY: ${EDIPARSER_SERVICE_API_KEY:?set EDIPARSER_SERVICE_API_KEY}
+      LLM_SERVICE_API_KEY: ${LLM_SERVICE_API_KEY:?set LLM_SERVICE_API_KEY}
+      EDIPARSER_INTERNAL_API_KEY: ${EDIPARSER_INTERNAL_API_KEY:?set EDIPARSER_INTERNAL_API_KEY}
+      RAG_INTERNAL_API_KEY: ${RAG_INTERNAL_API_KEY:?set RAG_INTERNAL_API_KEY}
+      LLM_INTERNAL_API_KEY: ${LLM_INTERNAL_API_KEY:?set LLM_INTERNAL_API_KEY}
+      TOTP_FERNET_KEY: ${TOTP_FERNET_KEY:?set TOTP_FERNET_KEY}
+      CORS_ORIGINS: ${CORS_ORIGINS_RUST:?set the public HTTPS origin}
+      OBJECT_STORAGE_LOCAL_PATH: /var/lib/openclaim/objects
+    volumes:
+      - artifacts:/var/lib/openclaim/objects
+
+  frontend:
+    ports: !override
+      - "80:80"
+      - "443:443"
+    volumes: !override
+      - ./certs:/etc/nginx/certs:ro
+    environment:
+      TLS_MODE: provided
+      TLS_HOSTNAME: ${TLS_HOSTNAME:?set the public hostname}
+      PUBLIC_HTTPS_PORT: "443"
+
+volumes:
+  artifacts:

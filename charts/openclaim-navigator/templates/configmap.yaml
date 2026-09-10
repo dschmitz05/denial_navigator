@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "openclaim.name" . }}-config
+  labels: {{- include "openclaim.labels" . | nindent 4 }}
+data:
+  API_BASE: http://api:8000
+  EDIPARSER_SERVICE_URL: http://ediparser:8000
+  RAG_ENGINE_URL: http://rag:8000
+  LLM_SERVICE_URL: http://llm:8000
+  CORS_ORIGINS: {{ .Values.config.corsOrigins | quote }}
+  LLAMA_BASE_URL: {{ .Values.config.llamaBaseUrl | quote }}
+  EMBED_BASE_URL: {{ .Values.config.embedBaseUrl | quote }}
+  VECTOR_SEARCH_ENABLED: {{ .Values.config.vectorSearchEnabled | quote }}
+  PARSED_RETENTION_DAYS: {{ .Values.config.parsedRetentionDays | quote }}
+  DROPZONE_PATH: /app/dropzone
+  OUTPUT_PATH: /app/output
+  OBJECT_STORAGE_BACKEND: local
+  OBJECT_STORAGE_LOCAL_PATH: /var/lib/openclaim/objects

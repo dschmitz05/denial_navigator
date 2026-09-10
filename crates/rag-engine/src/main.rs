@@ -1,10 +1,6 @@
 //! RAG Engine Service — embedding generation, vector store, and semantic
 //! retrieval. Ported from `rag-engine/main.py`.
 
-mod chunk;
-mod embed;
-mod prompt;
-
 use axum::{
     extract::State,
     http::StatusCode,
@@ -13,17 +9,17 @@ use axum::{
     Json, Router,
 };
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sqlx::postgres::PgPool;
-use sqlx::{Row, QueryBuilder};
+use sqlx::{QueryBuilder, Row};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
-use chunk::chunk_text;
-use denial_common::config::{env_f64, env_or, env_usize};
-use denial_common::db;
+use denial_ai::embed::{format_vector, EmbeddingProvider, OpenAiCompatibleEmbeddingProvider};
+use denial_ai::prompt::{build_denial_prompt, DenialPromptInput, PhiDisclosureLevel};
+use denial_common::config::{env_bool, env_f64, env_or, env_required_secret, env_usize};
 use denial_common::error::AppError;
-use embed::{format_vector, generate_embeddings};
-use prompt::{build_denial_prompt, DenialPromptInput};
+use denial_db::db;
+use denial_knowledge::chunk_text;
 
 /// Environment configuration for this service.
 #[derive(Clone)]
@@ -35,6 +31,9 @@ struct Config {
     chunk_overlap: usize,
     min_similarity: f64,
     embed_batch: usize,
+    vector_search_enabled: bool,
+    phi_disclosure_level: PhiDisclosureLevel,
+    internal_service_api_key: String,
     cors_origins: Vec<String>,
 }
 
@@ -52,6 +51,13 @@ impl Config {
             chunk_overlap: env_usize("CHUNK_OVERLAP", 200),
             min_similarity: env_f64("MIN_SIMILARITY", 0.25),
             embed_batch: env_usize("EMBED_BATCH", 16),
+            vector_search_enabled: env_bool("VECTOR_SEARCH_ENABLED", true),
+            phi_disclosure_level: PhiDisclosureLevel::parse(&env_or(
+                "AI_PHI_DISCLOSURE_LEVEL",
+                "limited",
+            ))
+            .unwrap_or(PhiDisclosureLevel::Limited),
+            internal_service_api_key: env_required_secret("RAG_INTERNAL_API_KEY"),
             cors_origins: env_or("CORS_ORIGINS", "")
                 .split(',')
                 .map(|s| s.trim().to_string())
@@ -65,7 +71,7 @@ impl Config {
 struct AppState {
     cfg: Config,
     pool: PgPool,
-    http: reqwest::Client,
+    embeddings: OpenAiCompatibleEmbeddingProvider,
 }
 
 // ── Search ──
@@ -77,15 +83,11 @@ async fn search_similar(
     top_k: i64,
     source_type: Option<&str>,
     payer: Option<&str>,
+    jurisdiction: Option<&str>,
+    effective_on: Option<&str>,
+    organization_id: uuid::Uuid,
 ) -> Result<Vec<Value>, AppError> {
-    let embeddings = generate_embeddings(
-        &state.http,
-        &state.cfg.embed_base_url,
-        &state.cfg.embedding_model,
-        &[query.to_string()],
-        state.cfg.embed_batch,
-    )
-    .await?;
+    let embeddings = state.embeddings.embed(&[query.to_string()]).await?;
     if embeddings.is_empty() {
         tracing::warn!("No embedding produced for query; returning no results");
         return Ok(vec![]);
@@ -100,12 +102,19 @@ async fn search_similar(
     );
     qb.push_bind(vec.clone());
     qb.push(
-        "::vector) AS similarity_score \
+        "::vector) AS similarity_score, \
+         ts_rank_cd(to_tsvector('english', kc.content), websearch_to_tsquery('english', ",
+    );
+    qb.push_bind(query.to_string());
+    qb.push(
+        ")) AS keyword_score \
          FROM knowledge_chunks kc \
          JOIN knowledge_documents kd ON kd.id = kc.knowledge_document_id \
          WHERE kc.embedding IS NOT NULL \
          AND kd.status <> 'archived'",
     );
+    qb.push(" AND kd.organization_id = ");
+    qb.push_bind(organization_id);
     if let Some(st) = source_type {
         qb.push(" AND kd.source_type = ");
         qb.push_bind(st.to_string());
@@ -118,21 +127,35 @@ async fn search_similar(
         qb.push_bind(p.to_string());
         qb.push("))");
     }
-    qb.push(" AND 1 - (kc.embedding <=> ");
+    if let Some(j) = jurisdiction {
+        qb.push(" AND lower(COALESCE(kd.metadata->>'jurisdiction', '')) = lower(");
+        qb.push_bind(j.to_string());
+        qb.push(")");
+    }
+    if let Some(date) = effective_on {
+        qb.push(" AND (kd.effective_date IS NULL OR kd.effective_date <= ");
+        qb.push_bind(date.to_string());
+        qb.push(") AND (kd.expiration_date IS NULL OR kd.expiration_date >= ");
+        qb.push_bind(date.to_string());
+        qb.push(")");
+    }
+    qb.push(" AND (1 - (kc.embedding <=> ");
     qb.push_bind(vec.clone());
     qb.push("::vector) >= ");
     qb.push_bind(state.cfg.min_similarity);
-    qb.push(" ORDER BY kc.embedding <=> ");
+    qb.push(" OR to_tsvector('english', kc.content) @@ websearch_to_tsquery('english', ");
+    qb.push_bind(query.to_string());
+    qb.push(")) ORDER BY (0.7 * (1 - (kc.embedding <=> ");
     qb.push_bind(vec);
-    qb.push("::vector LIMIT ");
+    qb.push("::vector)) + 0.3 * LEAST(ts_rank_cd(to_tsvector('english', kc.content), websearch_to_tsquery('english', ");
+    qb.push_bind(query.to_string());
+    qb.push(")), 1.0)) DESC LIMIT ");
     qb.push_bind(top_k);
 
     let rows = qb.build().fetch_all(&state.pool).await?;
     let mut results = Vec::with_capacity(rows.len());
     for r in &rows {
-        let metadata = r
-            .try_get::<Value, _>("metadata")
-            .unwrap_or(Value::Null);
+        let metadata = r.try_get::<Value, _>("metadata").unwrap_or(Value::Null);
         results.push(json!({
             "id": r.try_get::<uuid::Uuid, _>("id").map(|u| u.to_string()).unwrap_or_default(),
             "knowledge_document_id": r
@@ -146,6 +169,7 @@ async fn search_similar(
             "document_title": r.try_get::<Option<String>, _>("document_title").ok(),
             "source_type": r.try_get::<Option<String>, _>("source_type").ok(),
             "similarity_score": r.try_get::<f64, _>("similarity_score").unwrap_or(0.0),
+            "keyword_score": r.try_get::<f32, _>("keyword_score").unwrap_or(0.0),
         }));
     }
     tracing::info!(
@@ -154,6 +178,64 @@ async fn search_similar(
         results.len()
     );
     Ok(results)
+}
+
+/// Lexical fallback for deployments that intentionally disable pgvector or do
+/// not have an embedding endpoint available yet.
+async fn search_lexical(
+    state: &AppState,
+    query: &str,
+    top_k: i64,
+    source_type: Option<&str>,
+    payer: Option<&str>,
+    jurisdiction: Option<&str>,
+    effective_on: Option<&str>,
+    organization_id: uuid::Uuid,
+) -> Result<Vec<Value>, AppError> {
+    let mut qb = QueryBuilder::<sqlx::Postgres>::default();
+    qb.push("SELECT kc.id, kc.knowledge_document_id, kc.chunk_index, kc.content, kc.token_count, kc.metadata, kd.title AS document_title, kd.source_type, 0.0::float8 AS similarity_score, ts_rank_cd(to_tsvector('english', kc.content), websearch_to_tsquery('english', ");
+    qb.push_bind(query.to_string());
+    qb.push(")) AS keyword_score FROM knowledge_chunks kc JOIN knowledge_documents kd ON kd.id = kc.knowledge_document_id WHERE kd.status <> 'archived' AND to_tsvector('english', kc.content) @@ websearch_to_tsquery('english', ");
+    qb.push_bind(query.to_string());
+    qb.push(")");
+    qb.push(" AND kd.organization_id = ");
+    qb.push_bind(organization_id);
+    if let Some(st) = source_type {
+        qb.push(" AND kd.source_type = ");
+        qb.push_bind(st.to_string());
+    }
+    if let Some(p) = payer {
+        qb.push(" AND (kd.payer_name IS NULL OR lower(kd.payer_name) = lower(");
+        qb.push_bind(p.to_string());
+        qb.push("))");
+    }
+    if let Some(j) = jurisdiction {
+        qb.push(" AND lower(COALESCE(kd.metadata->>'jurisdiction', '')) = lower(");
+        qb.push_bind(j.to_string());
+        qb.push(")");
+    }
+    if let Some(date) = effective_on {
+        qb.push(" AND (kd.effective_date IS NULL OR kd.effective_date <= ");
+        qb.push_bind(date.to_string());
+        qb.push(") AND (kd.expiration_date IS NULL OR kd.expiration_date >= ");
+        qb.push_bind(date.to_string());
+        qb.push(")");
+    }
+    qb.push(" ORDER BY keyword_score DESC LIMIT ");
+    qb.push_bind(top_k);
+    let rows = qb.build().fetch_all(&state.pool).await?;
+    Ok(rows.iter().map(|r| json!({
+        "id": r.try_get::<uuid::Uuid, _>("id").map(|u| u.to_string()).unwrap_or_default(),
+        "knowledge_document_id": r.try_get::<uuid::Uuid, _>("knowledge_document_id").map(|u| u.to_string()).unwrap_or_default(),
+        "chunk_index": r.try_get::<i32, _>("chunk_index").unwrap_or(0),
+        "content": r.try_get::<String, _>("content").unwrap_or_default(),
+        "token_count": r.try_get::<i32, _>("token_count").unwrap_or(0),
+        "metadata": r.try_get::<Value, _>("metadata").unwrap_or(Value::Null),
+        "document_title": r.try_get::<Option<String>, _>("document_title").ok(),
+        "source_type": r.try_get::<Option<String>, _>("source_type").ok(),
+        "similarity_score": 0.0,
+        "keyword_score": r.try_get::<f32, _>("keyword_score").unwrap_or(0.0),
+    })).collect())
 }
 
 // ── Request models ──
@@ -174,12 +256,24 @@ struct SearchRequest {
 struct Filters {
     source_type: Option<String>,
     payer: Option<String>,
+    jurisdiction: Option<String>,
+    effective_on: Option<String>,
+    organization_id: Option<uuid::Uuid>,
 }
 
 #[derive(Deserialize)]
 struct IngestDocumentRequest {
     document_id: String,
+    content: Option<String>,
+    #[serde(default)]
+    sections: Vec<IngestSection>,
+}
+
+#[derive(Deserialize)]
+struct IngestSection {
     content: String,
+    page: Option<usize>,
+    section: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -202,6 +296,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     Json(json!({
         "status": "healthy",
         "embedding_model": state.cfg.embedding_model,
+        "vector_search_enabled": state.cfg.vector_search_enabled,
         "llama_url": state.cfg.llama_base_url,
         "embed_url": state.cfg.embed_base_url,
     }))
@@ -233,14 +328,32 @@ async fn search_knowledge(
         })));
     }
     let filters = req.filters.unwrap_or_default();
-    let results = search_similar(
-        &state,
-        &req.query,
-        req.top_k,
-        filters.source_type.as_deref(),
-        filters.payer.as_deref(),
-    )
-    .await?;
+    let organization_id = filters.organization_id.ok_or(AppError::Forbidden)?;
+    let results = if state.cfg.vector_search_enabled {
+        search_similar(
+            &state,
+            &req.query,
+            req.top_k,
+            filters.source_type.as_deref(),
+            filters.payer.as_deref(),
+            filters.jurisdiction.as_deref(),
+            filters.effective_on.as_deref(),
+            organization_id,
+        )
+        .await?
+    } else {
+        search_lexical(
+            &state,
+            &req.query,
+            req.top_k,
+            filters.source_type.as_deref(),
+            filters.payer.as_deref(),
+            filters.jurisdiction.as_deref(),
+            filters.effective_on.as_deref(),
+            organization_id,
+        )
+        .await?
+    };
     Ok(Json(json!({
         "results": results,
         "query": req.query,
@@ -257,21 +370,55 @@ async fn ingest_document(
         .parse()
         .map_err(|_| AppError::BadRequest("invalid document_id".into()))?;
 
-    let chunks = chunk_text(&req.content, state.cfg.chunk_chars, state.cfg.chunk_overlap);
+    let input_sections = if req.sections.is_empty() {
+        vec![IngestSection {
+            content: req.content.unwrap_or_default(),
+            page: None,
+            section: None,
+        }]
+    } else {
+        req.sections
+    };
+    let mut chunks = Vec::new();
+    for input in input_sections {
+        for content in chunk_text(
+            &input.content,
+            state.cfg.chunk_chars,
+            state.cfg.chunk_overlap,
+        ) {
+            chunks.push((content, input.page, input.section.clone()));
+        }
+    }
     if chunks.is_empty() {
         return Err(AppError::BadRequest("Document content is empty".into()));
     }
 
-    tracing::info!("Embedding {} chunks for document {doc_id}", chunks.len());
-    let vectors =
-        generate_embeddings(&state.http, &state.cfg.embed_base_url, &state.cfg.embedding_model, &chunks, state.cfg.embed_batch).await?;
-    if vectors.len() != chunks.len() {
-        return Err(AppError::Upstream(format!(
-            "Embedding backend returned {} vectors for {} chunks",
-            vectors.len(),
+    let vectors = if state.cfg.vector_search_enabled {
+        tracing::info!("Embedding {} chunks for document {doc_id}", chunks.len());
+        let vectors = state
+            .embeddings
+            .embed(
+                &chunks
+                    .iter()
+                    .map(|(content, _, _)| content.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
+        if vectors.len() != chunks.len() {
+            return Err(AppError::Upstream(format!(
+                "Embedding backend returned {} vectors for {} chunks",
+                vectors.len(),
+                chunks.len()
+            )));
+        }
+        Some(vectors)
+    } else {
+        tracing::info!(
+            "Indexing {} chunks without embeddings for document {doc_id}",
             chunks.len()
-        )));
-    }
+        );
+        None
+    };
 
     let mut tx = state.pool.begin().await?;
     // Re-ingesting a document replaces its chunks rather than duplicating them.
@@ -279,8 +426,9 @@ async fn ingest_document(
         .bind(doc_id)
         .execute(&mut *tx)
         .await?;
-    for (i, (chunk, vec)) in chunks.iter().zip(vectors.iter()).enumerate() {
-        let metadata = json!({ "chars": chunk.chars().count() }).to_string();
+    for (i, (chunk, page, section)) in chunks.iter().enumerate() {
+        let metadata =
+            json!({ "chars": chunk.chars().count(), "page": page, "section": section }).to_string();
         let token_count = chunk.split_whitespace().count() as i32;
         sqlx::query(
             "INSERT INTO knowledge_chunks \
@@ -290,7 +438,7 @@ async fn ingest_document(
         .bind(doc_id)
         .bind(i as i32)
         .bind(chunk)
-        .bind(format_vector(vec))
+        .bind(vectors.as_ref().map(|items| format_vector(&items[i])))
         .bind(metadata)
         .bind(token_count)
         .execute(&mut *tx)
@@ -309,11 +457,15 @@ async fn ingest_document(
         "document_id": doc_id.to_string(),
         "chunks": chunks.len(),
         "embedding_model": state.cfg.embedding_model,
-        "dimensions": vectors[0].len(),
+        "dimensions": vectors.as_ref().and_then(|items| items.first()).map(Vec::len),
+        "vector_search_enabled": state.cfg.vector_search_enabled,
     })))
 }
 
-async fn build_prompt(Json(req): Json<PromptRequest>) -> Json<Value> {
+async fn build_prompt(
+    State(state): State<AppState>,
+    Json(req): Json<PromptRequest>,
+) -> Json<Value> {
     let input = DenialPromptInput {
         claim_id: req.claim_id,
         payer_name: req.payer_name,
@@ -325,6 +477,7 @@ async fn build_prompt(Json(req): Json<PromptRequest>) -> Json<Value> {
         rarc_code: req.rarc_code,
         rarc_definition: req.rarc_definition,
         retrieved_policies: req.retrieved_policies,
+        phi_disclosure_level: state.cfg.phi_disclosure_level,
     };
     let (system, user) = build_denial_prompt(&input);
     Json(json!({ "system": system, "user": user }))
@@ -333,12 +486,17 @@ async fn build_prompt(Json(req): Json<PromptRequest>) -> Json<Value> {
 // ── Router / main ──
 
 fn build_router(state: AppState) -> Router {
-    let mut app = Router::new()
-        .route("/health", get(health))
+    let key = state.cfg.internal_service_api_key.clone();
+    let protected = Router::new()
         .route("/embed", post(embed_gone))
         .route("/search", post(search_knowledge))
         .route("/ingest-document", post(ingest_document))
-        .route("/prompt/denial-analysis", post(build_prompt));
+        .route("/prompt/denial-analysis", post(build_prompt))
+        .layer(axum::middleware::from_fn_with_state(
+            key,
+            denial_common::internal_auth::require_internal_key,
+        ));
+    let mut app = Router::new().route("/health", get(health)).merge(protected);
 
     // Reached by the gateway over the Docker network, never a browser, so no
     // CORS by default. Added only if configured.
@@ -373,10 +531,16 @@ async fn main() {
     let pool = db::connect(&db_cfg)
         .await
         .expect("failed to connect to database");
+    let embeddings = OpenAiCompatibleEmbeddingProvider::new(
+        reqwest::Client::new(),
+        &cfg.embed_base_url,
+        &cfg.embedding_model,
+        cfg.embed_batch,
+    );
     let state = AppState {
         cfg,
         pool,
-        http: reqwest::Client::new(),
+        embeddings,
     };
 
     let port = env_or("PORT", "8000");

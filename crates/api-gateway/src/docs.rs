@@ -1,7 +1,8 @@
 //! Self-contained API documentation, mirroring the FastAPI service.
 //!
-//! `/openapi.json` is served from `crates/api-gateway/openapi/openapi.json`
-//! (hand-maintained; see the generator alongside it). `/docs` and `/redoc`
+//! `/openapi.json` is generated from the gateway route inventory plus detailed
+//! request/response schemas in `crates/api-gateway/openapi/generate.py`.
+//! `/docs` and `/redoc`
 //! are thin HTML shells that load the Swagger UI / ReDoc bundles vendored
 //! under `/static/docs/` - nothing here reaches a CDN, so the docs work on an
 //! air-gapped host.
@@ -16,7 +17,7 @@ use tower_http::services::ServeDir;
 
 use crate::state::AppState;
 
-/// The hand-maintained API description, baked into the binary so `/openapi.json`
+/// The generated API description, baked into the binary so `/openapi.json`
 /// works with no file dependency. Regenerate with
 /// `crates/api-gateway/openapi/generate.py`.
 const OPENAPI_JSON: &str = include_str!("../openapi/openapi.json");
@@ -78,11 +79,7 @@ async fn redoc_ui() -> Html<&'static str> {
 }
 
 async fn openapi_json() -> Response {
-    (
-        [(header::CONTENT_TYPE, "application/json")],
-        OPENAPI_JSON,
-    )
-        .into_response()
+    ([(header::CONTENT_TYPE, "application/json")], OPENAPI_JSON).into_response()
 }
 
 /// The doc routes, mounted at the app root (outside `/api/v1`). All are

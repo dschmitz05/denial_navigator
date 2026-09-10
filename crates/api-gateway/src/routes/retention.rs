@@ -12,8 +12,8 @@ use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use chrono::{DateTime, Utc};
+use denial_auth::rbac::Principal;
 use denial_common::error::AppError;
-use denial_common::rbac::Principal;
 use serde::Deserialize;
 use sqlx::Row;
 
@@ -50,7 +50,10 @@ pub async fn audit_retention_status(
                 pg_size_pretty(pg_total_relation_size('audit_log')) AS on_disk \
          FROM audit_log"
     );
-    let row = sqlx::query(&sql).fetch_one(&state.pool).await.map_err(AppError::Db)?;
+    let row = sqlx::query(&sql)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(AppError::Db)?;
 
     let total: i64 = row.try_get("total").unwrap_or(0);
     let oldest: Option<DateTime<Utc>> = row.try_get("oldest").ok().flatten();
@@ -79,7 +82,9 @@ pub async fn prune_audit_log(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_admin(&principal)?;
 
-    let older_than_days = body.older_than_days.unwrap_or(state.default_retention_days as i64);
+    let older_than_days = body
+        .older_than_days
+        .unwrap_or(state.default_retention_days as i64);
     if older_than_days < state.min_retention_days as i64 {
         return Err(AppError::Unprocessable(format!(
             "older_than_days must be at least {}",
@@ -121,7 +126,7 @@ pub async fn prune_audit_log(
 
     // Written after the delete so it cannot itself be removed by the same
     // statement. This entry is the only remaining record that the prune ran.
-    denial_common::audit::record(
+    denial_audit::record(
         &state.pool,
         "audit_pruned",
         "audit_log",
@@ -139,7 +144,10 @@ pub async fn prune_audit_log(
     )
     .await;
 
-    tracing::warn!("audit log pruned by {}: {n} entries removed", principal.username);
+    tracing::warn!(
+        "audit log pruned by {}: {n} entries removed",
+        principal.username
+    );
 
     Ok(Json(serde_json::json!({
         "status": "pruned",

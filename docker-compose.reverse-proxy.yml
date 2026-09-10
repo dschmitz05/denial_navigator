@@ -1,0 +1,10 @@
+# Optional companion override when a host-managed reverse proxy terminates
+# TLS. Use it with docker-compose.production.yml; it exposes only a loopback
+# HTTP listener for the proxy and disables TLS inside the frontend container.
+services:
+  frontend:
+    ports: !override
+      - "127.0.0.1:8080:80"
+    volumes: !reset []
+    environment:
+      TLS_MODE: off

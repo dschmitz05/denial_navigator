@@ -6,6 +6,13 @@ license.workspace = true
 
 [dependencies]
 denial_common = { workspace = true }
+denial_app = { workspace = true }
+denial_audit = { workspace = true }
+denial_auth = { workspace = true }
+denial_db = { workspace = true }
+denial_domain = { workspace = true }
+denial_engine = { workspace = true }
+denial_storage = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
@@ -27,4 +34,3 @@ base64 = { workspace = true }
 csv = { workspace = true }
 sha2 = { workspace = true }
 pdf-extract = "0.12"
-lopdf = { version = "0.42", default-features = false }

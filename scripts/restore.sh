@@ -11,7 +11,7 @@ set -euo pipefail
 
 FILE="${1:-}"
 MODE="${2:-}"
-CONTAINER="${POSTGRES_CONTAINER:-denial-navigator-postgres}"
+CONTAINER="${POSTGRES_CONTAINER:-denialnav-rust-postgres}"
 DB_USER="${POSTGRES_USER:-denial_nav}"
 DB_NAME="${POSTGRES_DB:-denial_navigator}"
 

@@ -3,7 +3,9 @@
 # names, volumes and host ports, so both can run at once.
 #
 #   # secrets the Rust config refuses to start without:
-#   #   JWT_SECRET, SERVICE_API_KEY, TOTP_FERNET_KEY  (>=16 chars, not a placeholder)
+#   #   JWT_SECRET, EDIPARSER_SERVICE_API_KEY, LLM_SERVICE_API_KEY,
+#   #   EDIPARSER_INTERNAL_API_KEY, RAG_INTERNAL_API_KEY,
+#   #   LLM_INTERNAL_API_KEY, TOTP_FERNET_KEY (>=16 chars, not placeholders)
 #   printf 'TOTP_FERNET_KEY=%s\n' "$(openssl rand -base64 32)" >> .env
 #
 #   docker compose -f docker-compose.rust.yml up -d --build
@@ -13,9 +15,8 @@
 
 name: denialnav-rust
 
-x-service-secrets: &service-secrets
+x-gateway-secrets: &gateway-secrets
   JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
-  SERVICE_API_KEY: ${SERVICE_API_KEY:?set SERVICE_API_KEY in .env}
   DATABASE_URL: postgres://${POSTGRES_USER:-denial_nav}:${POSTGRES_PASSWORD:-denial_nav_pass}@postgres:5432/${POSTGRES_DB:-denial_navigator}
 
 x-rust-build: &rust-build
@@ -52,11 +53,30 @@ services:
     container_name: denialnav-rust-ediparser
     restart: unless-stopped
     environment:
-      <<: *service-secrets
+      EDIPARSER_SERVICE_API_KEY: ${EDIPARSER_SERVICE_API_KEY:?set EDIPARSER_SERVICE_API_KEY in .env}
+      EDIPARSER_INTERNAL_API_KEY: ${EDIPARSER_INTERNAL_API_KEY:?set EDIPARSER_INTERNAL_API_KEY in .env}
       API_BASE: http://api:8000
       DROPZONE_PATH: /app/dropzone
       OUTPUT_PATH: /app/output
       PARSED_RETENTION_DAYS: ${PARSED_RETENTION_DAYS:-30}
+      INGESTION_ORGANIZATION_ID: ${INGESTION_ORGANIZATION_ID:-00000000-0000-0000-0000-000000000001}
+      SFTP_ENABLED: ${SFTP_ENABLED:-false}
+      SFTP_HOST: ${SFTP_HOST:-}
+      SFTP_PORT: ${SFTP_PORT:-22}
+      SFTP_USERNAME: ${SFTP_USERNAME:-}
+      SFTP_REMOTE_PATH: ${SFTP_REMOTE_PATH:-}
+      SFTP_PRIVATE_KEY_PATH: ${SFTP_PRIVATE_KEY_PATH:-}
+      SFTP_PASSWORD: ${SFTP_PASSWORD:-}
+      SFTP_HOST_PUBLIC_KEY_SHA256: ${SFTP_HOST_PUBLIC_KEY_SHA256:-}
+      SFTP_POLL_SECONDS: ${SFTP_POLL_SECONDS:-60}
+      S3_IMPORT_ENABLED: ${S3_IMPORT_ENABLED:-false}
+      S3_IMPORT_ENDPOINT: ${S3_IMPORT_ENDPOINT:-}
+      S3_IMPORT_BUCKET: ${S3_IMPORT_BUCKET:-}
+      S3_IMPORT_REGION: ${S3_IMPORT_REGION:-us-east-1}
+      S3_IMPORT_ACCESS_KEY_ID: ${S3_IMPORT_ACCESS_KEY_ID:-}
+      S3_IMPORT_SECRET_ACCESS_KEY: ${S3_IMPORT_SECRET_ACCESS_KEY:-}
+      S3_IMPORT_PREFIX: ${S3_IMPORT_PREFIX:-}
+      S3_IMPORT_POLL_SECONDS: ${S3_IMPORT_POLL_SECONDS:-60}
     volumes:
       - dropzone:/app/dropzone
       - parsed_output:/app/output
@@ -72,11 +92,13 @@ services:
     container_name: denialnav-rust-rag
     restart: unless-stopped
     environment:
-      <<: *service-secrets
+      DATABASE_URL: postgres://${POSTGRES_USER:-denial_nav}:${POSTGRES_PASSWORD:-denial_nav_pass}@postgres:5432/${POSTGRES_DB:-denial_navigator}
+      RAG_INTERNAL_API_KEY: ${RAG_INTERNAL_API_KEY:?set RAG_INTERNAL_API_KEY in .env}
       API_BASE: http://api:8000
       LLAMA_BASE_URL: ${LLAMA_BASE_URL:-http://10.10.10.98:8080}
       EMBED_BASE_URL: ${EMBED_BASE_URL:-http://10.10.10.98:8081}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
+      VECTOR_SEARCH_ENABLED: ${VECTOR_SEARCH_ENABLED:-true}
     depends_on:
       postgres:
         condition: service_healthy
@@ -89,9 +111,11 @@ services:
     container_name: denialnav-rust-llm
     restart: unless-stopped
     environment:
-      <<: *service-secrets
+      LLM_SERVICE_API_KEY: ${LLM_SERVICE_API_KEY:?set LLM_SERVICE_API_KEY in .env}
+      LLM_INTERNAL_API_KEY: ${LLM_INTERNAL_API_KEY:?set LLM_INTERNAL_API_KEY in .env}
       API_BASE: http://api:8000
       LLAMA_BASE_URL: ${LLAMA_BASE_URL:-http://10.10.10.98:8080}
+      LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-auto}
       LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-2048}
       LLM_DISABLE_THINKING: ${LLM_DISABLE_THINKING:-true}
@@ -109,15 +133,29 @@ services:
     ports:
       - "127.0.0.1:18000:8000"   # loopback only; the browser uses the frontend
     environment:
-      <<: *service-secrets
+      <<: *gateway-secrets
+      EDIPARSER_SERVICE_API_KEY: ${EDIPARSER_SERVICE_API_KEY:?set EDIPARSER_SERVICE_API_KEY in .env}
+      LLM_SERVICE_API_KEY: ${LLM_SERVICE_API_KEY:?set LLM_SERVICE_API_KEY in .env}
+      EDIPARSER_INTERNAL_API_KEY: ${EDIPARSER_INTERNAL_API_KEY:?set EDIPARSER_INTERNAL_API_KEY in .env}
+      RAG_INTERNAL_API_KEY: ${RAG_INTERNAL_API_KEY:?set RAG_INTERNAL_API_KEY in .env}
+      LLM_INTERNAL_API_KEY: ${LLM_INTERNAL_API_KEY:?set LLM_INTERNAL_API_KEY in .env}
       TOTP_FERNET_KEY: ${TOTP_FERNET_KEY:?set TOTP_FERNET_KEY in .env (openssl rand -base64 32)}
       EDIPARSER_SERVICE_URL: http://ediparser:8000
       RAG_ENGINE_URL: http://rag-engine:8000
       LLM_SERVICE_URL: http://llm-service:8000
       LLAMA_BASE_URL: ${LLAMA_BASE_URL:-http://10.10.10.98:8080}
       EMBED_BASE_URL: ${EMBED_BASE_URL:-http://10.10.10.98:8081}
+      # `local` remains the default. To use the optional MinIO profile, set
+      # OBJECT_STORAGE_BACKEND=s3 and retain the internal minio endpoint.
+      OBJECT_STORAGE_BACKEND: ${OBJECT_STORAGE_BACKEND:-local}
+      OBJECT_STORAGE_S3_ENDPOINT: ${OBJECT_STORAGE_S3_ENDPOINT:-http://minio:9000}
+      OBJECT_STORAGE_S3_BUCKET: ${OBJECT_STORAGE_S3_BUCKET:-denial-artifacts}
+      OBJECT_STORAGE_S3_REGION: ${OBJECT_STORAGE_S3_REGION:-us-east-1}
+      OBJECT_STORAGE_S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      OBJECT_STORAGE_S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
       CORS_ORIGINS: ${CORS_ORIGINS_RUST:-https://localhost:3444}
       JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-480}
+      OIDC_USERINFO_URL: ${OIDC_USERINFO_URL:-}
       TRUSTED_PROXY_NETWORKS: ${TRUSTED_PROXY_NETWORKS:-127.0.0.1/32,172.16.0.0/12,10.0.0.0/8}
     depends_on:
       postgres:
@@ -128,10 +166,15 @@ services:
         condition: service_started
       llm-service:
         condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health/live >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
 
   frontend:
     build:
-      context: ./frontend
+      context: ./apps/web
       dockerfile: Dockerfile
       args:
         VITE_API_URL: http://localhost:18000
@@ -149,7 +192,51 @@ services:
       PUBLIC_HTTPS_PORT: "3444"
     depends_on:
       api:
-        condition: service_started
+        condition: service_healthy
+
+  # Optional S3-compatible object storage for production-like development.
+  # The core services remain usable with the local filesystem backend when
+  # this profile is not enabled.
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    profiles: ["object-storage"]
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      # Compose interpolates profile services even when the profile is off;
+      # development defaults therefore keep the base stack bootable. Production
+      # deployments must override both values (see the security checklist).
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "127.0.0.1:19000:9000"
+      - "127.0.0.1:19001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # Optional development/test OIDC issuer. It is deliberately profile-gated:
+  # production must use the organisation's managed identity provider instead.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.3.2
+    profiles: ["oidc"]
+    restart: unless-stopped
+    command: start-dev --import-realm
+    environment:
+      # Compose interpolates profile services even while disabled. Keep these
+      # empty by default so the core stack remains bootable; the `oidc` profile
+      # must be started with both variables set.
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:-}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-}
+    ports:
+      - "127.0.0.1:18080:8080"
+    volumes:
+      - ./infra/keycloak/realm-denial-navigator.json:/opt/keycloak/data/import/realm-denial-navigator.json:ro
+      - keycloak_data:/opt/keycloak/data
 
 # Pin the project's network. Left to Docker, Compose walks the default address
 # pool (172.17, .18, .19 ...) and on 2026-09-09 it landed on 172.20.0.0/16 -
@@ -168,3 +255,5 @@ volumes:
   pgdata:
   dropzone:
   parsed_output:
+  minio_data:
+  keycloak_data:

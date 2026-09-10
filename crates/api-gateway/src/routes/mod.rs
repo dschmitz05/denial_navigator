@@ -8,13 +8,14 @@ pub mod feedback;
 pub mod ingestion;
 pub mod knowledge;
 pub mod notifications;
+pub mod playbooks;
 pub mod reference;
 pub mod retention;
 pub mod system;
 pub mod users;
 
-use axum::Router;
 use crate::state::AppState;
+use axum::Router;
 
 pub fn api_router() -> Router<AppState> {
     Router::new()
@@ -30,6 +31,7 @@ pub fn api_router() -> Router<AppState> {
         .nest("/audit", audit::router())
         .nest("/users", users::router())
         .nest("/notifications", notifications::router())
+        .nest("/playbooks", playbooks::router())
         .nest("/system", system::router())
         .nest("/retention", retention::router())
 }

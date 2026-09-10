@@ -33,7 +33,12 @@ impl LlamaClient {
     ///
     /// A reasoning model can put everything in `reasoning_content` and leave
     /// `content` empty; fall back rather than return nothing.
-    pub async fn chat(&self, system: &str, user: &str, temperature: f64) -> Result<String, AppError> {
+    pub async fn chat(
+        &self,
+        system: &str,
+        user: &str,
+        temperature: f64,
+    ) -> Result<String, AppError> {
         let mut body = serde_json::json!({
             "model": self.model,
             "messages": [
@@ -107,16 +112,13 @@ impl LlamaClient {
     /// True if `model` matches a loaded model exactly or as a prefix.
     pub async fn check_model_available(&self, model: &str) -> bool {
         match self.list_models().await {
-            Ok(available) => available
-                .iter()
-                .any(|m| m == model || model.starts_with(m)),
+            Ok(available) => available.iter().any(|m| m == model || model.starts_with(m)),
             Err(e) => {
                 tracing::warn!("could not list models for availability check: {e}");
                 false
             }
         }
     }
-
 }
 
 #[derive(Default)]

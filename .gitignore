@@ -68,6 +68,7 @@ dropzone/
 
 # ── Rust rewrite (branch rewrite/rust-ts) ──
 /target/
+/fuzz/target/
 
 # Large reference-data import samples and scratch remittances used during the
 # rewrite; test inputs, not source.
@@ -87,6 +88,8 @@ dropzone/
 
 # Rust compose stack self-signed certs
 /certs-rust/
+/certs/
+/deploy/production.env
 
 # editor timestamped backups
 *.bak-*

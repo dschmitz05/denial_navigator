@@ -25,7 +25,7 @@ const TOTP_PERIOD: u64 = 30;
 const TOTP_DIGITS: u32 = 6;
 
 /// Parse a 32-byte Fernet key from its base64url representation.
-fn parse_fernet_key(key_b64: &str) -> [u8; 32] {
+fn parse_fernet_key(key_b64: &str) -> Result<[u8; 32], String> {
     // Normalise: PyFernet keys may or may not carry padding.
     let stripped = key_b64.trim().trim_end_matches('=');
     let padded = match stripped.len() % 4 {
@@ -35,15 +35,18 @@ fn parse_fernet_key(key_b64: &str) -> [u8; 32] {
     };
     let bytes = URL_SAFE
         .decode(padded.as_bytes())
-        .expect("TOTP_FERNET_KEY is not valid base64url");
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&bytes[..32]);
-    out
+        .map_err(|_| "must be base64url".to_string())?;
+    bytes
+        .try_into()
+        .map_err(|_| "must decode to exactly 32 bytes".to_string())
+}
+pub fn validate_fernet_key(key_b64: &str) -> Result<(), String> {
+    parse_fernet_key(key_b64).map(|_| ())
 }
 
 /// Encrypt `plaintext` with a Fernet key, returning the base64url token.
-pub fn fernet_encrypt(key_b64: &str, plaintext: &str) -> String {
-    let key = parse_fernet_key(key_b64);
+pub fn fernet_encrypt(key_b64: &str, plaintext: &str) -> Result<String, String> {
+    let key = parse_fernet_key(key_b64)?;
     let signing_key = &key[0..16];
     let encryption_key = &key[16..32];
 
@@ -72,12 +75,12 @@ pub fn fernet_encrypt(key_b64: &str, plaintext: &str) -> String {
     let full_mac = mac.finalize().into_bytes();
     associated.extend_from_slice(&full_mac[..16]);
 
-    URL_SAFE_NO_PAD.encode(associated)
+    Ok(URL_SAFE_NO_PAD.encode(associated))
 }
 
 /// Decrypt a Fernet token produced by `fernet_encrypt` or PyFernet.
 pub fn fernet_decrypt(key_b64: &str, token: &str) -> Option<String> {
-    let key = parse_fernet_key(key_b64);
+    let key = parse_fernet_key(key_b64).ok()?;
     let signing_key = &key[0..16];
     let encryption_key = &key[16..32];
 
@@ -105,9 +108,7 @@ pub fn fernet_decrypt(key_b64: &str, token: &str) -> Option<String> {
 
     let cipher = <aes::Aes128 as aes::cipher::KeyInit>::new_from_slice(encryption_key).unwrap();
     let decryptor = Aes128Dec::inner_iv_slice_init(cipher, iv).unwrap();
-    let plaintext = decryptor
-        .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
-        .ok()?;
+    let plaintext = decryptor.decrypt_padded_vec_mut::<Pkcs7>(ciphertext).ok()?;
     String::from_utf8(plaintext).ok()
 }
 
@@ -140,32 +141,26 @@ pub fn totp_code(secret_b32: &str, unix_ts: u64) -> Option<String> {
 
 /// Verify a 6-digit code against a base32 secret, allowing ±1 time step.
 pub fn verify_totp(secret_b32: &str, code: &str, unix_ts: u64) -> bool {
+    matching_totp_step(secret_b32, code, unix_ts).is_some()
+}
+pub fn matching_totp_step(secret_b32: &str, code: &str, unix_ts: u64) -> Option<i64> {
     let code = code.trim();
     if code.len() != TOTP_DIGITS as usize {
-        return false;
+        return None;
     }
-    for offset in [0, 1, TOTP_PERIOD] {
-        let ts = if offset == 0 {
-            unix_ts
-        } else {
-            unix_ts.saturating_sub(offset)
-        };
+    for step in [
+        unix_ts / TOTP_PERIOD,
+        (unix_ts / TOTP_PERIOD).saturating_sub(1),
+        (unix_ts / TOTP_PERIOD).saturating_add(1),
+    ] {
+        let ts = step * TOTP_PERIOD;
         if let Some(expected) = totp_code(secret_b32, ts) {
             if expected == code {
-                return true;
-            }
-        }
-        // future window
-        if offset > 0 {
-            let future = unix_ts + offset;
-            if let Some(expected) = totp_code(secret_b32, future) {
-                if expected == code {
-                    return true;
-                }
+                return i64::try_from(step).ok();
             }
         }
     }
-    false
+    None
 }
 
 /// Decode a base32 secret, tolerating padded and unpadded forms.

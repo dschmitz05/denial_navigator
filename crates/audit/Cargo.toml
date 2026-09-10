@@ -1,0 +1,19 @@
+[package]
+name = "denial_audit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "denial_audit"
+path = "src/lib.rs"
+
+[dependencies]
+denial_common = { workspace = true }
+denial_auth = { workspace = true }
+axum = { workspace = true }
+ipnet = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }

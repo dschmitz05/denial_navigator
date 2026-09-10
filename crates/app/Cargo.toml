@@ -1,0 +1,16 @@
+[package]
+name = "denial_app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "denial_app"
+path = "src/lib.rs"
+
+[dependencies]
+denial_common = { workspace = true }
+denial_db = { workspace = true }
+denial_storage = { workspace = true }
+anyhow = { workspace = true }
+sqlx = { workspace = true }

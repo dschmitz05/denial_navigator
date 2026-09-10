@@ -12,7 +12,7 @@
 set -euo pipefail
 
 BACKUP_DIR="${BACKUP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/database/backups}"
-CONTAINER="${POSTGRES_CONTAINER:-denial-navigator-postgres}"
+CONTAINER="${POSTGRES_CONTAINER:-denialnav-rust-postgres}"
 DB_USER="${POSTGRES_USER:-denial_nav}"
 DB_NAME="${POSTGRES_DB:-denial_navigator}"
 RETAIN_DAYS="${BACKUP_RETAIN_DAYS:-30}"

@@ -1,0 +1,53 @@
+{{- $root := . }}
+{{- range $name := list "api" "ediparser" "rag" "llm" "frontend" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "openclaim.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $name }}
+spec:
+  replicas: {{ $root.Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: {{ $name }}
+  template:
+    metadata:
+      labels:
+        {{- include "openclaim.labels" $root | nindent 8 }}
+        app.kubernetes.io/component: {{ $name }}
+    spec:
+      securityContext: {{- toYaml $root.Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ $name }}
+          image: {{ include "openclaim.image" (index $root.Values.images $name) | quote }}
+          imagePullPolicy: {{ (index $root.Values.images $name).pullPolicy }}
+          ports: [{ name: http, containerPort: {{ if eq $name "frontend" }}80{{ else }}8000{{ end }} }]
+          envFrom:
+            - secretRef: { name: {{ $root.Values.existingSecret | quote }} }
+            - configMapRef: { name: {{ include "openclaim.name" $root }}-config }
+          securityContext: {{- toYaml $root.Values.containerSecurityContext | nindent 12 }}
+          resources: {{- toYaml $root.Values.resources | nindent 12 }}
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            {{- if eq $name "ediparser" }}
+            - { name: parser-data, mountPath: /app/dropzone }
+            - { name: parser-data, mountPath: /app/output }
+            {{- end }}
+            {{- if eq $name "api" }}
+            - { name: artifacts, mountPath: /var/lib/openclaim/objects }
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if eq $name "ediparser" }}
+        - name: parser-data
+          emptyDir: {}
+        {{- end }}
+        {{- if eq $name "api" }}
+        - name: artifacts
+          emptyDir: {}
+        {{- end }}
+---
+{{- end }}

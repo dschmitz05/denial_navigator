@@ -1,0 +1,17 @@
+[package]
+name = "denial_edi_835"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "denial_edi_835"
+path = "src/lib.rs"
+
+[dependencies]
+denial_edi_core = { workspace = true }
+denial_edi_837 = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+denial_test_support = { workspace = true }

@@ -4,16 +4,21 @@ use axum::extract::{Extension, Path, Query, State};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use chrono::{DateTime, NaiveDate, Utc};
-use denial_common::auth::hash_password;
+use denial_auth::auth::hash_password;
+use denial_auth::rbac::Principal;
 use denial_common::error::AppError;
-use denial_common::rbac::Principal;
 use serde::Deserialize;
 use sqlx::{Column, QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::state::AppState;
 
-const VALID_ROLES: &[&str] = &["billing_specialist", "billing_manager", "rcm_director", "admin"];
+const VALID_ROLES: &[&str] = &[
+    "billing_specialist",
+    "billing_manager",
+    "rcm_director",
+    "admin",
+];
 const MANAGER_UP: &[&str] = &["billing_manager", "rcm_director", "admin"];
 
 // Outcomes that mean a queue item is finished. Assignment on a CLOSED item is
@@ -81,30 +86,45 @@ fn row_to_json(row: &sqlx::postgres::PgRow) -> serde_json::Value {
         let name = col.name();
         let val = row
             .try_get::<Option<String>, _>(name)
-            .map(|v| v.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null))
-            .or_else(|_| {
-                row.try_get::<Option<i64>, _>(name)
-                    .map(|v| v.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null))
+            .map(|v| {
+                v.map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null)
             })
             .or_else(|_| {
-                row.try_get::<Option<f64>, _>(name)
-                    .map(|v| v.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null))
+                row.try_get::<Option<i64>, _>(name).map(|v| {
+                    v.map(serde_json::Value::from)
+                        .unwrap_or(serde_json::Value::Null)
+                })
             })
             .or_else(|_| {
-                row.try_get::<Option<bool>, _>(name)
-                    .map(|v| v.map(serde_json::Value::Bool).unwrap_or(serde_json::Value::Null))
+                row.try_get::<Option<f64>, _>(name).map(|v| {
+                    v.map(serde_json::Value::from)
+                        .unwrap_or(serde_json::Value::Null)
+                })
             })
             .or_else(|_| {
-                row.try_get::<Option<Uuid>, _>(name)
-                    .map(|v| v.map(|v| serde_json::Value::String(v.to_string())).unwrap_or(serde_json::Value::Null))
+                row.try_get::<Option<bool>, _>(name).map(|v| {
+                    v.map(serde_json::Value::Bool)
+                        .unwrap_or(serde_json::Value::Null)
+                })
             })
             .or_else(|_| {
-                row.try_get::<Option<NaiveDate>, _>(name)
-                    .map(|v| v.map(|v| serde_json::Value::String(v.to_string())).unwrap_or(serde_json::Value::Null))
+                row.try_get::<Option<Uuid>, _>(name).map(|v| {
+                    v.map(|v| serde_json::Value::String(v.to_string()))
+                        .unwrap_or(serde_json::Value::Null)
+                })
             })
             .or_else(|_| {
-                row.try_get::<Option<DateTime<Utc>>, _>(name)
-                    .map(|v| v.map(|v| serde_json::Value::String(v.to_rfc3339())).unwrap_or(serde_json::Value::Null))
+                row.try_get::<Option<NaiveDate>, _>(name).map(|v| {
+                    v.map(|v| serde_json::Value::String(v.to_string()))
+                        .unwrap_or(serde_json::Value::Null)
+                })
+            })
+            .or_else(|_| {
+                row.try_get::<Option<DateTime<Utc>>, _>(name).map(|v| {
+                    v.map(|v| serde_json::Value::String(v.to_rfc3339()))
+                        .unwrap_or(serde_json::Value::Null)
+                })
             })
             .unwrap_or(serde_json::Value::Null);
         map.insert(name.to_string(), val);
@@ -169,7 +189,11 @@ pub async fn list_users(
          totp_required, (totp_confirmed_at IS NOT NULL) AS totp_enrolled FROM users",
     );
 
-    let search = params.search.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let search = params
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     let mut need_where = true;
     if let Some(ref role) = params.role {
         if need_where {
@@ -212,7 +236,11 @@ pub async fn list_users(
     qb.push(" LIMIT ").push_bind(params.limit.clamp(1, 500));
     qb.push(" OFFSET ").push_bind(params.offset.max(0));
 
-    let rows = qb.build().fetch_all(&state.pool).await.map_err(AppError::Db)?;
+    let rows = qb
+        .build()
+        .fetch_all(&state.pool)
+        .await
+        .map_err(AppError::Db)?;
     Ok(Json(rows.iter().map(row_to_json).collect()))
 }
 
@@ -468,20 +496,20 @@ pub async fn delete_user(
         // Their live work goes back to the pool; closed items lose the record
         // of who did them, because that record was the user row.
         let released = release_queue_items(&state.pool, user_id).await?;
-        let closed_items: (i64,) =
-            sqlx::query_as(&format!(
-                "SELECT COUNT(*) FROM appeals_queue \
+        let closed_items: (i64,) = sqlx::query_as(&format!(
+            "SELECT COUNT(*) FROM appeals_queue \
                  WHERE assigned_user_id = $1 AND NOT {OPEN_QUEUE_CLAUSE}"
-            ))
-            .bind(user_id)
-            .fetch_one(&state.pool)
-            .await
-            .map_err(AppError::Db)?;
-        let audit_entries: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM audit_log WHERE user_id = $1")
-            .bind(user_id)
-            .fetch_one(&state.pool)
-            .await
-            .map_err(AppError::Db)?;
+        ))
+        .bind(user_id)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(AppError::Db)?;
+        let audit_entries: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM audit_log WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_one(&state.pool)
+                .await
+                .map_err(AppError::Db)?;
 
         // Written BEFORE the row disappears, so the log records who was
         // erased, by whom, and what it cost.
@@ -620,7 +648,11 @@ pub async fn set_totp_policy(
     audit_insert(
         &state.pool,
         &principal,
-        if body.required { "totp_required" } else { "totp_disabled" },
+        if body.required {
+            "totp_required"
+        } else {
+            "totp_disabled"
+        },
         "user",
         &user_id,
         &serde_json::json!({ "username": username, "outcome": outcome }),
@@ -641,14 +673,12 @@ pub async fn reset_totp(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_roles(&principal, &["admin"])?;
 
-    let user = sqlx::query(
-        "SELECT id, username, totp_required FROM users WHERE id = $1",
-    )
-    .bind(user_id)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(AppError::Db)?
-    .ok_or(AppError::NotFound)?;
+    let user = sqlx::query("SELECT id, username, totp_required FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(AppError::Db)?
+        .ok_or(AppError::NotFound)?;
     let username: String = user.try_get("username").map_err(AppError::Db)?;
     let totp_required: bool = user.try_get("totp_required").map_err(AppError::Db)?;
 
@@ -687,7 +717,10 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_users))
         .route("/assignable", get(list_assignable_users))
-        .route("/{user_id}", get(get_user).patch(update_user).delete(delete_user))
+        .route(
+            "/{user_id}",
+            get(get_user).patch(update_user).delete(delete_user),
+        )
         .route("/{user_id}/password", post(reset_user_password))
         .route("/{user_id}/totp", post(set_totp_policy))
         .route("/{user_id}/totp/reset", post(reset_totp))

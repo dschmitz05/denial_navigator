@@ -4,9 +4,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use chrono::{DateTime, Utc};
-use denial_common::auth::{create_token, decode_token, hash_password, verify_password};
+use denial_auth::auth::{create_token, decode_token, hash_password, verify_password};
+use denial_auth::rbac::Principal;
 use denial_common::error::AppError;
-use denial_common::rbac::Principal;
 use denial_common::totp;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -92,17 +92,13 @@ async fn recent_failures(
 
 pub async fn login(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Json(body): Json<LoginRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let ip = state
-        .config
-        .trusted_proxies
-        .first()
-        .map(|_| "127.0.0.1")
-        .unwrap_or("127.0.0.1");
+    let ip = principal.ip.as_deref();
     let user_agent = None;
 
-    let (fails_user, fails_ip) = recent_failures(&state.pool, &body.username, Some(ip)).await?;
+    let (fails_user, fails_ip) = recent_failures(&state.pool, &body.username, ip).await?;
     let over = if fails_user >= LOGIN_USER_LIMIT {
         Some("account")
     } else if fails_ip >= LOGIN_IP_LIMIT {
@@ -112,7 +108,7 @@ pub async fn login(
     };
 
     if let Some(limit) = over {
-        let _ = denial_common::audit::record(
+        let _ = denial_audit::record(
             &state.pool,
             "login_blocked",
             "user",
@@ -125,7 +121,7 @@ pub async fn login(
                 "failures_account": fails_user,
                 "failures_address": fails_ip,
             }),
-            Some(ip),
+            ip,
             user_agent,
         )
         .await;
@@ -146,7 +142,7 @@ pub async fn login(
     let user = match user {
         Some(u) => u,
         None => {
-            let _ = denial_common::audit::record(
+            let _ = denial_audit::record(
                 &state.pool,
                 "login_failed",
                 "user",
@@ -156,7 +152,7 @@ pub async fn login(
                     "username": body.username,
                     "reason": "unknown_or_inactive_user",
                 }),
-                Some(ip),
+                ip,
                 user_agent,
             )
             .await;
@@ -164,10 +160,14 @@ pub async fn login(
         }
     };
 
-    let password_hash: String = user.try_get("password_hash").map_err(|e| AppError::Internal(e.to_string()))?;
+    let password_hash: String = user
+        .try_get("password_hash")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
     if !verify_password(&body.password, &password_hash) {
-        let user_id: Uuid = user.try_get("id").map_err(|e| AppError::Internal(e.to_string()))?;
-        let _ = denial_common::audit::record(
+        let user_id: Uuid = user
+            .try_get("id")
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let _ = denial_audit::record(
             &state.pool,
             "login_failed",
             "user",
@@ -177,20 +177,34 @@ pub async fn login(
                 "username": body.username,
                 "reason": "bad_password",
             }),
-            Some(ip),
+            ip,
             user_agent,
         )
         .await;
         return Err(AppError::Unauthorized);
     }
 
-    let user_id: Uuid = user.try_get("id").map_err(|e| AppError::Internal(e.to_string()))?;
-    let username: String = user.try_get("username").map_err(|e| AppError::Internal(e.to_string()))?;
-    let email: String = user.try_get("email").map_err(|e| AppError::Internal(e.to_string()))?;
-    let full_name: Option<String> = user.try_get("full_name").map_err(|e| AppError::Internal(e.to_string()))?;
-    let role: String = user.try_get("role").map_err(|e| AppError::Internal(e.to_string()))?;
-    let totp_required: bool = user.try_get("totp_required").map_err(|e| AppError::Internal(e.to_string()))?;
-    let totp_confirmed_at: Option<DateTime<Utc>> = user.try_get("totp_confirmed_at").map_err(|e| AppError::Internal(e.to_string()))?;
+    let user_id: Uuid = user
+        .try_get("id")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let username: String = user
+        .try_get("username")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let email: String = user
+        .try_get("email")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let full_name: Option<String> = user
+        .try_get("full_name")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let role: String = user
+        .try_get("role")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let totp_required: bool = user
+        .try_get("totp_required")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let totp_confirmed_at: Option<DateTime<Utc>> = user
+        .try_get("totp_confirmed_at")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     sqlx::query("UPDATE users SET last_login = NOW() WHERE id = $1")
         .bind(user_id)
@@ -214,7 +228,7 @@ pub async fn login(
         )
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        let _ = denial_common::audit::record(
+        let _ = denial_audit::record(
             &state.pool,
             "login_password_ok",
             "user",
@@ -224,7 +238,7 @@ pub async fn login(
                 "username": username,
                 "awaiting": stage,
             }),
-            Some(ip),
+            ip,
             user_agent,
         )
         .await;
@@ -247,7 +261,7 @@ pub async fn login(
     )
     .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    let _ = denial_common::audit::record(
+    let _ = denial_audit::record(
         &state.pool,
         "login",
         "user",
@@ -257,7 +271,7 @@ pub async fn login(
             "username": username,
             "role": role,
         }),
-        Some(ip),
+        ip,
         user_agent,
     )
     .await;
@@ -280,10 +294,7 @@ pub async fn me(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let user_id = principal
-        .user_id
-        .as_ref()
-        .ok_or(AppError::Unauthorized)?;
+    let user_id = principal.user_id.as_ref().ok_or(AppError::Unauthorized)?;
 
     let row = sqlx::query(
         "SELECT id, username, email, full_name, role, is_active, last_login, \
@@ -296,15 +307,33 @@ pub async fn me(
     .map_err(AppError::Db)?;
 
     let row = row.ok_or(AppError::Unauthorized)?;
-    let id: Uuid = row.try_get("id").map_err(|e| AppError::Internal(e.to_string()))?;
-    let username: String = row.try_get("username").map_err(|e| AppError::Internal(e.to_string()))?;
-    let email: String = row.try_get("email").map_err(|e| AppError::Internal(e.to_string()))?;
-    let full_name: Option<String> = row.try_get("full_name").map_err(|e| AppError::Internal(e.to_string()))?;
-    let role: String = row.try_get("role").map_err(|e| AppError::Internal(e.to_string()))?;
-    let is_active: bool = row.try_get("is_active").map_err(|e| AppError::Internal(e.to_string()))?;
-    let last_login: Option<DateTime<Utc>> = row.try_get("last_login").map_err(|e| AppError::Internal(e.to_string()))?;
-    let totp_required: bool = row.try_get("totp_required").map_err(|e| AppError::Internal(e.to_string()))?;
-    let totp_enrolled: bool = row.try_get("totp_enrolled").map_err(|e| AppError::Internal(e.to_string()))?;
+    let id: Uuid = row
+        .try_get("id")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let username: String = row
+        .try_get("username")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let email: String = row
+        .try_get("email")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let full_name: Option<String> = row
+        .try_get("full_name")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let role: String = row
+        .try_get("role")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let is_active: bool = row
+        .try_get("is_active")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let last_login: Option<DateTime<Utc>> = row
+        .try_get("last_login")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let totp_required: bool = row
+        .try_get("totp_required")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let totp_enrolled: bool = row
+        .try_get("totp_enrolled")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     Ok(Json(serde_json::json!({
         "id": id.to_string(),
@@ -324,13 +353,15 @@ pub async fn register(
     Extension(principal): Extension<Principal>,
     Json(body): Json<RegisterRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let role = principal
-        .role
-        .as_deref()
-        .ok_or(AppError::Forbidden)?;
+    let role = principal.role.as_deref().ok_or(AppError::Forbidden)?;
     if role != "admin" {
         return Err(AppError::Forbidden);
     }
+    let organization_id = principal
+        .organization_id
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or(AppError::Forbidden)?;
 
     if body.password.len() < MIN_PASSWORD_LENGTH {
         return Err(AppError::BadRequest(format!(
@@ -338,7 +369,12 @@ pub async fn register(
         )));
     }
 
-    let valid_roles = ["billing_specialist", "billing_manager", "rcm_director", "admin"];
+    let valid_roles = [
+        "billing_specialist",
+        "billing_manager",
+        "rcm_director",
+        "admin",
+    ];
     if !valid_roles.contains(&body.role.as_str()) {
         return Err(AppError::BadRequest(format!(
             "Invalid role. Must be one of: {valid_roles:?}"
@@ -353,30 +389,51 @@ pub async fn register(
         .map_err(AppError::Db)?;
 
     if existing.is_some() {
-        return Err(AppError::Conflict("Username or email already exists".into()));
+        return Err(AppError::Conflict(
+            "Username or email already exists".into(),
+        ));
     }
 
     let hashed = hash_password(&body.password).map_err(|e| AppError::Internal(e.to_string()))?;
     let row = sqlx::query(
-        "INSERT INTO users (username, email, password_hash, full_name, role, is_active) \
-         VALUES ($1, $2, $3, $4, $5, TRUE) \
-         RETURNING id, username, email, full_name, role, is_active",
+        "WITH inserted AS ( \
+             INSERT INTO users (username, email, password_hash, full_name, role, is_active) \
+             VALUES ($1, $2, $3, $4, $5, TRUE) \
+             RETURNING id, username, email, full_name, role, is_active \
+         ), membership AS ( \
+             INSERT INTO organization_memberships (organization_id, user_id, role) \
+             SELECT $6, id, role FROM inserted \
+         ) \
+         SELECT id, username, email, full_name, role, is_active FROM inserted",
     )
     .bind(&body.username)
     .bind(&body.email)
     .bind(&hashed)
     .bind(&body.full_name)
     .bind(&body.role)
+    .bind(organization_id)
     .fetch_one(&state.pool)
     .await
     .map_err(AppError::Db)?;
 
-    let id: Uuid = row.try_get("id").map_err(|e| AppError::Internal(e.to_string()))?;
-    let username: String = row.try_get("username").map_err(|e| AppError::Internal(e.to_string()))?;
-    let email: String = row.try_get("email").map_err(|e| AppError::Internal(e.to_string()))?;
-    let full_name: Option<String> = row.try_get("full_name").map_err(|e| AppError::Internal(e.to_string()))?;
-    let role: String = row.try_get("role").map_err(|e| AppError::Internal(e.to_string()))?;
-    let is_active: bool = row.try_get("is_active").map_err(|e| AppError::Internal(e.to_string()))?;
+    let id: Uuid = row
+        .try_get("id")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let username: String = row
+        .try_get("username")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let email: String = row
+        .try_get("email")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let full_name: Option<String> = row
+        .try_get("full_name")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let role: String = row
+        .try_get("role")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let is_active: bool = row
+        .try_get("is_active")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     Ok(Json(serde_json::json!({
         "id": id.to_string(),
@@ -404,10 +461,7 @@ pub async fn change_password(
         ));
     }
 
-    let user_id = principal
-        .user_id
-        .as_ref()
-        .ok_or(AppError::Unauthorized)?;
+    let user_id = principal.user_id.as_ref().ok_or(AppError::Unauthorized)?;
     let uid = Uuid::parse_str(user_id).map_err(|_| AppError::Unauthorized)?;
 
     let user = sqlx::query(
@@ -419,12 +473,15 @@ pub async fn change_password(
     .map_err(AppError::Db)?
     .ok_or(AppError::NotFound)?;
 
-    let password_hash: String = user.try_get("password_hash").map_err(|e| AppError::Internal(e.to_string()))?;
+    let password_hash: String = user
+        .try_get("password_hash")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
     if !verify_password(&body.current_password, &password_hash) {
         return Err(AppError::Unauthorized);
     }
 
-    let hashed = hash_password(&body.new_password).map_err(|e| AppError::Internal(e.to_string()))?;
+    let hashed =
+        hash_password(&body.new_password).map_err(|e| AppError::Internal(e.to_string()))?;
     sqlx::query(
         "UPDATE users SET password_hash = $1, sessions_valid_from = date_trunc('second', NOW()), \
          updated_at = NOW() WHERE id = $2",
@@ -435,11 +492,10 @@ pub async fn change_password(
     .await
     .map_err(AppError::Db)?;
 
-    let username: String = user.try_get("username").map_err(|e| AppError::Internal(e.to_string()))?;
-    let role = principal
-        .role
-        .as_deref()
-        .unwrap_or("billing_specialist");
+    let username: String = user
+        .try_get("username")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let role = principal.role.as_deref().unwrap_or("billing_specialist");
 
     let token = create_token(
         &uid.to_string(),
@@ -465,10 +521,7 @@ async fn mfa_user(
     if principal.scope.as_deref() != Some("mfa") {
         return Err(AppError::Unauthorized);
     }
-    let uid = principal
-        .user_id
-        .as_ref()
-        .ok_or(AppError::Unauthorized)?;
+    let uid = principal.user_id.as_ref().ok_or(AppError::Unauthorized)?;
     let uid = Uuid::parse_str(uid).map_err(|_| AppError::Unauthorized)?;
 
     sqlx::query(
@@ -489,28 +542,32 @@ pub async fn totp_enroll(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let user = mfa_user(&state, &principal).await?;
 
-    let totp_confirmed_at: Option<DateTime<Utc>> =
-        user.try_get("totp_confirmed_at").map_err(|e| AppError::Internal(e.to_string()))?;
+    let totp_confirmed_at: Option<DateTime<Utc>> = user
+        .try_get("totp_confirmed_at")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
     if totp_confirmed_at.is_some() {
         return Err(AppError::Conflict(
             "This account is already enrolled. Ask an administrator to reset it.".into(),
         ));
     }
 
-    let user_id: Uuid = user.try_get("id").map_err(|e| AppError::Internal(e.to_string()))?;
-    let username: String = user.try_get("username").map_err(|e| AppError::Internal(e.to_string()))?;
+    let user_id: Uuid = user
+        .try_get("id")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let username: String = user
+        .try_get("username")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let secret = totp::generate_secret();
-    let encrypted = totp::fernet_encrypt(&state.config.totp_fernet_key, &secret);
+    let encrypted =
+        totp::fernet_encrypt(&state.config.totp_fernet_key, &secret).map_err(AppError::Internal)?;
 
-    sqlx::query(
-        "UPDATE users SET totp_secret = $1, totp_last_used_step = NULL WHERE id = $2",
-    )
-    .bind(&encrypted)
-    .bind(user_id)
-    .execute(&state.pool)
-    .await
-    .map_err(AppError::Db)?;
+    sqlx::query("UPDATE users SET totp_secret = $1, totp_last_used_step = NULL WHERE id = $2")
+        .bind(&encrypted)
+        .bind(user_id)
+        .execute(&state.pool)
+        .await
+        .map_err(AppError::Db)?;
 
     let uri = totp::otpauth_uri(&state.config.totp_issuer, &username, &secret);
     let qr = totp::qr_svg(&uri);
@@ -531,11 +588,18 @@ async fn complete_totp(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let user = mfa_user(state, principal).await?;
 
-    let user_id: Uuid = user.try_get("id").map_err(|e| AppError::Internal(e.to_string()))?;
-    let username: String = user.try_get("username").map_err(|e| AppError::Internal(e.to_string()))?;
-    let role: String = user.try_get("role").map_err(|e| AppError::Internal(e.to_string()))?;
-    let totp_secret: Option<String> = user.try_get("totp_secret").map_err(|e| AppError::Internal(e.to_string()))?;
-    let totp_last_used_step: Option<i64> = user.try_get("totp_last_used_step").map_err(|e| AppError::Internal(e.to_string()))?;
+    let user_id: Uuid = user
+        .try_get("id")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let username: String = user
+        .try_get("username")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let role: String = user
+        .try_get("role")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let totp_secret: Option<String> = user
+        .try_get("totp_secret")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let failures: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM audit_log
@@ -558,48 +622,54 @@ async fn complete_totp(
         });
     }
 
-    let secret_enc = totp_secret.ok_or_else(|| {
-        AppError::Conflict("No authenticator is set up for this account".into())
-    })?;
-    let secret = totp::fernet_decrypt(&state.config.totp_fernet_key, &secret_enc).ok_or_else(|| {
-        AppError::Conflict(
-            "The stored authenticator could not be read. Ask an administrator to reset it.".into(),
-        )
-    })?;
+    let secret_enc = totp_secret
+        .ok_or_else(|| AppError::Conflict("No authenticator is set up for this account".into()))?;
+    let secret =
+        totp::fernet_decrypt(&state.config.totp_fernet_key, &secret_enc).ok_or_else(|| {
+            AppError::Conflict(
+                "The stored authenticator could not be read. Ask an administrator to reset it."
+                    .into(),
+            )
+        })?;
 
     let now = Utc::now().timestamp() as u64;
-    if !totp::verify_totp(&secret, code, now) {
-        let _ = denial_common::audit::record(
-            &state.pool,
-            "totp_failed",
-            "user",
-            Some(&user_id.to_string()),
-            Some(&user_id.to_string()),
-            &serde_json::json!({
-                "username": username,
-                "stage": if confirming { "enrollment" } else { "login" },
-            }),
-            None,
-            None,
-        )
-        .await;
-        return Err(AppError::Unauthorized);
-    }
+    let step = match totp::matching_totp_step(&secret, code, now) {
+        Some(step) => step,
+        None => {
+            let _ = denial_audit::record(
+                &state.pool,
+                "totp_failed",
+                "user",
+                Some(&user_id.to_string()),
+                Some(&user_id.to_string()),
+                &serde_json::json!({
+                    "username": username,
+                    "stage": if confirming { "enrollment" } else { "login" },
+                }),
+                None,
+                None,
+            )
+            .await;
+            return Err(AppError::Unauthorized);
+        }
+    };
 
-    let step = (now / 30) as i64;
-    sqlx::query(
+    let updated = sqlx::query(
         "UPDATE users SET totp_last_used_step = $1, \
          totp_confirmed_at = COALESCE(totp_confirmed_at, NOW()), \
-         last_login = NOW() WHERE id = $2",
+         last_login = NOW() WHERE id = $2 AND (totp_last_used_step IS NULL OR totp_last_used_step < $1)",
     )
     .bind(step)
     .bind(user_id)
     .execute(&state.pool)
     .await
     .map_err(AppError::Db)?;
+    if updated.rows_affected() != 1 {
+        return Err(AppError::Unauthorized);
+    }
 
     let action = if confirming { "totp_enrolled" } else { "login" };
-    let _ = denial_common::audit::record(
+    let _ = denial_audit::record(
         &state.pool,
         action,
         "user",
@@ -623,9 +693,15 @@ async fn complete_totp(
     .await
     .map_err(AppError::Db)?;
 
-    let email: String = full.try_get("email").map_err(|e| AppError::Internal(e.to_string()))?;
-    let full_name: Option<String> = full.try_get("full_name").map_err(|e| AppError::Internal(e.to_string()))?;
-    let is_active: bool = full.try_get("is_active").map_err(|e| AppError::Internal(e.to_string()))?;
+    let email: String = full
+        .try_get("email")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let full_name: Option<String> = full
+        .try_get("full_name")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let is_active: bool = full
+        .try_get("is_active")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let token = create_token(
         &user_id.to_string(),

@@ -5,14 +5,14 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use axum::extract::{Multipart, Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
 use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
 use axum::Extension;
 use axum::Json;
 use axum::Router;
 use chrono::{NaiveDate, Utc};
+use denial_auth::rbac::Principal;
 use denial_common::error::AppError;
-use denial_common::rbac::Principal;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::postgres::Postgres;
@@ -48,7 +48,9 @@ fn max_bytes(kind: &str) -> Result<usize, AppError> {
     match kind {
         "carc" | "rarc" | "modifier" => Ok(1 << 20),
         "icd10" | "cpt" | "hcpcs" => Ok(50 << 20),
-        _ => Err(AppError::Unprocessable(format!("Invalid reference kind: {kind}"))),
+        _ => Err(AppError::Unprocessable(format!(
+            "Invalid reference kind: {kind}"
+        ))),
     }
 }
 
@@ -70,7 +72,13 @@ fn positional_fields(kind: &str) -> &'static [&'static str] {
             "effective_date",
             "expiration_date",
         ],
-        _ => &["code", "description", "is_active", "effective_date", "expiration_date"],
+        _ => &[
+            "code",
+            "description",
+            "is_active",
+            "effective_date",
+            "expiration_date",
+        ],
     }
 }
 
@@ -106,22 +114,9 @@ fn alias_field(header: &str) -> Option<&'static str> {
         | "mod"
         | "mod #"
         | "modifier #" => Some("code"),
-        "description"
-        | "desc"
-        | "meaning"
-        | "definition"
-        | "text"
-        | "remark"
-        | "remark text"
-        | "short description"
-        | "long description"
-        | "shortdesc"
-        | "longdesc"
-        | "descriptor"
-        | "shortdescription"
-        | "longdescription"
-        | "shortdescriptor"
-        | "longdescriptor"
+        "description" | "desc" | "meaning" | "definition" | "text" | "remark" | "remark text"
+        | "short description" | "long description" | "shortdesc" | "longdesc" | "descriptor"
+        | "shortdescription" | "longdescription" | "shortdescriptor" | "longdescriptor"
         | "code description" => Some("description"),
         "category" | "cagc category" | "adjustment category" => Some("category"),
         "is_active" | "active" | "is active" | "status" | "enabled" => Some("is_active"),
@@ -131,15 +126,8 @@ fn alias_field(header: &str) -> Option<&'static str> {
         "effective_date" | "effective" | "effective date" | "effectivedate" => {
             Some("effective_date")
         }
-        "expiration_date"
-        | "expiration"
-        | "expiration date"
-        | "expired"
-        | "expirationdate"
-        | "termination_date"
-        | "termination"
-        | "termination date"
-        | "terminated"
+        "expiration_date" | "expiration" | "expiration date" | "expired" | "expirationdate"
+        | "termination_date" | "termination" | "termination date" | "terminated"
         | "terminationdate" => Some("expiration_date"),
         _ => None,
     }
@@ -247,9 +235,8 @@ fn parse_bool(value: Option<&str>) -> Option<bool> {
         "true" | "t" | "yes" | "y" | "1" | "active" | "a" | "in effect" | "effective" | "added" => {
             Some(true)
         }
-        "false" | "f" | "no" | "n" | "0" | "inactive" | "i" | "deactivated" | "d" | "disabled" | "deleted" => {
-            Some(false)
-        }
+        "false" | "f" | "no" | "n" | "0" | "inactive" | "i" | "deactivated" | "d" | "disabled"
+        | "deleted" => Some(false),
         _ => None,
     }
 }
@@ -627,10 +614,7 @@ async fn apply_update(
     qb.push_bind(&row.code);
 
     let _ = kind;
-    qb.build()
-        .execute(&mut **tx)
-        .await
-        .map_err(AppError::Db)?;
+    qb.build().execute(&mut **tx).await.map_err(AppError::Db)?;
     Ok(())
 }
 
@@ -683,9 +667,7 @@ pub struct DeleteCodesBody {
 
 // ── Handlers ──────────────────────────────────────────────────────────────
 
-pub async fn reference_summary(
-    State(state): State<AppState>,
-) -> Result<Json<Value>, AppError> {
+pub async fn reference_summary(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
     let pool = &state.pool;
     let kinds = ["carc", "rarc", "icd10", "cpt", "modifier", "hcpcs"];
     let mut out = serde_json::Map::new();

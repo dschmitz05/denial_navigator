@@ -1,0 +1,34 @@
+# Publish the images from your approved registry before installing this chart.
+images:
+  api: { repository: denialnav-rust/api-gateway, tag: latest, pullPolicy: IfNotPresent }
+  ediparser: { repository: denialnav-rust/ediparser, tag: latest, pullPolicy: IfNotPresent }
+  rag: { repository: denialnav-rust/rag-engine, tag: latest, pullPolicy: IfNotPresent }
+  llm: { repository: denialnav-rust/llm-service, tag: latest, pullPolicy: IfNotPresent }
+  frontend: { repository: denialnav-rust/frontend, tag: latest, pullPolicy: IfNotPresent }
+
+# Create this Secret outside Helm. It must contain DATABASE_URL, JWT_SECRET,
+# the five service/internal keys, TOTP_FERNET_KEY, and any enabled importer
+# credentials. See README.md for the exact command.
+existingSecret: openclaim-runtime
+
+replicaCount: 1
+serviceAccount: {}
+podSecurityContext: { seccompProfile: { type: RuntimeDefault } }
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities: { drop: ["ALL"] }
+
+ingress:
+  enabled: true
+  className: nginx
+  host: claims.example.org
+  tlsSecret: openclaim-tls
+
+config:
+  corsOrigins: https://claims.example.org
+  llamaBaseUrl: http://llama.example.internal:8080
+  embedBaseUrl: http://llama.example.internal:8081
+  vectorSearchEnabled: "true"
+  parsedRetentionDays: "30"
+
+resources: {}

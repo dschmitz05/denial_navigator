@@ -4,15 +4,12 @@
 //! downstream HTTP clients. Every service links this crate so the security
 //! core lives in exactly one place.
 
-pub mod config;
-pub mod db;
-pub mod auth;
-pub mod totp;
-pub mod rbac;
-pub mod audit;
-pub mod ratelimit;
 pub mod clients;
+pub mod config;
 pub mod error;
-pub mod pgjson;
+pub mod internal_auth;
+pub mod logging;
+pub mod ratelimit;
+pub mod totp;
 
 pub use error::AppError;

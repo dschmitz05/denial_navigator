@@ -1,0 +1,12 @@
+[package]
+name = "denial_jobs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "denial_jobs"
+path = "src/lib.rs"
+
+[dependencies]
+tracing = { workspace = true }

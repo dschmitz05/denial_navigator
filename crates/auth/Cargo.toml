@@ -1,0 +1,23 @@
+[package]
+name = "denial_auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "denial_auth"
+path = "src/lib.rs"
+
+[dependencies]
+denial_common = { workspace = true }
+axum = { workspace = true }
+bcrypt = { workspace = true }
+chrono = { workspace = true }
+ipnet = { workspace = true }
+jsonwebtoken = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }

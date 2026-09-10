@@ -18,6 +18,10 @@ WORKDIR /build
 # Dependency manifests first so a source-only change reuses the crate cache.
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+# SQLx embeds the current schema snapshot and numbered migrations at compile
+# time, so they must be present in the builder even though runtime Compose
+# mounts them independently for PostgreSQL initialization.
+COPY database ./database
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,id=dn-cargo-registry \
     --mount=type=cache,target=/build/target,id=dn-rust-target,sharing=locked \

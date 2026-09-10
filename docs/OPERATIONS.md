@@ -1,0 +1,58 @@
+# Operations guide
+
+## Deployment
+
+Use `docker-compose.rust.yml` for the supported self-contained deployment.
+Set every secret in `.env` from a password manager, start the stack, then
+check `GET /health/ready` and Settings → Service health. The reverse proxy
+serves HTTPS on port 3444; provide a real certificate with `TLS_MODE=provided`
+before production use.
+
+The EDI parser runs as a non-root user and polls its mounted `dropzone` volume.
+Files are marked processed only after a successful parse/store cycle, making
+restarts idempotent. Parsed output retention is controlled by
+`PARSED_RETENTION_DAYS`.
+
+An optional SFTP source can be enabled with the `SFTP_*` settings in `.env`.
+Use a read-only partner account, set `SFTP_HOST_PUBLIC_KEY_SHA256` to the
+partner's pinned host-key fingerprint, and prefer a private key mounted
+read-only at `SFTP_PRIVATE_KEY_PATH`. The importer accepts only EDI extensions,
+downloads each file into a private temporary path, and sends it through the
+same tenant-scoped hash/idempotency path as the watched directory. It leaves
+remote files untouched; successful re-polls are safely skipped as duplicates.
+
+An optional S3-compatible importer uses paginated `ListObjectsV2` polling.
+Enable it with `S3_IMPORT_ENABLED=true` and set the `S3_IMPORT_*` variables.
+Use a separate read-only credential restricted to the configured bucket and
+prefix. This importer is independent from the object-store configuration used
+for knowledge-source artifacts, so its least-privilege policy remains small.
+
+Uploaded knowledge source artifacts are retained beneath
+`OBJECT_STORAGE_LOCAL_PATH` (default `./data/objects`). Place that path on an
+encrypted, access-controlled volume; permanent document purges remove its
+corresponding source artifact.
+
+## Backup and restore
+
+Run `scripts/backup.sh` from an operator host to create a PostgreSQL dump.
+Restore only into an isolated target with `scripts/restore.sh <backup-file>`;
+run the synthetic 835 upload and `/health/ready` afterward before promoting a
+restore. Keep database, certificate, and object-store backups under the
+organization's approved retention/encryption policy.
+
+## Upgrade
+
+1. Back up PostgreSQL and record the current image digests.
+2. Pull/build the new release and review `database/migrations/`.
+3. Start Compose. Before accepting traffic, the API verifies the SQLx migration
+   ledger and applies pending numbered migrations transactionally. Do not run
+   historical migration files manually against an existing schema.
+4. Verify service health, then run the synthetic 835 and 837
+   fixtures. Retain the previous image digest until this verification passes.
+
+## Air-gapped hosts
+
+Build/pull images and package the Rust/frontend dependency caches on a
+connected build host. Transfer signed image archives, the release checksum,
+the Compose file, migrations, and approved model files by the site's approved
+media process. Do not transfer production EDI or payer manuals for testing.

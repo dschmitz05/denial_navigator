@@ -10,8 +10,8 @@ use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use chrono::{DateTime, NaiveDate, Utc};
+use denial_auth::rbac::{Principal, PrincipalKind};
 use denial_common::error::AppError;
-use denial_common::rbac::{Principal, PrincipalKind};
 use serde::Deserialize;
 use sqlx::Row;
 use uuid::Uuid;
@@ -76,7 +76,11 @@ pub async fn list_notifications(
           WHERE user_id = $1 {} \
           ORDER BY created_at DESC \
           LIMIT $2",
-        if params.unread_only { "AND read_at IS NULL" } else { "" }
+        if params.unread_only {
+            "AND read_at IS NULL"
+        } else {
+            ""
+        }
     );
 
     let rows = sqlx::query(&sql)
@@ -160,8 +164,8 @@ pub async fn generate_digests(
 ) -> Result<Json<serde_json::Value>, AppError> {
     // A service credential or an admin - not something a specialist triggers,
     // since it writes to everyone's notifications.
-    let allowed = principal.kind == PrincipalKind::Service
-        || principal.role.as_deref() == Some("admin");
+    let allowed =
+        principal.kind == PrincipalKind::Service || principal.role.as_deref() == Some("admin");
     if !allowed {
         return Err(AppError::Forbidden);
     }
@@ -197,11 +201,17 @@ pub async fn generate_digests(
     .map_err(AppError::Db)?;
 
     for row in &owners {
-        let owner_id: Uuid = row.try_get("user_id").map_err(|e| AppError::Internal(e.to_string()))?;
+        let owner_id: Uuid = row
+            .try_get("user_id")
+            .map_err(|e| AppError::Internal(e.to_string()))?;
         let overdue: i64 = row.try_get("overdue").unwrap_or(0);
         let upcoming: i64 = row.try_get("upcoming").unwrap_or(0);
         let soonest: Option<NaiveDate> = row.try_get("soonest").ok().flatten();
-        let amount: f64 = row.try_get::<Option<f64>, _>("amount").ok().flatten().unwrap_or(0.0);
+        let amount: f64 = row
+            .try_get::<Option<f64>, _>("amount")
+            .ok()
+            .flatten()
+            .unwrap_or(0.0);
         let items: serde_json::Value = row
             .try_get::<Option<serde_json::Value>, _>("items")
             .ok()
@@ -258,12 +268,17 @@ pub async fn generate_digests(
     let orphan_n: i64 = orphan.try_get("n").unwrap_or(0);
     if orphan_n > 0 {
         let oldest: Option<NaiveDate> = orphan.try_get("oldest").ok().flatten();
-        let amount: f64 = orphan.try_get::<Option<f64>, _>("amount").ok().flatten().unwrap_or(0.0);
-        let managers = sqlx::query("SELECT id FROM users WHERE is_active AND role = ANY($1::text[])")
-            .bind(MANAGER_UP.iter().map(|s| s.to_string()).collect::<Vec<_>>())
-            .fetch_all(&state.pool)
-            .await
-            .map_err(AppError::Db)?;
+        let amount: f64 = orphan
+            .try_get::<Option<f64>, _>("amount")
+            .ok()
+            .flatten()
+            .unwrap_or(0.0);
+        let managers =
+            sqlx::query("SELECT id FROM users WHERE is_active AND role = ANY($1::text[])")
+                .bind(MANAGER_UP.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+                .fetch_all(&state.pool)
+                .await
+                .map_err(AppError::Db)?;
 
         let title = format!("{orphan_n} overdue denial(s) with nobody assigned");
         let body = format!(
@@ -277,7 +292,9 @@ pub async fn generate_digests(
         });
 
         for m in &managers {
-            let mid: Uuid = m.try_get("id").map_err(|e| AppError::Internal(e.to_string()))?;
+            let mid: Uuid = m
+                .try_get("id")
+                .map_err(|e| AppError::Internal(e.to_string()))?;
             let result = sqlx::query(
                 "INSERT INTO notifications (user_id, kind, title, body, payload) \
                  VALUES ($1, 'overdue_escalation', $2, $3, $4::jsonb) \
@@ -294,7 +311,7 @@ pub async fn generate_digests(
         }
     }
 
-    denial_common::audit::record(
+    denial_audit::record(
         &state.pool,
         "deadline_digests_generated",
         "system",

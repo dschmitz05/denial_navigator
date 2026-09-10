@@ -292,15 +292,11 @@ being governed by a number nobody chose for it.
 
 ## Database migrations
 
-`database/migrations/*.sql` runs automatically **only against a fresh volume**,
-via the Compose initdb mount. An existing database needs them applied by hand:
-
-```bash
-docker exec -i denial-navigator-postgres psql -U denial_nav -d denial_navigator \
-  -v ON_ERROR_STOP=1 < database/migrations/001_denial_status_in_progress.sql
-```
-
-All migrations are written to be idempotent, so re-running one is safe.
+The API applies `database/migrations/*.sql` with SQLx before it serves traffic.
+An empty database starts from `database/init.sql`; the first API startup records
+the checked-in historical migrations as a verified baseline. After that, SQLx
+applies only new numbered files and verifies their checksums. Do not manually
+replay historical migration files over an existing schema.
 
 ## Air-gapped deployment
 
@@ -320,7 +316,8 @@ managers at an internal mirror.
 ## Development
 
 ```bash
-cd frontend && npm run smoke      # server-renders every page
+cd apps/web && npm run smoke      # server-renders every page
+cd apps/web && npm run typecheck  # checks generated and converted TypeScript
 ./scripts/check_docs_offline.sh   # asserts the docs reference nothing off-host
 docker compose logs -f api        # follow a service
 ```
@@ -337,7 +334,7 @@ api-gateway/     REST API — routes/, services/ (auth, access, audit, db)
 ediparser/       X12 835/837 parser + dropzone watcher
 rag-engine/      chunking, embeddings, pgvector search, prompt building
 llm-service/     llama.cpp client, JSON parsing, analysis storage
-frontend/        React + Vite; scripts/smoke-render.mjs
+apps/web/         React + Vite TypeScript app; scripts/smoke-render.mjs
 database/        init.sql, migrations/, seed/
 scripts/         setup, sample EDI files, offline-docs check
 docs/            ARCHITECTURE.md

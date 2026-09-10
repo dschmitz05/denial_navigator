@@ -7,6 +7,7 @@
 
 use std::net::IpAddr;
 
+use crate::totp;
 use ipnet::IpNet;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -41,6 +42,30 @@ pub fn env_f64(key: &str, default: f64) -> f64 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+/// Read a boolean environment variable. Invalid values retain the supplied
+/// default so an optional feature cannot be accidentally enabled by a typo.
+pub fn env_bool(key: &str, default: bool) -> bool {
+    match std::env::var(key) {
+        Ok(value)
+            if matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "true" | "1" | "yes" | "on"
+            ) =>
+        {
+            true
+        }
+        Ok(value)
+            if matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "false" | "0" | "no" | "off"
+            ) =>
+        {
+            false
+        }
+        _ => default,
+    }
 }
 
 /// Parse one `TRUSTED_PROXY_NETWORKS` entry. Accepts a CIDR ("10.0.0.0/8")
@@ -130,7 +155,8 @@ impl DbConfig {
 pub struct GatewayConfig {
     pub database: DbConfig,
     pub jwt_secret: String,
-    pub service_api_key: Option<String>,
+    pub ediparser_service_api_key: String,
+    pub llm_service_api_key: String,
     pub service_name: String,
     pub totp_fernet_key: String,
     pub totp_issuer: String,
@@ -140,6 +166,7 @@ pub struct GatewayConfig {
     pub public_base_url: String,
     pub rate_limit: RateLimitConfig,
     pub cors_origins: Vec<String>,
+    pub oidc_userinfo_url: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -151,17 +178,33 @@ pub struct RateLimitConfig {
 
 impl GatewayConfig {
     pub fn from_env() -> Self {
-        let trusted = env_or("TRUSTED_PROXY_NETWORKS", "127.0.0.1/32,172.16.0.0/12,10.0.0.0/8")
-            .split(',')
-            .filter_map(|s| parse_trusted_net(s.trim()))
-            .collect();
+        let trusted = env_or(
+            "TRUSTED_PROXY_NETWORKS",
+            "127.0.0.1/32,172.16.0.0/12,10.0.0.0/8",
+        )
+        .split(',')
+        .filter_map(|s| parse_trusted_net(s.trim()))
+        .collect();
 
+        let totp_fernet_key = env_required_secret("TOTP_FERNET_KEY");
+        if let Err(e) = totp::validate_fernet_key(&totp_fernet_key) {
+            panic!("FATAL: TOTP_FERNET_KEY is invalid: {e}");
+        }
+        let ediparser_service_api_key = env_required_secret("EDIPARSER_SERVICE_API_KEY");
+        let llm_service_api_key = env_required_secret("LLM_SERVICE_API_KEY");
+        if subtle_constant_time_eq(
+            ediparser_service_api_key.as_bytes(),
+            llm_service_api_key.as_bytes(),
+        ) {
+            panic!("FATAL: EDIPARSER_SERVICE_API_KEY and LLM_SERVICE_API_KEY must differ");
+        }
         Self {
             database: DbConfig::from_env(),
             jwt_secret: env_required_secret("JWT_SECRET"),
-            service_api_key: env_optional_secret("SERVICE_API_KEY"),
+            ediparser_service_api_key,
+            llm_service_api_key,
             service_name: env_or("SERVICE_NAME", "denial-nav-api-gateway"),
-            totp_fernet_key: env_required_secret("TOTP_FERNET_KEY"),
+            totp_fernet_key,
             totp_issuer: env_or("TOTP_ISSUER", "Denial Navigator"),
             jwt_expire_minutes: env_usize("JWT_EXPIRE_MINUTES", 30) as i64,
             audit_enabled: env_or("AUDIT_LOG_ENABLED", "true").eq("true"),
@@ -177,11 +220,28 @@ impl GatewayConfig {
                 if list.is_empty() {
                     vec![env_or("PUBLIC_BASE_URL", "http://localhost:3000")]
                 } else {
-                    list.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+                    list.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
                 }
             },
+            oidc_userinfo_url: std::env::var("OIDC_USERINFO_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
         }
     }
+}
+
+fn subtle_constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut different = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        different |= x ^ y;
+    }
+    different == 0
 }
 
 /// Configuration for the LLM service.
@@ -251,8 +311,12 @@ mod tests {
 
     #[test]
     fn parses_cidr_and_bare_ip_trusted_entries() {
-        assert!(parse_trusted_net("10.0.0.0/8").unwrap().contains(&"10.20.30.40".parse::<IpAddr>().unwrap()));
-        assert!(parse_trusted_net("127.0.0.1/32").unwrap().contains(&"127.0.0.1".parse::<IpAddr>().unwrap()));
+        assert!(parse_trusted_net("10.0.0.0/8")
+            .unwrap()
+            .contains(&"10.20.30.40".parse::<IpAddr>().unwrap()));
+        assert!(parse_trusted_net("127.0.0.1/32")
+            .unwrap()
+            .contains(&"127.0.0.1".parse::<IpAddr>().unwrap()));
         // Bare address -> host route.
         let host = parse_trusted_net("192.168.1.5").unwrap();
         assert!(host.contains(&"192.168.1.5".parse::<IpAddr>().unwrap()));

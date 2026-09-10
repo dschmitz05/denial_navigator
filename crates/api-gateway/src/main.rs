@@ -5,7 +5,7 @@ mod state;
 
 use std::net::SocketAddr;
 
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -22,6 +22,42 @@ async fn root() -> impl IntoResponse {
 
 async fn health() -> impl IntoResponse {
     Json(serde_json::json!({"status": "ok"}))
+}
+
+async fn health_live() -> impl IntoResponse {
+    Json(serde_json::json!({"status": "live"}))
+}
+
+async fn health_ready(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> impl IntoResponse {
+    match sqlx::query("SELECT 1").execute(&state.pool).await {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({"status": "ready"}))),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"status": "not_ready"})),
+        ),
+    }
+}
+
+/// Browser-facing hardening headers. The React SPA and API are same-origin,
+/// so this can be restrictive without breaking normal workflows.
+async fn security_headers(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let mut response = next.run(req).await;
+    let headers = response.headers_mut();
+    for (name, value) in [
+        ("x-content-type-options", "nosniff"),
+        ("x-frame-options", "DENY"),
+        ("referrer-policy", "same-origin"),
+        ("permissions-policy", "camera=(), microphone=(), geolocation=()"),
+        ("content-security-policy", "default-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"),
+    ] {
+        headers.insert(
+            HeaderName::from_static(name),
+            HeaderValue::from_static(value),
+        );
+    }
+    response
 }
 
 #[tokio::main]
@@ -50,6 +86,8 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/", get(root))
         .route("/health", get(health))
+        .route("/health/live", get(health_live))
+        .route("/health/ready", get(health_ready))
         .merge(docs::routes())
         .nest("/api/v1", routes::api_router())
         // Uploads (EDI files, reference-code CSVs, policy PDFs) stream through
@@ -58,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
         // than disabling the limit outright.
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn(security_headers))
         .layer(cors)
         .layer(axum::middleware::from_fn_with_state(
             middleware::AccessState {
@@ -68,12 +107,12 @@ async fn main() -> anyhow::Result<()> {
             middleware::access,
         ))
         .layer(axum::middleware::from_fn_with_state(
-            denial_common::audit::AuditState {
+            denial_audit::AuditState {
                 pool: state.pool.clone(),
                 config: state.config.clone(),
                 trusted: state.config.trusted_proxies.clone(),
             },
-            denial_common::audit::audit,
+            denial_audit::audit,
         ))
         .with_state(state);
 
@@ -83,6 +122,10 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("api-gateway listening on {addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

@@ -1,0 +1,14 @@
+[package]
+name = "denial_ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "denial_ai"
+path = "src/lib.rs"
+
+[dependencies]
+denial_common = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }

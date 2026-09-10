@@ -6,8 +6,9 @@
 
 use axum::extract::{Query, State};
 use axum::routing::get;
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use chrono::{DateTime, Utc};
+use denial_auth::rbac::Principal;
 use denial_common::error::AppError;
 use serde::Deserialize;
 use sqlx::{QueryBuilder, Row};
@@ -38,6 +39,14 @@ pub struct AuditQuery {
 
 fn default_limit() -> i64 {
     200
+}
+
+fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
+    principal
+        .organization_id
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or(AppError::Forbidden)
 }
 
 fn opt_string(row: &sqlx::postgres::PgRow, col: &str) -> Option<String> {
@@ -82,8 +91,10 @@ fn serialize_row(row: &sqlx::postgres::PgRow) -> serde_json::Value {
 
 pub async fn list_audit_log(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Query(params): Query<AuditQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    let organization_id = organization_id(&principal)?;
     let limit = params.limit.clamp(1, 1000);
     let offset = params.offset.max(0);
 
@@ -95,7 +106,9 @@ pub async fn list_audit_log(
     qb.push(ACTOR_SQL);
     qb.push(" AS actor FROM audit_log al LEFT JOIN users u ON u.id = al.user_id");
 
-    let mut need_where = true;
+    qb.push(" WHERE al.organization_id = ")
+        .push_bind(organization_id);
+    let mut need_where = false;
     let prefix = |qb: &mut QueryBuilder<sqlx::Postgres>, need_where: &mut bool| {
         qb.push(if *need_where { " WHERE " } else { " AND " });
         *need_where = false;
@@ -123,11 +136,15 @@ pub async fn list_audit_log(
     }
     if let Some(ref v) = params.start_date {
         prefix(&mut qb, &mut need_where);
-        qb.push("al.created_at >= ").push_bind(v).push("::timestamptz");
+        qb.push("al.created_at >= ")
+            .push_bind(v)
+            .push("::timestamptz");
     }
     if let Some(ref v) = params.end_date {
         prefix(&mut qb, &mut need_where);
-        qb.push("al.created_at <= ").push_bind(v).push("::timestamptz");
+        qb.push("al.created_at <= ")
+            .push_bind(v)
+            .push("::timestamptz");
     }
 
     qb.push(" ORDER BY al.created_at DESC LIMIT ")
@@ -135,19 +152,30 @@ pub async fn list_audit_log(
         .push(" OFFSET ")
         .push_bind(offset);
 
-    let rows = qb.build().fetch_all(&state.pool).await.map_err(AppError::Db)?;
+    let rows = qb
+        .build()
+        .fetch_all(&state.pool)
+        .await
+        .map_err(AppError::Db)?;
     Ok(Json(rows.iter().map(serialize_row).collect()))
 }
 
 pub async fn list_audit_actors(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
 ) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    let organization_id = organization_id(&principal)?;
     let sql = format!(
         "SELECT {ACTOR_SQL} AS actor, COUNT(*) AS entry_count, MAX(al.created_at) AS last_seen \
          FROM audit_log al LEFT JOIN users u ON u.id = al.user_id \
+         WHERE al.organization_id = $1 \
          GROUP BY {ACTOR_SQL} ORDER BY COUNT(*) DESC, actor"
     );
-    let rows = sqlx::query(&sql).fetch_all(&state.pool).await.map_err(AppError::Db)?;
+    let rows = sqlx::query(&sql)
+        .bind(organization_id)
+        .fetch_all(&state.pool)
+        .await
+        .map_err(AppError::Db)?;
     let out = rows
         .iter()
         .map(|r| {
@@ -163,17 +191,21 @@ pub async fn list_audit_actors(
 
 pub async fn audit_stats(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let organization_id = organization_id(&principal)?;
     let actions = sqlx::query(
-        "SELECT action, COUNT(*) AS cnt FROM audit_log GROUP BY action ORDER BY cnt DESC",
+        "SELECT action, COUNT(*) AS cnt FROM audit_log WHERE organization_id = $1 GROUP BY action ORDER BY cnt DESC",
     )
+    .bind(organization_id)
     .fetch_all(&state.pool)
     .await
     .map_err(AppError::Db)?;
 
     let recent_24h: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM audit_log WHERE created_at >= NOW() - INTERVAL '24 hours'",
+        "SELECT COUNT(*) FROM audit_log WHERE organization_id = $1 AND created_at >= NOW() - INTERVAL '24 hours'",
     )
+    .bind(organization_id)
     .fetch_one(&state.pool)
     .await
     .map_err(AppError::Db)?;
@@ -181,14 +213,16 @@ pub async fn audit_stats(
     let logins = sqlx::query(
         "SELECT u.username, u.role, COUNT(*) AS login_count \
          FROM audit_log al JOIN users u ON u.id = al.user_id \
-         WHERE al.action = 'login' AND al.created_at >= NOW() - INTERVAL '7 days' \
+         WHERE al.organization_id = $1 AND al.action = 'login' AND al.created_at >= NOW() - INTERVAL '7 days' \
          GROUP BY u.username, u.role ORDER BY login_count DESC LIMIT 10",
     )
+    .bind(organization_id)
     .fetch_all(&state.pool)
     .await
     .map_err(AppError::Db)?;
 
-    let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM audit_log")
+    let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM audit_log WHERE organization_id = $1")
+        .bind(organization_id)
         .fetch_one(&state.pool)
         .await
         .map_err(AppError::Db)?;

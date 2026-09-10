@@ -9,11 +9,28 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 -- ============================================================
+-- 0. Organizations / tenant boundary
+-- ============================================================
+CREATE TABLE organizations (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    slug VARCHAR(100) UNIQUE NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO organizations (id, slug, name)
+VALUES ('00000000-0000-0000-0000-000000000001', 'development', 'Development Organization')
+ON CONFLICT (id) DO NOTHING;
+
+-- ============================================================
 -- 1. Claims
 -- ============================================================
 CREATE TABLE claims (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    claim_number VARCHAR(100) UNIQUE NOT NULL,
+    organization_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'
+        REFERENCES organizations(id),
+    claim_number VARCHAR(100) NOT NULL,
     patient_id VARCHAR(100) NOT NULL,
     patient_name VARCHAR(255),
     date_of_birth DATE,
@@ -29,6 +46,7 @@ CREATE TABLE claims (
         CHECK (status IN ('ingested', 'parsed', 'analyzed', 'denied', 'partially_paid', 'appealed', 'resolved', 'resubmitted')),
     claim_type VARCHAR(20) NOT NULL DEFAULT 'professional'
         CHECK (claim_type IN ('professional', 'institutional', 'pharmacy')),
+    facility_type_code VARCHAR(20),
     frequency_code VARCHAR(20),
     admission_date DATE,
     discharge_date DATE,
@@ -37,6 +55,9 @@ CREATE TABLE claims (
     icd_10_codes TEXT[],
     diagnosis_pointer TEXT[],
     raw_835_data JSONB,
+    correlation_status VARCHAR(20) NOT NULL DEFAULT 'unmatched'
+        CHECK (correlation_status IN ('unmatched', 'matched', 'ambiguous')),
+    correlation_confidence DECIMAL(3, 2),
     parsed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -46,7 +67,7 @@ CREATE INDEX idx_claims_status ON claims(status);
 CREATE INDEX idx_claims_payer_id ON claims(payer_id);
 CREATE INDEX idx_claims_created_at ON claims(created_at);
 CREATE INDEX idx_claims_total_charge ON claims(total_charge DESC);
-CREATE INDEX idx_claims_claim_number ON claims(claim_number);
+CREATE UNIQUE INDEX idx_claims_organization_claim_number ON claims(organization_id, claim_number);
 
 -- ============================================================
 -- 2. Denials (Claim Adjustments)
@@ -95,6 +116,7 @@ CREATE INDEX idx_denials_charge_amount ON denials(charge_amount DESC);
 -- ============================================================
 CREATE TABLE ai_analyses (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    playbook_id UUID,
     denial_id UUID NOT NULL REFERENCES denials(id) ON DELETE CASCADE,
     claim_id UUID NOT NULL,
     model_name VARCHAR(100),
@@ -102,6 +124,9 @@ CREATE TABLE ai_analyses (
     completion_tokens INTEGER,
     total_tokens INTEGER,
     system_prompt_template VARCHAR(255),
+    provider_name VARCHAR(100),
+    provider_version VARCHAR(100),
+    prompt_template_version VARCHAR(100),
     raw_prompt TEXT,
     raw_response TEXT,
     explanation TEXT,
@@ -178,6 +203,28 @@ CREATE TABLE feedback_loop (
 CREATE INDEX idx_feedback_loop_ai_analysis_id ON feedback_loop(ai_analysis_id);
 CREATE INDEX idx_feedback_loop_accepted ON feedback_loop(accepted);
 CREATE INDEX idx_feedback_loop_was_paid ON feedback_loop(was_paid_on_resubmit);
+CREATE INDEX idx_feedback_loop_paid_created ON feedback_loop(created_at DESC)
+    WHERE was_paid_on_resubmit IS TRUE;
+
+CREATE TABLE institutional_playbooks (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name VARCHAR(200) NOT NULL,
+    description TEXT,
+    triggers JSONB NOT NULL DEFAULT '{}'::jsonb,
+    recommendation JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status VARCHAR(20) NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'approved', 'archived')),
+    version INTEGER NOT NULL DEFAULT 1,
+    created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    approved_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    approved_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_institutional_playbooks_status ON institutional_playbooks(status);
+CREATE INDEX idx_institutional_playbooks_triggers ON institutional_playbooks USING GIN(triggers);
+ALTER TABLE ai_analyses ADD CONSTRAINT ai_analyses_playbook_id_fkey
+    FOREIGN KEY (playbook_id) REFERENCES institutional_playbooks(id) ON DELETE SET NULL;
+CREATE INDEX idx_ai_analyses_playbook_id ON ai_analyses(playbook_id);
 
 -- ============================================================
 -- 6. CARC Codes (Claim Adjustment Reason Codes - WPC)
@@ -215,6 +262,8 @@ CREATE INDEX idx_rarc_codes_is_active ON rarc_codes(is_active);
 -- ============================================================
 CREATE TABLE knowledge_documents (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'
+        REFERENCES organizations(id),
     title VARCHAR(500) NOT NULL,
     source_type VARCHAR(50) NOT NULL
         CHECK (source_type IN ('cms_lcd', 'payer_policy', 'fee_schedule',
@@ -235,6 +284,7 @@ CREATE TABLE knowledge_documents (
 CREATE INDEX idx_knowledge_documents_source_type ON knowledge_documents(source_type);
 CREATE INDEX idx_knowledge_documents_status ON knowledge_documents(status);
 CREATE INDEX idx_knowledge_documents_payer_id ON knowledge_documents(payer_id);
+CREATE INDEX idx_knowledge_documents_organization_id ON knowledge_documents(organization_id);
 
 -- ============================================================
 -- 9. Knowledge Chunks (Vector Embeddings)
@@ -251,6 +301,9 @@ CREATE TABLE knowledge_chunks (
 );
 
 CREATE INDEX idx_knowledge_chunks_doc_id ON knowledge_chunks(knowledge_document_id);
+CREATE INDEX idx_knowledge_chunks_content_fts ON knowledge_chunks USING GIN (to_tsvector('english', content));
+CREATE INDEX idx_knowledge_documents_effective_dates ON knowledge_documents (effective_date, expiration_date) WHERE status <> 'archived';
+CREATE INDEX idx_knowledge_documents_jurisdiction ON knowledge_documents (lower(COALESCE(metadata->>'jurisdiction', ''))) WHERE metadata ? 'jurisdiction';
 -- HNSW, not IVFFlat. IVFFlat computes its centroids at CREATE INDEX time, and
 -- this file runs against an EMPTY database - so the centroids were meaningless
 -- and the default ivfflat.probes = 1 scanned one arbitrary list. Measured on a
@@ -264,6 +317,7 @@ CREATE INDEX idx_knowledge_chunks_embedding ON knowledge_chunks USING hnsw (embe
 -- ============================================================
 CREATE TABLE audit_log (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID REFERENCES organizations(id),
     user_id UUID,
     action VARCHAR(100) NOT NULL,
     -- 'login', 'view_claim', 'edit_claim', 'generate_analysis', 'submit_appeal',
@@ -281,6 +335,7 @@ CREATE INDEX idx_audit_log_action ON audit_log(action);
 CREATE INDEX idx_audit_log_resource ON audit_log(resource_type, resource_id);
 CREATE INDEX idx_audit_log_user_id ON audit_log(user_id);
 CREATE INDEX idx_audit_log_created_at ON audit_log(created_at);
+CREATE INDEX idx_audit_log_organization_created ON audit_log(organization_id, created_at DESC);
 
 -- ============================================================
 -- 11. Users / RBAC
@@ -289,10 +344,11 @@ CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     username VARCHAR(100) UNIQUE NOT NULL,
     email VARCHAR(255) UNIQUE NOT NULL,
+    oidc_subject VARCHAR(255) UNIQUE,
     password_hash VARCHAR(255),
     full_name VARCHAR(255),
     role VARCHAR(50) NOT NULL DEFAULT 'billing_specialist'
-        CHECK (role IN ('billing_specialist', 'billing_manager', 'rcm_director', 'admin')),
+        CHECK (role IN ('billing_specialist', 'billing_manager', 'rcm_director', 'admin', 'auditor')),
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
@@ -311,11 +367,41 @@ CREATE TABLE users (
 
 CREATE INDEX idx_users_role ON users(role);
 
+CREATE TABLE organization_memberships (
+    organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role VARCHAR(50) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (organization_id, user_id)
+);
+CREATE INDEX idx_organization_memberships_user ON organization_memberships(user_id);
+
+-- Durable, asynchronous recommendation generation jobs. The API's existing
+-- synchronous endpoint remains available for interactive use.
+CREATE TABLE recommendation_jobs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    denial_id UUID NOT NULL REFERENCES denials(id) ON DELETE CASCADE,
+    requested_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    temperature REAL NOT NULL DEFAULT 0.3,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'running', 'completed', 'failed')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    result JSONB,
+    error_message TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ
+);
+CREATE INDEX idx_recommendation_jobs_status_created
+    ON recommendation_jobs(status, created_at);
+
 -- ============================================================
 -- 12. File Uploads / Ingestion Log
 -- ============================================================
 CREATE TABLE ingestion_log (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'
+        REFERENCES organizations(id),
     file_name VARCHAR(500) NOT NULL,
     file_path TEXT,
     file_size_bytes BIGINT,
@@ -332,6 +418,7 @@ CREATE TABLE ingestion_log (
 
 CREATE INDEX idx_ingestion_log_status ON ingestion_log(status);
 CREATE INDEX idx_ingestion_log_created_at ON ingestion_log(created_at);
+CREATE INDEX idx_ingestion_log_organization_created ON ingestion_log(organization_id, created_at DESC);
 
 -- ============================================================
 -- 13. Payer appeal filing windows

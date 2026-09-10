@@ -1,0 +1,28 @@
+{
+  "realm": "denial-navigator",
+  "enabled": true,
+  "displayName": "Denial Navigator (development)",
+  "roles": {
+    "realm": [
+      { "name": "billing_specialist" },
+      { "name": "billing_manager" },
+      { "name": "rcm_director" },
+      { "name": "admin" },
+      { "name": "auditor" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "denial-navigator-web",
+      "name": "Denial Navigator web (development)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": ["https://localhost:3444/*"],
+      "webOrigins": ["https://localhost:3444"],
+      "attributes": { "pkce.code.challenge.method": "S256" }
+    }
+  ]
+}

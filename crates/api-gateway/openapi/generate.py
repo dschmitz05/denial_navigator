@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 """Generate crates/api-gateway/openapi/openapi.json.
 
-The Rust gateway has no framework-level schema reflection (unlike FastAPI), so
-the API description is maintained here by hand and rendered to a static
-document that `/docs`, `/redoc` and `/openapi.json` serve. Keep this in step
-with crates/api-gateway/src/routes/*.rs.
+The detailed request and response schemas below are rendered to the static
+document that `/docs`, `/redoc` and `/openapi.json` serve.  The operation
+inventory is derived from the Axum route declarations: generation fails if a
+Rust route/method is missing from this document or the document describes a
+route/method that no longer exists.
 
     python3 crates/api-gateway/openapi/generate.py
 """
 import json
 import pathlib
+import re
+import sys
 
 OUT = pathlib.Path(__file__).with_name("openapi.json")
+CLIENT_OUT = pathlib.Path(__file__).parents[3] / "apps" / "web" / "src" / "api" / "generated.ts"
+ROUTES_DIR = pathlib.Path(__file__).parents[1] / "src" / "routes"
 
 BEARER = [{"bearerAuth": []}]
 SERVICE = [{"serviceKey": []}]
@@ -89,6 +94,85 @@ def add(path, **methods):
     paths[path] = methods
 
 
+ROUTE_PREFIXES = {
+    "auth": "/api/v1/auth",
+    "claims": "/api/v1/claims",
+    "denials": "/api/v1/denials",
+    "analyses": "/api/v1/analyses",
+    "appeals": "/api/v1/appeals",
+    "ingestion": "/api/v1/ingestion",
+    "knowledge": "/api/v1/knowledge",
+    "feedback": "/api/v1/feedback",
+    "reference": "/api/v1/reference",
+    "audit": "/api/v1/audit",
+    "users": "/api/v1/users",
+    "notifications": "/api/v1/notifications",
+    "playbooks": "/api/v1/playbooks",
+    "system": "/api/v1/system",
+    "retention": "/api/v1/retention",
+}
+HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
+
+
+def rust_route_operations():
+    """Return operation pairs declared by the Axum route modules.
+
+    This intentionally extracts only the stable Router builder grammar used by
+    the gateway. It is not a Rust parser; new routing styles need an explicit
+    update here so that schema coverage cannot silently become incomplete.
+    """
+    operations = set()
+    for module, prefix in ROUTE_PREFIXES.items():
+        source = (ROUTES_DIR / f"{module}.rs").read_text()
+        cursor = 0
+        while True:
+            start = source.find(".route(", cursor)
+            if start < 0:
+                break
+            index = start + len(".route(")
+            depth = 1
+            while index < len(source) and depth:
+                if source[index] == "(":
+                    depth += 1
+                elif source[index] == ")":
+                    depth -= 1
+                index += 1
+            if depth:
+                raise RuntimeError(f"unclosed .route call in {module}.rs")
+            route = source[start + len(".route("):index - 1]
+            cursor = index
+            match = re.match(r'\s*"([^"]+)"\s*,(.*)', route, flags=re.DOTALL)
+            if not match:
+                raise RuntimeError(f"unable to read route in {module}.rs: {route!r}")
+            suffix, handlers = match.groups()
+            path = prefix if suffix == "/" else prefix + suffix
+            for method in re.findall(r'\b(get|post|put|patch|delete)\s*\(', handlers):
+                operations.add((path, method))
+    return operations
+
+
+def validate_rust_route_coverage(document):
+    """Fail when generated documentation and Axum's public API diverge."""
+    documented = {
+        (path, method)
+        for path, methods in document["paths"].items()
+        for method in methods
+        if method in HTTP_METHODS
+    }
+    routed = rust_route_operations()
+    missing = sorted(routed - documented)
+    stale = sorted(documented - routed)
+    if missing or stale:
+        messages = []
+        if missing:
+            messages.append("undocumented Rust operations: " + ", ".join(
+                f"{method.upper()} {path}" for path, method in missing))
+        if stale:
+            messages.append("OpenAPI operations absent from Rust routes: " + ", ".join(
+                f"{method.upper()} {path}" for path, method in stale))
+        raise RuntimeError("; ".join(messages))
+
+
 # ── auth ──────────────────────────────────────────────────────────────────
 add("/api/v1/auth/login",
     post=op("Password login", "auth", security=[],
@@ -140,6 +224,11 @@ add("/api/v1/claims",
             responses=CREATED))
 add("/api/v1/claims/dashboard/stats",
     get=op("Dashboard totals", "claims"))
+add("/api/v1/claims/export.csv",
+    get=op("Export claims as CSV (manager+)", "claims",
+           params=[{"name": "status", "in": "query", "schema": S()}, P_Q],
+           responses={"200": {"description": "CSV export.", "content": {
+               "text/csv": {"schema": S()}}}}))
 add("/api/v1/claims/{claim_id}",
     get=op("One claim with its denials and analyses", "claims",
            params=[path_param("claim_id")]),
@@ -154,13 +243,37 @@ add("/api/v1/denials",
            params=[
                {"name": "status", "in": "query", "schema": S()},
                {"name": "carc_code", "in": "query", "schema": S()},
+               {"name": "payer_name", "in": "query", "schema": S()},
+               {"name": "min_amount", "in": "query", "schema": N()},
+               {"name": "max_amount", "in": "query", "schema": N()},
+               {"name": "min_age_days", "in": "query", "schema": I()},
+               {"name": "max_age_days", "in": "query", "schema": I()},
+               {"name": "owner", "in": "query", "schema": S(),
+                "description": "User UUID, or 'unassigned'."},
+               {"name": "facility_type_code", "in": "query", "schema": S()},
                {"name": "cagc", "in": "query", "schema": S()},
                {"name": "claim_id", "in": "query", "schema": S(),
                 "description": "Claim NUMBER, not id."},
                P_Q,
                {"name": "priority", "in": "query", "schema": B(),
                 "description": "Only denials with a deadline in 14 days."},
-               P_LIMIT, P_OFFSET]))
+               {"name": "sort", "in": "query", "schema": S(enum=["amount", "deadline", "created"]),
+                "description": "Queue ordering field."},
+               {"name": "descending", "in": "query", "schema": B(),
+                "description": "Reverse the selected ordering."},
+               {"name": "cursor", "in": "query", "schema": S(),
+                "description": "Opaque cursor returned by the prior response."},
+               P_LIMIT, P_OFFSET],
+           responses={
+               "200": {
+                   "description": "Cursor page.",
+                   "content": {"application/json": {"schema": {
+                       "type": "object",
+                       "properties": {"items": ARR(OBJ), "next_cursor": S()},
+                       "required": ["items"],
+                   }}},
+               },
+           }))
 add("/api/v1/denials/bulk-carc",
     get=op("Denial counts and amounts grouped by CARC", "denials"))
 add("/api/v1/denials/carc-options",
@@ -206,6 +319,22 @@ add("/api/v1/analyses/generate",
                 "404": {"$ref": "#/components/responses/NotFound"},
                 "429": {"description": "Rate limited."},
                 "401": {"$ref": "#/components/responses/Unauthorized"}}))
+add("/api/v1/analyses/generate-jobs",
+    post=op("Queue asynchronous recommendation generation", "analyses",
+            description="Returns a durable job ID; poll its status endpoint for the result.",
+            body=jbody({"denial_id": S(format="uuid"),
+                        "temperature": N(default=0.3)}, ["denial_id"]),
+            responses={"200": {"description": "Queued", "content": {
+                "application/json": {"schema": OBJ}}},
+                "429": {"description": "Rate limited."},
+                "401": {"$ref": "#/components/responses/Unauthorized"}}))
+add("/api/v1/analyses/generate-jobs/{job_id}",
+    get=op("Get asynchronous recommendation job status", "analyses",
+           params=[{"name": "job_id", "in": "path", "required": True,
+                    "schema": S(format="uuid")}],
+           responses={"200": {"description": "Job status", "content": {
+               "application/json": {"schema": OBJ}}},
+               "404": {"$ref": "#/components/responses/NotFound"}}))
 
 # ── appeals / worklist ───────────────────────────────────────────────────
 add("/api/v1/appeals",
@@ -324,6 +453,11 @@ add("/api/v1/feedback/analytics",
     get=op("Aggregate recommendation performance", "feedback",
            description="Rates use honest denominators (only rows where the "
                        "outcome is known)."))
+add("/api/v1/feedback/similar-resolved",
+    get=op("Find similar successful resolved cases using non-PHI features", "feedback",
+           description="Ranks only payer, CARC, CPT, and adjustment group; excludes patient, claim-number, and free-text fields.",
+           params=[{"name": "denial_id", "in": "query", "required": True,
+                    "schema": S(format="uuid")}, P_LIMIT]))
 
 # ── reference code lists ─────────────────────────────────────────────────
 KIND = {"name": "kind", "in": "path", "required": True,
@@ -425,6 +559,28 @@ add("/api/v1/retention/audit/prune",
             body=jbody({"older_than_days": I(), "confirm": B()},
                        ["confirm"])))
 
+# ── playbooks ────────────────────────────────────────────────────────────
+PLAYBOOK_INPUT = {
+    "name": S(), "description": S(), "triggers": OBJ, "recommendation": OBJ,
+}
+add("/api/v1/playbooks",
+    get=op("List institutional playbooks", "playbooks",
+           params=[{"name": "status", "in": "query", "schema": S()}]),
+    post=op("Create an institutional playbook (manager+)", "playbooks",
+            body=jbody(PLAYBOOK_INPUT, ["name"]), responses=CREATED))
+add("/api/v1/playbooks/test",
+    post=op("Find approved playbooks matching denial facts", "playbooks",
+            body=jbody({"carc_code": S(), "cagc": S(), "payer_name": S()})))
+add("/api/v1/playbooks/{id}",
+    post=op("Update a playbook and return it to draft (manager+)", "playbooks",
+            params=[path_param("id")], body=jbody(PLAYBOOK_INPUT, ["name"])))
+add("/api/v1/playbooks/{id}/approve",
+    post=op("Approve a draft playbook (manager+)", "playbooks",
+            params=[path_param("id")]))
+add("/api/v1/playbooks/{id}/archive",
+    post=op("Archive a playbook (manager+)", "playbooks",
+            params=[path_param("id")]))
+
 doc = {
     "openapi": "3.1.0",
     "info": {
@@ -458,6 +614,7 @@ doc = {
             ("audit", "HIPAA access log (manager+)"),
             ("users", "User administration (admin)"),
             ("notifications", "Deadline digests and escalations"),
+            ("playbooks", "Manager-curated deterministic resolution rules"),
             ("system", "Health"),
             ("retention", "Audit-log retention (admin)"),
         ]
@@ -492,5 +649,145 @@ doc = {
     "paths": dict(sorted(paths.items())),
 }
 
-OUT.write_text(json.dumps(doc, indent=2) + "\n")
-print(f"wrote {OUT} ({len(doc['paths'])} paths)")
+def ts_type(schema):
+    """Return a conservative TypeScript representation for an OpenAPI schema."""
+    if not schema:
+        return "unknown"
+    if "enum" in schema:
+        return " | ".join(json.dumps(value) for value in schema["enum"])
+    kind = schema.get("type")
+    if kind == "string":
+        return "string"
+    if kind in ("integer", "number"):
+        return "number"
+    if kind == "boolean":
+        return "boolean"
+    if kind == "array":
+        return f"Array<{ts_type(schema.get('items'))}>"
+    if kind == "object":
+        properties = schema.get("properties", {})
+        if not properties:
+            return "Record<string, unknown>"
+        required = set(schema.get("required", []))
+        members = []
+        for name, value in properties.items():
+            optional = "" if name in required else "?"
+            members.append(f"{json.dumps(name)}{optional}: {ts_type(value)}")
+        if schema.get("additionalProperties"):
+            members.append("[key: string]: unknown")
+        return "{ " + "; ".join(members) + " }"
+    return "unknown"
+
+
+def operation_type(operation):
+    path_params = {}
+    query_params = {}
+    required_query = set()
+    for parameter in operation.get("parameters", []):
+        location = parameter.get("in")
+        if location not in ("path", "query"):
+            continue
+        target = path_params if location == "path" else query_params
+        target[parameter["name"]] = ts_type(parameter.get("schema"))
+        if location == "query" and parameter.get("required"):
+            required_query.add(parameter["name"])
+
+    content = operation.get("requestBody", {}).get("content", {})
+    body = None
+    if "application/json" in content:
+        body = ts_type(content["application/json"].get("schema"))
+    elif content:
+        # Upload callers deliberately provide FormData so file bodies are not
+        # accidentally JSON encoded.
+        body = "FormData"
+
+    parts = []
+    if path_params:
+        fields = "; ".join(f"{json.dumps(k)}: {v}" for k, v in path_params.items())
+        parts.append(f"path: {{ {fields} }}")
+    if query_params:
+        fields = "; ".join(
+            f"{json.dumps(k)}{' ' if k in required_query else '?'}: {v}"
+            for k, v in query_params.items())
+        parts.append(f"query?: {{ {fields} }}")
+    if body:
+        optional = "" if operation.get("requestBody", {}).get("required") else "?"
+        parts.append(f"body{optional}: {body}")
+    return "{ " + "; ".join(parts) + " }" if parts else "Record<string, never>"
+
+
+def generate_client(document):
+    operations = []
+    for path, methods in document["paths"].items():
+        for method, operation in methods.items():
+            if method not in {"get", "post", "put", "patch", "delete"}:
+                continue
+            operations.append((f"{method.upper()} {path}", operation_type(operation)))
+    definitions = "\n".join(f"  {json.dumps(key)}: {value};" for key, value in operations)
+    return f'''// This file is generated by crates/api-gateway/openapi/generate.py. Do not edit.
+// Regenerate with: pnpm generate:api
+
+export type ApiOperation = keyof ApiOperations
+
+export interface ApiOperations {{
+{definitions}
+}}
+
+export type ApiRequestOptions<Operation extends ApiOperation> = ApiOperations[Operation] & {{
+  signal?: AbortSignal
+  headers?: HeadersInit
+}}
+
+export class ApiError extends Error {{
+  constructor(public readonly response: Response, public readonly payload: unknown) {{
+    super(`API request failed (${{response.status}})`)
+    this.name = 'ApiError'
+  }}
+}}
+
+/** Small fetch client. The app's fetch wrapper supplies bearer auth. */
+export class ApiClient {{
+  constructor(private readonly baseUrl = '') {{}}
+
+  async request<Operation extends ApiOperation, Response = unknown>(
+    operation: Operation,
+    options: ApiRequestOptions<Operation> = {{}} as ApiRequestOptions<Operation>,
+  ): Promise<Response> {{
+    const [method, template] = operation.split(' ', 2) as [string, string]
+    const pathValues = (options as {{ path?: Record<string, string | number> }}).path || {{}}
+    const path = template.replace(/{{([^}}]+)}}/g, (_, key) => encodeURIComponent(String(pathValues[key])))
+    const query = (options as {{ query?: Record<string, string | number | boolean | undefined> }}).query
+    const search = new URLSearchParams()
+    if (query) for (const [key, value] of Object.entries(query)) if (value !== undefined) search.set(key, String(value))
+    const body = (options as {{ body?: unknown }}).body
+    const headers = new Headers(options.headers)
+    const init: RequestInit = {{ method, headers, signal: options.signal }}
+    if (body instanceof FormData) init.body = body
+    else if (body !== undefined) {{ headers.set('Content-Type', 'application/json'); init.body = JSON.stringify(body) }}
+    const response = await fetch(`${{this.baseUrl}}${{path}}${{search.size ? `?${{search}}` : ''}}`, init)
+    if (response.status === 204) return undefined as Response
+    const payload = await response.json().catch(() => undefined)
+    if (!response.ok) throw new ApiError(response, payload)
+    return payload as Response
+  }}
+}}
+
+export const api = new ApiClient()
+'''
+
+
+validate_rust_route_coverage(doc)
+
+json_output = json.dumps(doc, indent=2) + "\n"
+client_output = generate_client(doc)
+if "--check" in sys.argv[1:]:
+    stale = (not OUT.exists() or OUT.read_text() != json_output
+             or not CLIENT_OUT.exists() or CLIENT_OUT.read_text() != client_output)
+    if stale:
+        print("OpenAPI artifacts are stale; run: pnpm generate:api", file=sys.stderr)
+        sys.exit(1)
+else:
+    OUT.write_text(json_output)
+    CLIENT_OUT.parent.mkdir(parents=True, exist_ok=True)
+    CLIENT_OUT.write_text(client_output)
+    print(f"wrote {OUT} and {CLIENT_OUT} ({len(doc['paths'])} paths)")

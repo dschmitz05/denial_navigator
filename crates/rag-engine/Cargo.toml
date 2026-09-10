@@ -5,7 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-denial_common = { path = "../common" }
+denial_common = { workspace = true }
+denial_db = { workspace = true }
+denial_ai = { workspace = true }
+denial_knowledge = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }

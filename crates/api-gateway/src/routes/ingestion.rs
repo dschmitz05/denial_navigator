@@ -8,8 +8,8 @@ use axum::Extension;
 use axum::Json;
 use axum::Router;
 use chrono::{NaiveDate, Utc};
+use denial_auth::rbac::{Principal, PrincipalKind};
 use denial_common::error::AppError;
-use denial_common::rbac::{Principal, PrincipalKind};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sqlx::{Column, Row};
@@ -23,7 +23,11 @@ const MAX_FILE_SIZE: usize = 25 * 1024 * 1024;
 
 #[derive(Deserialize)]
 pub struct StoreIngestion {
+    /// Required for service-to-service ingestion; user requests use their active membership.
+    pub organization_id: Option<Uuid>,
     pub file_name: String,
+    #[serde(default)]
+    pub file_path: Option<String>,
     pub file_hash: String,
     pub file_size: i64,
     pub claims: Vec<serde_json::Value>,
@@ -66,15 +70,22 @@ fn limit_key(principal: &Principal) -> String {
     format!("ip:{}", principal.ip.as_deref().unwrap_or("unknown"))
 }
 
+fn organization_id(principal: &Principal, requested: Option<Uuid>) -> Result<Uuid, AppError> {
+    if principal.kind == PrincipalKind::Service {
+        return requested.ok_or(AppError::Forbidden);
+    }
+    principal
+        .organization_id
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or(AppError::Forbidden)
+}
+
 fn validate_extension(filename: &str) -> Result<(), AppError> {
     if filename.is_empty() {
         return Err(AppError::BadRequest("No file name provided".into()));
     }
-    let ext = filename
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
+    let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
     if ![".835", ".837", ".edi"]
         .iter()
         .any(|e| ext == e.trim_start_matches('.'))
@@ -123,30 +134,46 @@ fn row_to_json(row: &sqlx::postgres::PgRow) -> serde_json::Value {
         let name = col.name();
         let val = row
             .try_get::<Option<String>, _>(name)
-            .map(|v| v.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null))
-            .or_else(|_| {
-                row.try_get::<Option<i64>, _>(name)
-                    .map(|v| v.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null))
+            .map(|v| {
+                v.map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null)
             })
             .or_else(|_| {
-                row.try_get::<Option<f64>, _>(name)
-                    .map(|v| v.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null))
+                row.try_get::<Option<i64>, _>(name).map(|v| {
+                    v.map(serde_json::Value::from)
+                        .unwrap_or(serde_json::Value::Null)
+                })
             })
             .or_else(|_| {
-                row.try_get::<Option<bool>, _>(name)
-                    .map(|v| v.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null))
+                row.try_get::<Option<f64>, _>(name).map(|v| {
+                    v.map(serde_json::Value::from)
+                        .unwrap_or(serde_json::Value::Null)
+                })
             })
             .or_else(|_| {
-                row.try_get::<Option<Uuid>, _>(name)
-                    .map(|v| v.map(|v| serde_json::Value::String(v.to_string())).unwrap_or(serde_json::Value::Null))
+                row.try_get::<Option<bool>, _>(name).map(|v| {
+                    v.map(serde_json::Value::from)
+                        .unwrap_or(serde_json::Value::Null)
+                })
             })
             .or_else(|_| {
-                row.try_get::<Option<NaiveDate>, _>(name)
-                    .map(|v| v.map(|v| serde_json::Value::String(v.to_string())).unwrap_or(serde_json::Value::Null))
+                row.try_get::<Option<Uuid>, _>(name).map(|v| {
+                    v.map(|v| serde_json::Value::String(v.to_string()))
+                        .unwrap_or(serde_json::Value::Null)
+                })
+            })
+            .or_else(|_| {
+                row.try_get::<Option<NaiveDate>, _>(name).map(|v| {
+                    v.map(|v| serde_json::Value::String(v.to_string()))
+                        .unwrap_or(serde_json::Value::Null)
+                })
             })
             .or_else(|_| {
                 row.try_get::<Option<chrono::DateTime<Utc>>, _>(name)
-                    .map(|v| v.map(|v| serde_json::Value::String(v.to_rfc3339())).unwrap_or(serde_json::Value::Null))
+                    .map(|v| {
+                        v.map(|v| serde_json::Value::String(v.to_rfc3339()))
+                            .unwrap_or(serde_json::Value::Null)
+                    })
             })
             .unwrap_or(serde_json::Value::Null);
         map.insert(name.to_string(), val);
@@ -154,37 +181,76 @@ fn row_to_json(row: &sqlx::postgres::PgRow) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
-fn clean_claim(
-    claim: &serde_json::Value,
-    seen_numbers: &mut HashSet<String>,
-) -> serde_json::Value {
-    let raw_id = str_from_json(claim.get("claim_id").unwrap_or(&serde_json::Value::Null)).unwrap_or_default();
-    let patient_id = str_from_json(claim.get("patient_id").unwrap_or(&serde_json::Value::Null)).unwrap_or_default();
-    let dob_raw = str_from_json(claim.get("date_of_birth").unwrap_or(&serde_json::Value::Null));
+fn clean_claim(claim: &serde_json::Value, seen_numbers: &mut HashSet<String>) -> serde_json::Value {
+    let raw_id = str_from_json(claim.get("claim_id").unwrap_or(&serde_json::Value::Null))
+        .unwrap_or_default();
+    let patient_id = str_from_json(claim.get("patient_id").unwrap_or(&serde_json::Value::Null))
+        .unwrap_or_default();
+    let dob_raw = str_from_json(
+        claim
+            .get("date_of_birth")
+            .unwrap_or(&serde_json::Value::Null),
+    );
     let dob = dob_raw.as_deref().and_then(parse_date);
     let patient_name = claim.get("patient_name").cloned();
     let provider_npi = claim.get("provider_npi").cloned();
     let provider_name = claim.get("provider_name").cloned();
     let payer_name = claim.get("payer_name").cloned();
     let payer_id_number = claim.get("payer_id_number").cloned();
-    let total_charged = f64_from_json(claim.get("total_charged").unwrap_or(&serde_json::Value::Null));
+    let total_charged = f64_from_json(
+        claim
+            .get("total_charged")
+            .unwrap_or(&serde_json::Value::Null),
+    );
     let total_paid = f64_from_json(claim.get("total_paid").unwrap_or(&serde_json::Value::Null));
-    let total_adjustment = f64_from_json(claim.get("total_adjustment").unwrap_or(&serde_json::Value::Null));
-    let claim_type = str_from_json(claim.get("claim_type").unwrap_or(&serde_json::Value::Null)).unwrap_or_else(|| "professional".into());
-    let service_from = str_from_json(claim.get("service_from").unwrap_or(&serde_json::Value::Null)).and_then(|s| parse_date(&s));
-    let service_to = str_from_json(claim.get("service_to").unwrap_or(&serde_json::Value::Null)).and_then(|s| parse_date(&s));
-    let diagnosis_codes = vec_str_from_json(claim.get("diagnosis_codes").unwrap_or(&serde_json::Value::Null));
+    let total_adjustment = f64_from_json(
+        claim
+            .get("total_adjustment")
+            .unwrap_or(&serde_json::Value::Null),
+    );
+    let claim_type = str_from_json(claim.get("claim_type").unwrap_or(&serde_json::Value::Null))
+        .unwrap_or_else(|| "professional".into());
+    let facility_type_code = str_from_json(
+        claim
+            .get("facility_type_code")
+            .unwrap_or(&serde_json::Value::Null),
+    );
+    let service_from = str_from_json(
+        claim
+            .get("service_from")
+            .unwrap_or(&serde_json::Value::Null),
+    )
+    .and_then(|s| parse_date(&s));
+    let service_to = str_from_json(claim.get("service_to").unwrap_or(&serde_json::Value::Null))
+        .and_then(|s| parse_date(&s));
+    let diagnosis_codes = vec_str_from_json(
+        claim
+            .get("diagnosis_codes")
+            .unwrap_or(&serde_json::Value::Null),
+    );
 
     let base = if dob.is_some() {
         format!("{}-{}", patient_id, dob.unwrap())
     } else {
         format!("{patient_id}-NODOB")
     };
-    let mut claim_number = if raw_id.is_empty() { base.clone() } else { raw_id.clone() };
+    let mut claim_number = if raw_id.is_empty() {
+        base.clone()
+    } else {
+        raw_id.clone()
+    };
 
     if seen_numbers.contains(&claim_number) {
-        let suffix = Uuid::new_v4().to_string().chars().take(8).collect::<String>();
-        let id_part = if raw_id.is_empty() { base } else { raw_id.clone() };
+        let suffix = Uuid::new_v4()
+            .to_string()
+            .chars()
+            .take(8)
+            .collect::<String>();
+        let id_part = if raw_id.is_empty() {
+            base
+        } else {
+            raw_id.clone()
+        };
         claim_number = format!("{id_part}-{suffix}");
     }
     seen_numbers.insert(claim_number.clone());
@@ -202,6 +268,7 @@ fn clean_claim(
         "total_paid": total_paid,
         "total_adjustment": total_adjustment,
         "claim_type": claim_type,
+        "facility_type_code": facility_type_code,
         "service_from": service_from.map(|d| d.to_string()).unwrap_or_default(),
         "service_to": service_to.map(|d| d.to_string()).unwrap_or_default(),
         "diagnosis_codes": diagnosis_codes,
@@ -209,22 +276,49 @@ fn clean_claim(
 }
 
 fn clean_denial(denial: &serde_json::Value) -> serde_json::Value {
-    let claim_id = str_from_json(denial.get("claim_id").unwrap_or(&serde_json::Value::Null)).unwrap_or_default();
+    let claim_id = str_from_json(denial.get("claim_id").unwrap_or(&serde_json::Value::Null))
+        .unwrap_or_default();
     let service_line_number = denial.get("service_line_number").and_then(|v| v.as_i64());
     let cpt_code = str_from_json(denial.get("cpt_code").unwrap_or(&serde_json::Value::Null));
     let hcpcs_code = str_from_json(denial.get("hcpcs_code").unwrap_or(&serde_json::Value::Null));
     let modifier_1 = str_from_json(denial.get("modifier_1").unwrap_or(&serde_json::Value::Null));
     let modifier_2 = str_from_json(denial.get("modifier_2").unwrap_or(&serde_json::Value::Null));
-    let charge_amount = f64_from_json(denial.get("charge_amount").unwrap_or(&serde_json::Value::Null));
-    let payment_amount = f64_from_json(denial.get("payment_amount").unwrap_or(&serde_json::Value::Null));
-    let adjustment_amount = f64_from_json(denial.get("adjustment_amount").unwrap_or(&serde_json::Value::Null));
+    let charge_amount = f64_from_json(
+        denial
+            .get("charge_amount")
+            .unwrap_or(&serde_json::Value::Null),
+    );
+    let payment_amount = f64_from_json(
+        denial
+            .get("payment_amount")
+            .unwrap_or(&serde_json::Value::Null),
+    );
+    let adjustment_amount = f64_from_json(
+        denial
+            .get("adjustment_amount")
+            .unwrap_or(&serde_json::Value::Null),
+    );
     let cagc = str_from_json(denial.get("cagc").unwrap_or(&serde_json::Value::Null));
     let carc_code = str_from_json(denial.get("carc_code").unwrap_or(&serde_json::Value::Null));
     let rarc_code = str_from_json(denial.get("rarc_code").unwrap_or(&serde_json::Value::Null));
-    let denial_reason = str_from_json(denial.get("denial_reason").unwrap_or(&serde_json::Value::Null))
-        .or_else(|| str_from_json(denial.get("denial_reason_code").unwrap_or(&serde_json::Value::Null)));
-    let denial_date = str_from_json(denial.get("denial_date").unwrap_or(&serde_json::Value::Null))
-        .and_then(|s| parse_date(&s));
+    let denial_reason = str_from_json(
+        denial
+            .get("denial_reason")
+            .unwrap_or(&serde_json::Value::Null),
+    )
+    .or_else(|| {
+        str_from_json(
+            denial
+                .get("denial_reason_code")
+                .unwrap_or(&serde_json::Value::Null),
+        )
+    });
+    let denial_date = str_from_json(
+        denial
+            .get("denial_date")
+            .unwrap_or(&serde_json::Value::Null),
+    )
+    .and_then(|s| parse_date(&s));
 
     serde_json::json!({
         "claim_id": claim_id,
@@ -247,13 +341,13 @@ fn clean_denial(denial: &serde_json::Value) -> serde_json::Value {
 // ── Claims upsert SQL ──────────────────────────────────────────────────
 
 const CLAIM_INSERT: &str = "INSERT INTO claims \
-    (claim_number, patient_id, patient_name, date_of_birth, provider_npi, provider_name, \
+    (organization_id, claim_number, patient_id, patient_name, date_of_birth, provider_npi, provider_name, \
      payer_name, payer_id_number, total_charge, total_paid, total_adjustment, \
-     status, claim_type, service_from, service_to, icd_10_codes, raw_835_data, parsed_at) \
-    VALUES ($1, $2, $3, $4::date, $5, $6, $7, $8, $9, $10, $11, \
-            'parsed', $12, $13::date, $14::date, $15::text[], $16, NOW())";
+     status, claim_type, facility_type_code, service_from, service_to, icd_10_codes, raw_835_data, parsed_at) \
+    VALUES ($1, $2, $3, $4, $5::date, $6, $7, $8, $9, $10, $11, $12, \
+            'parsed', $13, $14, $15::date, $16::date, $17::text[], $18::jsonb, NOW())";
 
-const ON_CONFLICT_835: &str = "ON CONFLICT (claim_number) DO UPDATE SET \
+const ON_CONFLICT_835: &str = "ON CONFLICT (organization_id, claim_number) DO UPDATE SET \
     patient_name     = COALESCE(EXCLUDED.patient_name, claims.patient_name), \
     date_of_birth    = COALESCE(EXCLUDED.date_of_birth, claims.date_of_birth), \
     provider_npi     = COALESCE(EXCLUDED.provider_npi, claims.provider_npi), \
@@ -264,6 +358,7 @@ const ON_CONFLICT_835: &str = "ON CONFLICT (claim_number) DO UPDATE SET \
                             THEN EXCLUDED.total_charge ELSE claims.total_charge END, \
     total_paid       = EXCLUDED.total_paid, \
     total_adjustment = EXCLUDED.total_adjustment, \
+    facility_type_code = COALESCE(EXCLUDED.facility_type_code, claims.facility_type_code), \
     service_from     = COALESCE(EXCLUDED.service_from, claims.service_from), \
     service_to       = COALESCE(EXCLUDED.service_to, claims.service_to), \
     icd_10_codes     = CASE \
@@ -275,7 +370,7 @@ const ON_CONFLICT_835: &str = "ON CONFLICT (claim_number) DO UPDATE SET \
     parsed_at        = NOW(), \
     updated_at       = NOW()";
 
-const ON_CONFLICT_837: &str = "ON CONFLICT (claim_number) DO UPDATE SET \
+const ON_CONFLICT_837: &str = "ON CONFLICT (organization_id, claim_number) DO UPDATE SET \
     patient_name     = COALESCE(claims.patient_name, EXCLUDED.patient_name), \
     date_of_birth    = COALESCE(claims.date_of_birth, EXCLUDED.date_of_birth), \
     provider_npi     = COALESCE(claims.provider_npi, EXCLUDED.provider_npi), \
@@ -285,12 +380,15 @@ const ON_CONFLICT_837: &str = "ON CONFLICT (claim_number) DO UPDATE SET \
     total_charge     = CASE WHEN claims.total_charge = 0 \
                             THEN EXCLUDED.total_charge ELSE claims.total_charge END, \
     claim_type       = EXCLUDED.claim_type, \
+    facility_type_code = COALESCE(EXCLUDED.facility_type_code, claims.facility_type_code), \
     service_from     = COALESCE(claims.service_from, EXCLUDED.service_from), \
     service_to       = COALESCE(claims.service_to, EXCLUDED.service_to), \
     icd_10_codes     = CASE \
                         WHEN EXCLUDED.icd_10_codes IS NOT NULL \
                          AND cardinality(EXCLUDED.icd_10_codes) > 0 \
                         THEN EXCLUDED.icd_10_codes ELSE claims.icd_10_codes END, \
+    correlation_status = 'matched', \
+    correlation_confidence = 1.00, \
     updated_at       = NOW()";
 
 fn claim_upsert_sql(transaction_type: Option<&str>) -> String {
@@ -302,14 +400,19 @@ fn claim_upsert_sql(transaction_type: Option<&str>) -> String {
     format!("{CLAIM_INSERT} {conflict}")
 }
 
-async fn already_ingested(pool: &sqlx::PgPool, file_hash: &str) -> Result<Option<sqlx::postgres::PgRow>, AppError> {
+async fn already_ingested(
+    pool: &sqlx::PgPool,
+    organization_id: Uuid,
+    file_hash: &str,
+) -> Result<Option<sqlx::postgres::PgRow>, AppError> {
     sqlx::query(
         "SELECT id, file_name, created_at, claims_count, denials_count \
          FROM ingestion_log \
-         WHERE file_hash = $1 AND status IN ('completed', 'parsed') \
+         WHERE file_hash = $1 AND organization_id = $2 AND status IN ('completed', 'parsed') \
          ORDER BY created_at DESC LIMIT 1",
     )
     .bind(file_hash)
+    .bind(organization_id)
     .fetch_optional(pool)
     .await
     .map_err(AppError::Db)
@@ -330,20 +433,23 @@ pub async fn upload_file(
 
     let mut file_bytes: Vec<u8> = Vec::new();
     let mut filename: Option<String> = None;
-    while let Some(field) = multipart.next_field().await.map_err(|_| {
-        AppError::BadRequest("Invalid multipart form data".into())
-    })? {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| AppError::BadRequest("Invalid multipart form data".into()))?
+    {
         if filename.is_none() {
             if let Some(name) = field.file_name() {
                 filename = Some(name.to_string());
             }
         }
-        let mut chunk = field.bytes().await.map_err(|e| AppError::Internal(e.to_string()))?;
+        let mut chunk = field
+            .bytes()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
         file_bytes.extend_from_slice(&chunk);
         if file_bytes.len() > MAX_FILE_SIZE {
-            return Err(AppError::BadRequest(
-                "File too large: maximum 25 MB".into(),
-            ));
+            return Err(AppError::BadRequest("File too large: maximum 25 MB".into()));
         }
     }
 
@@ -377,6 +483,7 @@ pub async fn ingest_file(
     Query(params): Query<IngestQuery>,
     mut multipart: Multipart,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), AppError> {
+    let organization_id = organization_id(&principal, None)?;
     let key = limit_key(&principal);
     if !state.ingestion_limiter.allow(&key) {
         let retry = state.ingestion_limiter.retry_after(&key);
@@ -385,20 +492,23 @@ pub async fn ingest_file(
 
     let mut file_bytes: Vec<u8> = Vec::new();
     let mut filename: Option<String> = None;
-    while let Some(field) = multipart.next_field().await.map_err(|_| {
-        AppError::BadRequest("Invalid multipart form data".into())
-    })? {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| AppError::BadRequest("Invalid multipart form data".into()))?
+    {
         if filename.is_none() {
             if let Some(name) = field.file_name() {
                 filename = Some(name.to_string());
             }
         }
-        let chunk = field.bytes().await.map_err(|e| AppError::Internal(e.to_string()))?;
+        let chunk = field
+            .bytes()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
         file_bytes.extend_from_slice(&chunk);
         if file_bytes.len() > MAX_FILE_SIZE {
-            return Err(AppError::BadRequest(
-                "File too large: maximum 25 MB".into(),
-            ));
+            return Err(AppError::BadRequest("File too large: maximum 25 MB".into()));
         }
     }
 
@@ -418,7 +528,7 @@ pub async fn ingest_file(
     let pool = &state.pool;
 
     if !params.force {
-        if let Some(previous) = already_ingested(pool, &file_hash).await? {
+        if let Some(previous) = already_ingested(pool, organization_id, &file_hash).await? {
             let created_at: Option<chrono::DateTime<Utc>> = previous.get("created_at");
             let when = created_at
                 .map(|dt| dt.format("%d %b %Y at %H:%M").to_string())
@@ -439,9 +549,10 @@ pub async fn ingest_file(
         Ok(r) => r,
         Err(e) => {
             let _ = sqlx::query(
-                "INSERT INTO ingestion_log (file_name, file_size_bytes, file_hash, status, errors) \
-                 VALUES ($1, $2, $3, 'error', $4::jsonb)",
+                "INSERT INTO ingestion_log (organization_id, file_name, file_size_bytes, file_hash, status, errors) \
+                 VALUES ($1, $2, $3, $4, 'error', $5::jsonb)",
             )
+            .bind(organization_id)
             .bind(&fname)
             .bind(file_size)
             .bind(&file_hash)
@@ -470,9 +581,10 @@ pub async fn ingest_file(
     if claims.is_empty() && denials.is_empty() {
         let _ = sqlx::query(
             "INSERT INTO ingestion_log \
-             (file_name, file_size_bytes, file_hash, status, claims_count, denials_count) \
-             VALUES ($1, $2, $3, 'completed', 0, 0)",
+             (organization_id, file_name, file_size_bytes, file_hash, status, claims_count, denials_count) \
+             VALUES ($1, $2, $3, $4, 'completed', 0, 0)",
         )
+        .bind(organization_id)
         .bind(&fname)
         .bind(file_size)
         .bind(&file_hash)
@@ -494,10 +606,11 @@ pub async fn ingest_file(
 
     let ingestion_row = sqlx::query(
         "INSERT INTO ingestion_log \
-         (file_name, file_size_bytes, file_hash, status, claims_count, denials_count, raw_response) \
-         VALUES ($1, $2, $3, 'completed', $4, $5, $6::jsonb) \
+         (organization_id, file_name, file_size_bytes, file_hash, status, claims_count, denials_count, raw_response) \
+         VALUES ($1, $2, $3, $4, 'completed', $5, $6, $7::jsonb) \
          RETURNING id",
     )
+    .bind(organization_id)
     .bind(&fname)
     .bind(file_size)
     .bind(&file_hash)
@@ -511,16 +624,23 @@ pub async fn ingest_file(
     let ingestion_id: Uuid = ingestion_row.get("id");
 
     let mut seen_numbers = HashSet::new();
-    let cleaned_claims: Vec<serde_json::Value> =
-        claims.iter().map(|c| clean_claim(c, &mut seen_numbers)).collect();
-    let cleaned_denials: Vec<serde_json::Value> =
-        denials.iter().map(|d| clean_denial(d)).collect();
+    let cleaned_claims: Vec<serde_json::Value> = claims
+        .iter()
+        .map(|c| clean_claim(c, &mut seen_numbers))
+        .collect();
+    let cleaned_denials: Vec<serde_json::Value> = denials.iter().map(|d| clean_denial(d)).collect();
 
     let upsert_sql = claim_upsert_sql(transaction_type.as_deref());
 
     for claim_data in &cleaned_claims {
-        let claim_id: &str = claim_data.get("claim_id").and_then(|v| v.as_str()).unwrap_or("");
-        let patient_id: &str = claim_data.get("patient_id").and_then(|v| v.as_str()).unwrap_or("");
+        let claim_id: &str = claim_data
+            .get("claim_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let patient_id: &str = claim_data
+            .get("patient_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let patient_name: Option<&str> = claim_data.get("patient_name").and_then(|v| v.as_str());
         let dob: Option<&str> = claim_data
             .get("date_of_birth")
@@ -529,11 +649,28 @@ pub async fn ingest_file(
         let provider_npi: Option<&str> = claim_data.get("provider_npi").and_then(|v| v.as_str());
         let provider_name: Option<&str> = claim_data.get("provider_name").and_then(|v| v.as_str());
         let payer_name: Option<&str> = claim_data.get("payer_name").and_then(|v| v.as_str());
-        let payer_id_number: Option<&str> = claim_data.get("payer_id_number").and_then(|v| v.as_str());
-        let total_charge: f64 = claim_data.get("total_charged").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let total_paid: f64 = claim_data.get("total_paid").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let total_adjustment: f64 = claim_data.get("total_adjustment").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let claim_type: &str = claim_data.get("claim_type").and_then(|v| v.as_str()).unwrap_or("professional");
+        let payer_id_number: Option<&str> =
+            claim_data.get("payer_id_number").and_then(|v| v.as_str());
+        let total_charge: f64 = claim_data
+            .get("total_charged")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let total_paid: f64 = claim_data
+            .get("total_paid")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let total_adjustment: f64 = claim_data
+            .get("total_adjustment")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let claim_type: &str = claim_data
+            .get("claim_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("professional");
+        let facility_type_code: Option<&str> = claim_data
+            .get("facility_type_code")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
         let service_from: Option<&str> = claim_data
             .get("service_from")
             .and_then(|v| v.as_str())
@@ -554,6 +691,7 @@ pub async fn ingest_file(
         };
 
         sqlx::query(&upsert_sql)
+            .bind(organization_id)
             .bind(claim_id)
             .bind(patient_id)
             .bind(patient_name)
@@ -566,6 +704,7 @@ pub async fn ingest_file(
             .bind(total_paid)
             .bind(total_adjustment)
             .bind(claim_type)
+            .bind(facility_type_code)
             .bind(service_from)
             .bind(service_to)
             .bind(icd_codes)
@@ -577,15 +716,29 @@ pub async fn ingest_file(
 
     let mut denials_written: i64 = 0;
     for denial_data in &cleaned_denials {
-        let claim_id: &str = denial_data.get("claim_id").and_then(|v| v.as_str()).unwrap_or("");
-        let service_line_number: Option<i64> = denial_data.get("service_line_number").and_then(|v| v.as_i64());
+        let claim_id: &str = denial_data
+            .get("claim_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let service_line_number: Option<i64> = denial_data
+            .get("service_line_number")
+            .and_then(|v| v.as_i64());
         let cpt_code: Option<&str> = denial_data.get("cpt_code").and_then(|v| v.as_str());
         let hcpcs_code: Option<&str> = denial_data.get("hcpcs_code").and_then(|v| v.as_str());
         let modifier_1: Option<&str> = denial_data.get("modifier_1").and_then(|v| v.as_str());
         let modifier_2: Option<&str> = denial_data.get("modifier_2").and_then(|v| v.as_str());
-        let charge_amount: f64 = denial_data.get("charge_amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let payment_amount: f64 = denial_data.get("payment_amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let adjustment_amount: f64 = denial_data.get("adjustment_amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let charge_amount: f64 = denial_data
+            .get("charge_amount")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let payment_amount: f64 = denial_data
+            .get("payment_amount")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let adjustment_amount: f64 = denial_data
+            .get("adjustment_amount")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
         let cagc: Option<&str> = denial_data.get("cagc").and_then(|v| v.as_str());
         let carc_code: Option<&str> = denial_data.get("carc_code").and_then(|v| v.as_str());
         let rarc_code: Option<&str> = denial_data.get("rarc_code").and_then(|v| v.as_str());
@@ -600,10 +753,10 @@ pub async fn ingest_file(
              (claim_id, service_line_number, cpt_code, hcpcs_code, modifier_1, modifier_2, \
               charge_amount, payment_amount, adjustment_amount, cagc, carc_code, rarc_code, \
               adjustment_reason, denial_date, status, appeal_deadline) \
-             VALUES ((SELECT id FROM claims WHERE claim_number = $1), $2, $3, $4, $5, $6, \
+             VALUES ((SELECT id FROM claims WHERE claim_number = $1 AND organization_id = $15), $2, $3, $4, $5, $6, \
                      $7, $8, $9, $10, $11, $12, $13, $14::date, 'open', \
                      appeal_deadline_for( \
-                         (SELECT payer_name FROM claims WHERE claim_number = $1), \
+                         (SELECT payer_name FROM claims WHERE claim_number = $1 AND organization_id = $15), \
                          COALESCE($14::date, CURRENT_DATE))) \
              ON CONFLICT DO NOTHING \
              RETURNING id",
@@ -622,6 +775,7 @@ pub async fn ingest_file(
         .bind(rarc_code)
         .bind(denial_reason)
         .bind(denial_date)
+        .bind(organization_id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(AppError::Db)?;
@@ -640,10 +794,11 @@ pub async fn ingest_file(
             "UPDATE claims c \
              SET status = CASE WHEN c.total_paid > 0 THEN 'partially_paid' ELSE 'denied' END, \
                  updated_at = NOW() \
-             WHERE c.claim_number = ANY($1::text[]) \
+             WHERE c.claim_number = ANY($1::text[]) AND c.organization_id = $2 \
                AND EXISTS (SELECT 1 FROM denials d WHERE d.claim_id = c.id)",
         )
         .bind(claim_numbers)
+        .bind(organization_id)
         .execute(&mut *tx)
         .await
         .map_err(AppError::Db)?;
@@ -672,13 +827,16 @@ pub struct IngestQuery {
 
 pub async fn list_ingestion_log(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Query(params): Query<ListIngestionLogQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    let organization_id = organization_id(&principal, None)?;
     let limit = params.limit.clamp(1, 1000);
     let rows = sqlx::query(
         "SELECT id, file_name, file_size_bytes, file_hash, status, claims_count, denials_count, created_at, completed_at \
-         FROM ingestion_log ORDER BY created_at DESC LIMIT $1",
+         FROM ingestion_log WHERE organization_id = $1 ORDER BY created_at DESC LIMIT $2",
     )
+    .bind(organization_id)
     .bind(limit)
     .fetch_all(&state.pool)
     .await
@@ -689,13 +847,16 @@ pub async fn list_ingestion_log(
 
 pub async fn get_ingestion_history(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Query(params): Query<IngestHistoryQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    let organization_id = organization_id(&principal, None)?;
     let limit = params.limit.clamp(1, 500);
     let rows = sqlx::query(
         "SELECT id, file_name, file_size_bytes, file_hash, status, claims_count, denials_count, created_at, completed_at \
-         FROM ingestion_log ORDER BY created_at DESC LIMIT $1",
+         FROM ingestion_log WHERE organization_id = $1 ORDER BY created_at DESC LIMIT $2",
     )
+    .bind(organization_id)
     .bind(limit)
     .fetch_all(&state.pool)
     .await
@@ -706,11 +867,13 @@ pub async fn get_ingestion_history(
 
 pub async fn store_parsed_data(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Json(body): Json<StoreIngestion>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let pool = &state.pool;
+    let organization_id = organization_id(&principal, body.organization_id)?;
 
-    if let Some(previous) = already_ingested(pool, &body.file_hash).await? {
+    if let Some(previous) = already_ingested(pool, organization_id, &body.file_hash).await? {
         let id: Uuid = previous.get("id");
         let created_at: Option<chrono::DateTime<Utc>> = previous.get("created_at");
         let when = created_at
@@ -732,8 +895,11 @@ pub async fn store_parsed_data(
     }
 
     let mut seen_numbers = HashSet::new();
-    let cleaned_claims: Vec<serde_json::Value> =
-        body.claims.iter().map(|c| clean_claim(c, &mut seen_numbers)).collect();
+    let cleaned_claims: Vec<serde_json::Value> = body
+        .claims
+        .iter()
+        .map(|c| clean_claim(c, &mut seen_numbers))
+        .collect();
     let cleaned_denials: Vec<serde_json::Value> =
         body.denials.iter().map(|d| clean_denial(d)).collect();
 
@@ -741,11 +907,13 @@ pub async fn store_parsed_data(
 
     let ingestion_row = sqlx::query(
         "INSERT INTO ingestion_log \
-         (file_name, file_size_bytes, file_hash, status, claims_count, denials_count) \
-         VALUES ($1, $2, $3, 'completed', $4, $5) \
+         (organization_id, file_name, file_path, file_size_bytes, file_hash, status, claims_count, denials_count) \
+         VALUES ($1, $2, $3, $4, $5, 'completed', $6, $7) \
          RETURNING id",
     )
+    .bind(organization_id)
     .bind(&body.file_name)
+    .bind(&body.file_path)
     .bind(body.file_size)
     .bind(&body.file_hash)
     .bind(cleaned_claims.len() as i64)
@@ -759,8 +927,14 @@ pub async fn store_parsed_data(
     let upsert_sql = claim_upsert_sql(body.transaction_type.as_deref());
 
     for claim_data in &cleaned_claims {
-        let claim_id: &str = claim_data.get("claim_id").and_then(|v| v.as_str()).unwrap_or("");
-        let patient_id: &str = claim_data.get("patient_id").and_then(|v| v.as_str()).unwrap_or("");
+        let claim_id: &str = claim_data
+            .get("claim_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let patient_id: &str = claim_data
+            .get("patient_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let patient_name: Option<&str> = claim_data.get("patient_name").and_then(|v| v.as_str());
         let dob: Option<&str> = claim_data
             .get("date_of_birth")
@@ -769,11 +943,28 @@ pub async fn store_parsed_data(
         let provider_npi: Option<&str> = claim_data.get("provider_npi").and_then(|v| v.as_str());
         let provider_name: Option<&str> = claim_data.get("provider_name").and_then(|v| v.as_str());
         let payer_name: Option<&str> = claim_data.get("payer_name").and_then(|v| v.as_str());
-        let payer_id_number: Option<&str> = claim_data.get("payer_id_number").and_then(|v| v.as_str());
-        let total_charge: f64 = claim_data.get("total_charged").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let total_paid: f64 = claim_data.get("total_paid").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let total_adjustment: f64 = claim_data.get("total_adjustment").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let claim_type: &str = claim_data.get("claim_type").and_then(|v| v.as_str()).unwrap_or("professional");
+        let payer_id_number: Option<&str> =
+            claim_data.get("payer_id_number").and_then(|v| v.as_str());
+        let total_charge: f64 = claim_data
+            .get("total_charged")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let total_paid: f64 = claim_data
+            .get("total_paid")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let total_adjustment: f64 = claim_data
+            .get("total_adjustment")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let claim_type: &str = claim_data
+            .get("claim_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("professional");
+        let facility_type_code: Option<&str> = claim_data
+            .get("facility_type_code")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
         let service_from: Option<&str> = claim_data
             .get("service_from")
             .and_then(|v| v.as_str())
@@ -794,6 +985,7 @@ pub async fn store_parsed_data(
         };
 
         sqlx::query(&upsert_sql)
+            .bind(organization_id)
             .bind(claim_id)
             .bind(patient_id)
             .bind(patient_name)
@@ -806,6 +998,7 @@ pub async fn store_parsed_data(
             .bind(total_paid)
             .bind(total_adjustment)
             .bind(claim_type)
+            .bind(facility_type_code)
             .bind(service_from)
             .bind(service_to)
             .bind(icd_codes)
@@ -817,15 +1010,29 @@ pub async fn store_parsed_data(
 
     let mut denials_written: i64 = 0;
     for denial_data in &cleaned_denials {
-        let claim_id: &str = denial_data.get("claim_id").and_then(|v| v.as_str()).unwrap_or("");
-        let service_line_number: Option<i64> = denial_data.get("service_line_number").and_then(|v| v.as_i64());
+        let claim_id: &str = denial_data
+            .get("claim_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let service_line_number: Option<i64> = denial_data
+            .get("service_line_number")
+            .and_then(|v| v.as_i64());
         let cpt_code: Option<&str> = denial_data.get("cpt_code").and_then(|v| v.as_str());
         let hcpcs_code: Option<&str> = denial_data.get("hcpcs_code").and_then(|v| v.as_str());
         let modifier_1: Option<&str> = denial_data.get("modifier_1").and_then(|v| v.as_str());
         let modifier_2: Option<&str> = denial_data.get("modifier_2").and_then(|v| v.as_str());
-        let charge_amount: f64 = denial_data.get("charge_amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let payment_amount: f64 = denial_data.get("payment_amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let adjustment_amount: f64 = denial_data.get("adjustment_amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let charge_amount: f64 = denial_data
+            .get("charge_amount")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let payment_amount: f64 = denial_data
+            .get("payment_amount")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let adjustment_amount: f64 = denial_data
+            .get("adjustment_amount")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
         let cagc: Option<&str> = denial_data.get("cagc").and_then(|v| v.as_str());
         let carc_code: Option<&str> = denial_data.get("carc_code").and_then(|v| v.as_str());
         let rarc_code: Option<&str> = denial_data.get("rarc_code").and_then(|v| v.as_str());
@@ -840,10 +1047,10 @@ pub async fn store_parsed_data(
              (claim_id, service_line_number, cpt_code, hcpcs_code, modifier_1, modifier_2, \
               charge_amount, payment_amount, adjustment_amount, cagc, carc_code, rarc_code, \
               adjustment_reason, denial_date, status, appeal_deadline) \
-             VALUES ((SELECT id FROM claims WHERE claim_number = $1), $2, $3, $4, $5, $6, \
+             VALUES ((SELECT id FROM claims WHERE claim_number = $1 AND organization_id = $15), $2, $3, $4, $5, $6, \
                      $7, $8, $9, $10, $11, $12, $13, $14::date, 'open', \
                      appeal_deadline_for( \
-                         (SELECT payer_name FROM claims WHERE claim_number = $1), \
+                         (SELECT payer_name FROM claims WHERE claim_number = $1 AND organization_id = $15), \
                          COALESCE($14::date, CURRENT_DATE))) \
              ON CONFLICT DO NOTHING \
              RETURNING id",
@@ -862,6 +1069,7 @@ pub async fn store_parsed_data(
         .bind(rarc_code)
         .bind(denial_reason)
         .bind(denial_date)
+        .bind(organization_id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(AppError::Db)?;
@@ -880,10 +1088,11 @@ pub async fn store_parsed_data(
             "UPDATE claims c \
              SET status = CASE WHEN c.total_paid > 0 THEN 'partially_paid' ELSE 'denied' END, \
                  updated_at = NOW() \
-             WHERE c.claim_number = ANY($1::text[]) \
+             WHERE c.claim_number = ANY($1::text[]) AND c.organization_id = $2 \
                AND EXISTS (SELECT 1 FROM denials d WHERE d.claim_id = c.id)",
         )
         .bind(claim_numbers)
+        .bind(organization_id)
         .execute(&mut *tx)
         .await
         .map_err(AppError::Db)?;
