@@ -87,3 +87,6 @@ dropzone/
 
 # Rust compose stack self-signed certs
 /certs-rust/
+
+# editor timestamped backups
+*.bak-*

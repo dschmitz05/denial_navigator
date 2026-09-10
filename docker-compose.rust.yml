@@ -151,6 +151,19 @@ services:
       api:
         condition: service_started
 
+# Pin the project's network. Left to Docker, Compose walks the default address
+# pool (172.17, .18, .19 ...) and on 2026-09-09 it landed on 172.20.0.0/16 -
+# which contains the DMZ VLAN (172.20.3.0/24) and the IoT VLAN
+# (172.20.66.0/24). Every packet to the media host, Gitea, TrueNAS and the
+# Denial Navigator VM was then routed into this bridge and dropped. An explicit
+# subnet makes the network deterministic instead of dependent on the order
+# projects happen to start in.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
 volumes:
   pgdata:
   dropzone:
