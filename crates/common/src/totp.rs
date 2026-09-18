@@ -7,7 +7,7 @@
 //! new ones that the legacy tooling can also read.
 
 use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, InnerIvInit};
-use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
+use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
 use data_encoding::{BASE32, BASE32_NOPAD};
 use hmac::{Hmac, Mac};
@@ -24,7 +24,9 @@ const FERNET_VERSION: u8 = 0x80;
 const TOTP_PERIOD: u64 = 30;
 const TOTP_DIGITS: u32 = 6;
 
-/// Parse a 32-byte Fernet key from its base64url representation.
+/// Parse a 32-byte Fernet key. Fernet uses URL-safe base64, but accepting the
+/// standard alphabet here keeps existing local deployments working when their
+/// secret manager emitted `+` or `/` while preserving the same decoded key.
 fn parse_fernet_key(key_b64: &str) -> Result<[u8; 32], String> {
     // Normalise: PyFernet keys may or may not carry padding.
     let stripped = key_b64.trim().trim_end_matches('=');
@@ -35,7 +37,8 @@ fn parse_fernet_key(key_b64: &str) -> Result<[u8; 32], String> {
     };
     let bytes = URL_SAFE
         .decode(padded.as_bytes())
-        .map_err(|_| "must be base64url".to_string())?;
+        .or_else(|_| STANDARD.decode(padded.as_bytes()))
+        .map_err(|_| "must be base64-encoded".to_string())?;
     bytes
         .try_into()
         .map_err(|_| "must decode to exactly 32 bytes".to_string())
