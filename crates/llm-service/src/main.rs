@@ -24,6 +24,7 @@ use llama::{cached_model, resolve_model, LlamaClient};
 #[derive(Clone)]
 struct Config {
     llama_base_url: String,
+    llm_api_key: Option<String>,
     llm_model: String,
     api_base: String,
     service_api_key: String,
@@ -37,6 +38,9 @@ impl Config {
     fn from_env() -> Self {
         Self {
             llama_base_url: env_or("LLAMA_BASE_URL", "http://localhost:8080"),
+            llm_api_key: std::env::var("LLM_API_KEY")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
             llm_model: env_or("LLM_MODEL", "qwen2.5:7b"),
             api_base: env_or("API_BASE", "http://api:8000"),
             service_api_key: env_required_secret("LLM_SERVICE_API_KEY"),
@@ -461,6 +465,7 @@ async fn main() {
         &cfg.llm_model,
         cfg.llm_max_tokens,
         cfg.llm_disable_thinking,
+        cfg.llm_api_key.as_deref(),
     );
     let state = AppState {
         cfg,

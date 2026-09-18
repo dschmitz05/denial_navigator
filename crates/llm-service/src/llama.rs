@@ -16,16 +16,24 @@ pub struct LlamaClient {
     model: String,
     max_tokens: u32,
     disable_thinking: bool,
+    api_key: Option<String>,
 }
 
 impl LlamaClient {
-    pub fn new(base_url: &str, model: &str, max_tokens: u32, disable_thinking: bool) -> Self {
+    pub fn new(
+        base_url: &str,
+        model: &str,
+        max_tokens: u32,
+        disable_thinking: bool,
+        api_key: Option<&str>,
+    ) -> Self {
         Self {
             client: reqwest::Client::new(),
             base_url: base_url.trim_end_matches('/').to_string(),
             model: model.to_string(),
             max_tokens,
             disable_thinking,
+            api_key: api_key.map(str::to_owned),
         }
     }
 
@@ -52,13 +60,15 @@ impl LlamaClient {
         if self.disable_thinking {
             body["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": false });
         }
-        let resp = self
+        let mut request = self
             .client
             .post(format!("{}/v1/chat/completions", self.base_url))
             .timeout(Duration::from_secs(120))
-            .json(&body)
-            .send()
-            .await?;
+            .json(&body);
+        if let Some(api_key) = &self.api_key {
+            request = request.bearer_auth(api_key);
+        }
+        let resp = request.send().await?;
         let status = resp.status();
         let data: Value = resp.json().await?;
         if !status.is_success() {
@@ -86,12 +96,14 @@ impl LlamaClient {
 
     /// List available models via the OpenAI-compatible API.
     pub async fn list_models(&self) -> Result<Vec<String>, AppError> {
-        let resp = self
+        let mut request = self
             .client
             .get(format!("{}/v1/models", self.base_url))
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await?;
+            .timeout(Duration::from_secs(10));
+        if let Some(api_key) = &self.api_key {
+            request = request.bearer_auth(api_key);
+        }
+        let resp = request.send().await?;
         let status = resp.status();
         let data: Value = resp.json().await?;
         if !status.is_success() {
