@@ -1,12 +1,13 @@
 # Vendored API documentation assets
 
 Swagger UI and ReDoc are served from this directory rather than a CDN, so the
-API docs work on an air-gapped host. FastAPI's built-in doc pages fetch these
+API docs work on an air-gapped host. The stock Swagger UI / ReDoc pages fetch these
 from `cdn.jsdelivr.net` (and ReDoc additionally pulls Montserrat and Roboto
 from Google Fonts); with no route off the box, every one of those requests
 fails and the page renders blank white with nothing explaining why.
 
-`api-gateway/main.py` serves `/docs` and `/redoc` by hand and points them here.
+`crates/api-gateway/src/docs.rs` serves `/docs` and `/redoc` and points them here
+(`STATIC_DIR`, `/app/static` in the image).
 
 | File | Version | Source |
 |------|---------|--------|
@@ -20,7 +21,7 @@ fails and the page renders blank white with nothing explaining why.
 Re-download from a machine with network access and commit the result:
 
 ```bash
-cd api-gateway/static/docs
+cd crates/api-gateway/static/docs
 curl -fLO https://cdn.jsdelivr.net/npm/swagger-ui-dist@<version>/swagger-ui-bundle.js
 curl -fLO https://cdn.jsdelivr.net/npm/swagger-ui-dist@<version>/swagger-ui.css
 curl -fL  https://cdn.jsdelivr.net/npm/redoc@<version>/bundles/redoc.standalone.js -o redoc.standalone.js

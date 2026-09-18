@@ -3,7 +3,7 @@ Pydantic schemas for parsed EDI data
 Maps X12 segments to a canonical JSON structure
 
 Field names here are the contract the api-gateway reads in
-`_clean_claim` / `_clean_denial` (api-gateway/routes/ingestion.py).
+`clean_claim` / `clean_denial` (crates/api-gateway/src/routes/ingestion.rs).
 Renaming anything below means changing that file too.
 """
 

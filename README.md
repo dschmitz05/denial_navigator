@@ -269,7 +269,7 @@ simplification — but not across a network segment.
 | Manage users | — | — | — | ✅ |
 
 Everyone can read claims, denials and policy documents; the differences are in
-what they can change. Defined in `api-gateway/services/access.py`.
+what they can change. Defined in `crates/auth/src/rbac.rs`.
 
 ## Appeal filing windows
 
@@ -301,7 +301,7 @@ replay historical migration files over an existing schema.
 ## Air-gapped deployment
 
 The API docs at `/docs` and `/redoc` are served from assets vendored into the
-gateway image (`api-gateway/static/docs/`), so they work with no outbound
+gateway image (`crates/api-gateway/static/docs/`), so they work with no outbound
 network. Verify with:
 
 ```bash
@@ -329,8 +329,8 @@ shipped the audit page as a blank white screen.
 ## Layout
 
 ```
-api-gateway/     REST API — routes/, services/ (auth, access, audit, db)
-                 static/docs/  vendored Swagger + ReDoc, for air-gapped use
+crates/          Rust workspace; crates/api-gateway is the REST API
+                 (static/docs/ holds vendored Swagger + ReDoc, for air-gapped use)
 ediparser/       X12 835/837 parser + dropzone watcher
 rag-engine/      chunking, embeddings, pgvector search, prompt building
 llm-service/     llama.cpp client, JSON parsing, analysis storage

@@ -49,7 +49,7 @@ COPY --from=builder /out/api-gateway /usr/local/bin/api-gateway
 # Vendored Swagger UI / ReDoc bundles (shared with the Python service), served
 # at /static/docs/. The OpenAPI document itself is compiled into the binary.
 # Everything is local, so the docs work on an air-gapped host.
-COPY --chown=app:app api-gateway/static /app/static
+COPY --chown=app:app crates/api-gateway/static /app/static
 ENV API_GATEWAY_ADDR=0.0.0.0:8000 STATIC_DIR=/app/static
 HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=6 \
   CMD curl -fsS http://localhost:8000/health || exit 1

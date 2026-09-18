@@ -26,7 +26,7 @@ const OPENAPI_JSON: &str = include_str!("../openapi/openapi.json");
 /// `/app/static` in the container image; the repo copy when run from source.
 pub fn static_dir() -> PathBuf {
     std::env::var("STATIC_DIR")
-        .unwrap_or_else(|_| "api-gateway/static".to_string())
+        .unwrap_or_else(|_| "crates/api-gateway/static".to_string())
         .into()
 }
 

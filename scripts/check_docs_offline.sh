@@ -2,8 +2,8 @@
 # Assert the API documentation pages reference nothing outside this host.
 #
 # The docs are vendored so they work air-gapped (see
-# api-gateway/static/docs/README.md). A FastAPI upgrade that resets docs_url,
-# or a well-meaning revert, silently reintroduces a CDN dependency - and the
+# crates/api-gateway/static/docs/README.md). A docs.rs change that points the
+# pages at a CDN, or a well-meaning revert, silently reintroduces a CDN dependency - and the
 # only symptom on the target deployment is a blank white page.
 set -euo pipefail
 BASE="${1:-http://localhost:8000}"

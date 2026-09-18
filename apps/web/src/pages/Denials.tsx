@@ -146,7 +146,7 @@ export default function Denials() {
   }
 
   // Which tab a queued item lands on. Mirrors APPEAL_RESOLUTION_TYPES in
-  // api-gateway/routes/appeals.py — only a letter to the payer is an appeal.
+  // crates/domain/src/lib.rs — only a letter to the payer is an appeal.
   const APPEAL_TYPES = ['appeal_letter']
   const WORKLIST_TYPES = ['corrected_claim', 'clinical_docs', 'payer_contact', 'bill_patient', 'write_off']
   const destinationFor = (t?: string) => (t && APPEAL_TYPES.includes(t) ? 'Appeals' : 'Worklist')

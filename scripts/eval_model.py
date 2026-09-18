@@ -50,7 +50,7 @@ VALID_CATEGORIES = {
     "bundled_service", "duplicate_claim", "timely_filing",
     "non_covered_service", "patient_responsibility", "other",
 }
-# Mirrors RECOVERABLE_CATEGORIES in api-gateway/routes/denials.py: a category
+# Mirrors the recoverable categories in crates/denial-engine/src/lib.rs: a category
 # naming something fixable cannot also mean "nothing to do".
 RECOVERABLE = {
     "coding_error", "missing_info", "bundled_service",

@@ -10,10 +10,10 @@ choice is non-obvious, the reason is given — those are the parts that get
 "corrected" back into bugs otherwise.
 
 > **Rewrite in progress.** The backend is being reimplemented in Rust
-> (`crates/`, an axum + sqlx workspace). The original Python services
-> (`api-gateway/`, `ediparser/`, `rag-engine/`, `llm-service/`) are still in
-> the tree and still the default `docker-compose.yml` stack; the Rust stack
-> runs in parallel from `docker-compose.rust.yml`. Behaviour, routes, the
+> (`crates/`, an axum + sqlx workspace). The Python API gateway has been
+> removed; the remaining Python services (`ediparser/`, `rag-engine/`,
+> `llm-service/`) are still in the tree. The stack runs from
+> `docker-compose.rust.yml`. Behaviour, routes, the
 > database schema and the wire contract are identical — this document
 > describes both, and calls out a difference only where one exists.
 
@@ -75,12 +75,12 @@ Insights, Audit, Users, Profile, Settings, Login.
 error. It exists because a temporal-dead-zone bug — a `useState` declared below
 the `useEffect` that read it — shipped a white screen that no unit test caught.
 
-### API Gateway (`api-gateway/` · `crates/api-gateway/`)
+### API Gateway (`crates/api-gateway/`)
 
 Everything the browser touches goes through here; the browser never speaks to
 another service directly.
 
-| | Python | Rust |
+| | Python (removed) | Rust |
 |---|---|---|
 | framework | FastAPI on asyncpg, `--workers 4` | axum 0.8 on sqlx, multi-threaded Tokio |
 | auth | PyJWT (HS256), bcrypt cost 12 | `jsonwebtoken` (HS256), `bcrypt` cost 12 |
@@ -127,8 +127,8 @@ budget.
 
 **API docs.** `/docs` (Swagger UI), `/redoc` and `/openapi.json` are served
 by the gateway, with the JS/CSS vendored under `/static/docs/` — nothing
-reaches a CDN, so the docs work air-gapped. FastAPI generates its schema by
-reflection; the Rust build has no equivalent, so `crates/api-gateway/openapi/`
+reaches a CDN, so the docs work air-gapped. The removed FastAPI gateway generated
+its schema by reflection; the Rust build has no equivalent, so `crates/api-gateway/openapi/`
 holds a hand-maintained document (with a generator script) that is compiled
 into the binary.
 
@@ -353,12 +353,13 @@ denial-navigator/
 │   ├── api-gateway/
 │   │   ├── src/routes/             14 route modules
 │   │   ├── src/{middleware,docs,state}.rs
-│   │   └── openapi/                hand-maintained OpenAPI + generator
+│   │   ├── openapi/                hand-maintained OpenAPI + generator
+│   │   └── static/docs/            vendored Swagger UI + ReDoc (air-gapped)
 │   ├── ediparser/                  x835, x837, schema, watch
 │   ├── rag-engine/                 chunk, embed, prompt
 │   └── llm-service/                llama client
-├── ediparser/ rag-engine/ llm-service/ api-gateway/
-│                                   the Python services (still shipped)
+├── ediparser/ rag-engine/ llm-service/
+│                                   the remaining Python services
 ├── apps/web/
 │   ├── src/pages/                  13 pages
 │   ├── src/lib/                    authFetch, auditText
