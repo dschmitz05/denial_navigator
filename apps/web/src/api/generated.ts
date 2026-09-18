@@ -33,15 +33,15 @@ export interface ApiOperations {
   "GET /api/v1/claims/{claim_id}": { path: { "claim_id": string } };
   "PATCH /api/v1/claims/{claim_id}": { path: { "claim_id": string }; body: { "status"?: string; "total_paid"?: number; "total_adjustment"?: number } };
   "GET /api/v1/denials": { query?: { "status"?: string; "carc_code"?: string; "payer_name"?: string; "min_amount"?: number; "max_amount"?: number; "min_age_days"?: number; "max_age_days"?: number; "owner"?: string; "facility_type_code"?: string; "cagc"?: string; "claim_id"?: string; "q"?: string; "priority"?: boolean; "sort"?: "amount" | "deadline" | "created"; "descending"?: boolean; "cursor"?: string; "limit"?: number; "offset"?: number } };
+  "GET /api/v1/denials/aging-buckets": Record<string, never>;
   "GET /api/v1/denials/appeal-windows": Record<string, never>;
   "PUT /api/v1/denials/appeal-windows": { body: { "payer_name": string; "appeal_window_days": number; "notes"?: string } };
   "GET /api/v1/denials/bulk-carc": Record<string, never>;
   "GET /api/v1/denials/by-payer": Record<string, never>;
   "GET /api/v1/denials/by-root-cause": Record<string, never>;
-  "GET /api/v1/denials/aging-buckets": Record<string, never>;
+  "GET /api/v1/denials/carc-options": { query?: { "status"?: string } };
   "GET /api/v1/denials/financial-summary": Record<string, never>;
   "GET /api/v1/denials/resolution-timing": Record<string, never>;
-  "GET /api/v1/denials/carc-options": { query?: { "status"?: string } };
   "GET /api/v1/denials/{denial_id}": { path: { "denial_id": string } };
   "PATCH /api/v1/denials/{denial_id}": { path: { "denial_id": string }; body: { "status"?: string; "appeal_deadline"?: string } };
   "GET /api/v1/feedback": { query?: { "ai_analysis_id"?: string; "accepted"?: boolean; "limit"?: number } };

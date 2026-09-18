@@ -1850,6 +1850,73 @@
         }
       }
     },
+    "/api/v1/denials/aging-buckets": {
+      "get": {
+        "summary": "Active denial exposure grouped by age",
+        "tags": [
+          "denials"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Active denials only (open, analyzed, in_progress, in_appeal) in the caller's organization. Empty buckets are omitted.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "bucket": {
+                        "type": "string",
+                        "description": "Age since the payer's denial date.",
+                        "enum": [
+                          "0\u201330 days",
+                          "31\u201360 days",
+                          "61\u201390 days",
+                          "91+ days",
+                          "Unknown"
+                        ]
+                      },
+                      "denial_count": {
+                        "type": "integer"
+                      },
+                      "total_denied_amount": {
+                        "type": "number"
+                      },
+                      "avg_denial_amount": {
+                        "type": "number"
+                      },
+                      "bucket_order": {
+                        "type": "integer",
+                        "description": "1\u20134 by age; 5 for Unknown (no denial date)."
+                      }
+                    },
+                    "required": [
+                      "bucket",
+                      "denial_count",
+                      "total_denied_amount",
+                      "avg_denial_amount"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/api/v1/denials/appeal-windows": {
       "get": {
         "summary": "Per-payer appeal filing windows",
@@ -1969,6 +2036,127 @@
         }
       }
     },
+    "/api/v1/denials/by-payer": {
+      "get": {
+        "summary": "Active denial exposure grouped by payer",
+        "tags": [
+          "denials"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Active denials only (open, analyzed, in_progress, in_appeal) in the caller's organization. Sorted by total denied amount.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "payer_name": {
+                        "type": "string",
+                        "description": "'Unknown' when the claim has none."
+                      },
+                      "denial_count": {
+                        "type": "integer"
+                      },
+                      "total_denied_amount": {
+                        "type": "number"
+                      },
+                      "avg_denial_amount": {
+                        "type": "number"
+                      },
+                      "overdue_count": {
+                        "type": "integer",
+                        "description": "Denials past their appeal deadline."
+                      },
+                      "nearest_appeal_deadline": {
+                        "type": "string",
+                        "format": "date",
+                        "nullable": true
+                      }
+                    },
+                    "required": [
+                      "payer_name",
+                      "denial_count",
+                      "total_denied_amount",
+                      "avg_denial_amount"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/denials/by-root-cause": {
+      "get": {
+        "summary": "Active denial exposure grouped by AI root cause",
+        "tags": [
+          "denials"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Active denials only (open, analyzed, in_progress, in_appeal) in the caller's organization. Uses each denial's latest analysis; falls back to its category, then 'Unclassified'.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "root_cause": {
+                        "type": "string",
+                        "description": "Root-cause summary, category, or 'Unclassified'."
+                      },
+                      "denial_count": {
+                        "type": "integer"
+                      },
+                      "total_denied_amount": {
+                        "type": "number"
+                      },
+                      "avg_denial_amount": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "root_cause",
+                      "denial_count",
+                      "total_denied_amount",
+                      "avg_denial_amount"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/api/v1/denials/carc-options": {
       "get": {
         "summary": "Distinct CARC codes present in denials, for filters",
@@ -1997,6 +2185,126 @@
                 "schema": {
                   "type": "object",
                   "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/denials/financial-summary": {
+      "get": {
+        "summary": "Denied vs recovered dollars across all denials",
+        "tags": [
+          "denials"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Uses each denial's latest recorded resubmission outcome; denials with no outcome count as unresolved.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "total_denials": {
+                      "type": "integer"
+                    },
+                    "denied_dollars": {
+                      "type": "number"
+                    },
+                    "recovered_dollars": {
+                      "type": "number"
+                    },
+                    "not_recovered_dollars": {
+                      "type": "number"
+                    },
+                    "unresolved_dollars": {
+                      "type": "number"
+                    },
+                    "outcome_known_count": {
+                      "type": "integer"
+                    },
+                    "recovered_count": {
+                      "type": "integer"
+                    },
+                    "recovery_rate": {
+                      "type": "number",
+                      "nullable": true,
+                      "description": "recovered_count / outcome_known_count; null when no outcome is known."
+                    }
+                  },
+                  "required": [
+                    "total_denials",
+                    "denied_dollars",
+                    "recovered_dollars",
+                    "not_recovered_dollars",
+                    "unresolved_dollars",
+                    "outcome_known_count",
+                    "recovered_count",
+                    "recovery_rate"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/denials/resolution-timing": {
+      "get": {
+        "summary": "Days from denial to terminal appeal/worklist outcome",
+        "tags": [
+          "denials"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Counts denials with a denial date and at least one queue item in a terminal outcome (approved, overruled, resolved, denied_again, cancelled), timed to the most recent such item.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "resolved_count": {
+                      "type": "integer"
+                    },
+                    "average_resolution_days": {
+                      "type": "number",
+                      "nullable": true
+                    },
+                    "median_resolution_days": {
+                      "type": "number",
+                      "nullable": true
+                    }
+                  },
+                  "required": [
+                    "resolved_count",
+                    "average_resolution_days",
+                    "median_resolution_days"
+                  ]
                 }
               }
             }

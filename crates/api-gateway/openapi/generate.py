@@ -276,6 +276,82 @@ add("/api/v1/denials",
            }))
 add("/api/v1/denials/bulk-carc",
     get=op("Denial counts and amounts grouped by CARC", "denials"))
+
+
+def ok(schema):
+    return {"200": {"description": "OK", "content": {
+        "application/json": {"schema": schema}}},
+        "401": {"$ref": "#/components/responses/Unauthorized"},
+        "403": {"$ref": "#/components/responses/Forbidden"}}
+
+
+def exposure_rows(key, key_desc):
+    return ARR({"type": "object", "properties": {
+        key: S(description=key_desc),
+        "denial_count": I(),
+        "total_denied_amount": N(),
+        "avg_denial_amount": N()},
+        "required": [key, "denial_count", "total_denied_amount",
+                     "avg_denial_amount"]})
+
+
+ACTIVE = ("Active denials only (open, analyzed, in_progress, in_appeal) "
+          "in the caller's organization.")
+
+by_payer = exposure_rows("payer_name", "'Unknown' when the claim has none.")
+by_payer["items"]["properties"].update(
+    overdue_count=I(description="Denials past their appeal deadline."),
+    nearest_appeal_deadline=S(format="date", nullable=True))
+add("/api/v1/denials/by-payer",
+    get=op("Active denial exposure grouped by payer", "denials",
+           description=ACTIVE + " Sorted by total denied amount.",
+           responses=ok(by_payer)))
+add("/api/v1/denials/by-root-cause",
+    get=op("Active denial exposure grouped by AI root cause", "denials",
+           description=ACTIVE + " Uses each denial's latest analysis; "
+                       "falls back to its category, then 'Unclassified'.",
+           responses=ok(exposure_rows(
+               "root_cause", "Root-cause summary, category, or 'Unclassified'."))))
+aging = exposure_rows("bucket", "Age since the payer's denial date.")
+aging["items"]["properties"]["bucket"]["enum"] = [
+    "0–30 days", "31–60 days", "61–90 days", "91+ days", "Unknown"]
+aging["items"]["properties"]["bucket_order"] = I(
+    description="1–4 by age; 5 for Unknown (no denial date).")
+add("/api/v1/denials/aging-buckets",
+    get=op("Active denial exposure grouped by age", "denials",
+           description=ACTIVE + " Empty buckets are omitted.",
+           responses=ok(aging)))
+add("/api/v1/denials/financial-summary",
+    get=op("Denied vs recovered dollars across all denials", "denials",
+           description="Uses each denial's latest recorded resubmission "
+                       "outcome; denials with no outcome count as unresolved.",
+           responses=ok({"type": "object", "properties": {
+               "total_denials": I(),
+               "denied_dollars": N(),
+               "recovered_dollars": N(),
+               "not_recovered_dollars": N(),
+               "unresolved_dollars": N(),
+               "outcome_known_count": I(),
+               "recovered_count": I(),
+               "recovery_rate": N(nullable=True, description=
+                   "recovered_count / outcome_known_count; null when no "
+                   "outcome is known.")},
+               "required": ["total_denials", "denied_dollars",
+                            "recovered_dollars", "not_recovered_dollars",
+                            "unresolved_dollars", "outcome_known_count",
+                            "recovered_count", "recovery_rate"]})))
+add("/api/v1/denials/resolution-timing",
+    get=op("Days from denial to terminal appeal/worklist outcome", "denials",
+           description="Counts denials with a denial date and at least one "
+                       "queue item in a terminal outcome (approved, overruled, "
+                       "resolved, denied_again, cancelled), timed to the most "
+                       "recent such item.",
+           responses=ok({"type": "object", "properties": {
+               "resolved_count": I(),
+               "average_resolution_days": N(nullable=True),
+               "median_resolution_days": N(nullable=True)},
+               "required": ["resolved_count", "average_resolution_days",
+                            "median_resolution_days"]})))
 add("/api/v1/denials/carc-options",
     get=op("Distinct CARC codes present in denials, for filters", "denials",
            params=[{"name": "status", "in": "query", "schema": S()}]))
