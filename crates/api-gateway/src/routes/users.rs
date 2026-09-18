@@ -80,6 +80,38 @@ fn is_self(principal: &Principal, user_id: &Uuid) -> bool {
     principal.user_id.as_deref() == Some(user_id.to_string().as_str())
 }
 
+fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
+    principal
+        .organization_id
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or(AppError::Forbidden)
+}
+
+/// Accounts are presently global identities. Until account attributes become
+/// membership attributes, refuse tenant administration of a shared account so
+/// an action in one organization cannot change another organization's access.
+async fn require_exclusive_member(
+    pool: &sqlx::PgPool,
+    organization_id: Uuid,
+    user_id: Uuid,
+) -> Result<(), AppError> {
+    let allowed: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM organization_memberships WHERE organization_id = $1 AND user_id = $2) \
+         AND NOT EXISTS(SELECT 1 FROM organization_memberships WHERE organization_id <> $1 AND user_id = $2)",
+    )
+    .bind(organization_id)
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::Db)?;
+    if allowed {
+        Ok(())
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+
 fn row_to_json(row: &sqlx::postgres::PgRow) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     for col in row.columns().iter() {
@@ -137,13 +169,20 @@ fn row_to_json(row: &sqlx::postgres::PgRow) -> serde_json::Value {
 /// Unassigning is better than refusing to deactivate the user (offboarding
 /// should not be blocked by a queue) and better than deleting the items,
 /// which are real outstanding money.
-async fn release_queue_items(pool: &sqlx::PgPool, user_id: Uuid) -> Result<u64, AppError> {
+async fn release_queue_items(
+    pool: &sqlx::PgPool,
+    organization_id: Uuid,
+    user_id: Uuid,
+) -> Result<u64, AppError> {
     let sql = format!(
-        "UPDATE appeals_queue SET assigned_user_id = NULL, updated_at = NOW() \
-         WHERE assigned_user_id = $1 AND {OPEN_QUEUE_CLAUSE} RETURNING id"
+        "UPDATE appeals_queue aq SET assigned_user_id = NULL, updated_at = NOW() \
+         FROM denials d JOIN claims c ON c.id = d.claim_id \
+         WHERE aq.denial_id = d.id AND aq.assigned_user_id = $1 \
+         AND c.organization_id = $2 AND {OPEN_QUEUE_CLAUSE} RETURNING aq.id"
     );
     let rows = sqlx::query(&sql)
         .bind(user_id)
+        .bind(organization_id)
         .fetch_all(pool)
         .await
         .map_err(AppError::Db)?;
@@ -159,8 +198,10 @@ async fn audit_insert(
     details: &serde_json::Value,
 ) {
     let result = sqlx::query(
-        "INSERT INTO audit_log (user_id, action, resource_type, resource_id, details, ip_address) \
-         VALUES ($1::uuid, $2, $3, $4::uuid, $5::jsonb, $6::inet)",
+        "INSERT INTO audit_log (organization_id, user_id, action, resource_type, resource_id, details, ip_address) \
+         VALUES ((SELECT organization_id FROM organization_memberships \
+                  WHERE user_id = $1::uuid ORDER BY created_at ASC LIMIT 1), \
+                 $1::uuid, $2, $3, $4::uuid, $5::jsonb, $6::inet)",
     )
     .bind(principal.user_id.as_deref())
     .bind(action)
@@ -183,18 +224,22 @@ pub async fn list_users(
     Query(params): Query<ListUsersQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, AppError> {
     require_roles(&principal, &["admin"])?;
+    let organization_id = organization_id(&principal)?;
 
     let mut qb = QueryBuilder::<sqlx::Postgres>::new(
-        "SELECT id, username, email, full_name, role, is_active, created_at, last_login, \
-         totp_required, (totp_confirmed_at IS NOT NULL) AS totp_enrolled FROM users",
+        "SELECT u.id, u.username, u.email, u.full_name, u.role, u.is_active, u.created_at, u.last_login, \
+         u.totp_required, (u.totp_confirmed_at IS NOT NULL) AS totp_enrolled \
+         FROM users u JOIN organization_memberships om ON om.user_id = u.id \
+         WHERE om.organization_id = ",
     );
+    qb.push_bind(organization_id);
 
     let search = params
         .search
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let mut need_where = true;
+    let mut need_where = false;
     if let Some(ref role) = params.role {
         if need_where {
             qb.push(" WHERE ");
@@ -202,7 +247,7 @@ pub async fn list_users(
         } else {
             qb.push(" AND ");
         }
-        qb.push("role = ");
+        qb.push("u.role = ");
         qb.push_bind(role);
     }
     if let Some(active) = params.is_active {
@@ -212,7 +257,7 @@ pub async fn list_users(
         } else {
             qb.push(" AND ");
         }
-        qb.push("is_active = ");
+        qb.push("u.is_active = ");
         qb.push_bind(active);
     }
     if let Some(search) = search {
@@ -223,16 +268,16 @@ pub async fn list_users(
             qb.push(" AND ");
         }
         let pattern = format!("%{search}%");
-        qb.push("(username ILIKE ");
+        qb.push("(u.username ILIKE ");
         qb.push_bind(pattern.clone());
-        qb.push(" OR email ILIKE ");
+        qb.push(" OR u.email ILIKE ");
         qb.push_bind(pattern.clone());
-        qb.push(" OR full_name ILIKE ");
+        qb.push(" OR u.full_name ILIKE ");
         qb.push_bind(pattern);
         qb.push(")");
     }
 
-    qb.push(" ORDER BY created_at DESC");
+    qb.push(" ORDER BY u.created_at DESC");
     qb.push(" LIMIT ").push_bind(params.limit.clamp(1, 500));
     qb.push(" OFFSET ").push_bind(params.offset.max(0));
 
@@ -249,15 +294,19 @@ pub async fn list_assignable_users(
     Extension(principal): Extension<Principal>,
 ) -> Result<Json<Vec<serde_json::Value>>, AppError> {
     require_roles(&principal, MANAGER_UP)?;
+    let organization_id = organization_id(&principal)?;
 
     let rows = sqlx::query(
         // Specialists first: they are who work is usually assigned to.
-        "SELECT id, username, full_name, role FROM users WHERE is_active = TRUE \
-         ORDER BY CASE role WHEN 'billing_specialist' THEN 0 \
-                       WHEN 'billing_manager' THEN 1 \
-                       WHEN 'rcm_director' THEN 2 \
-                       ELSE 3 END, COALESCE(full_name, username)",
+        "SELECT u.id, u.username, u.full_name, u.role FROM users u \
+         JOIN organization_memberships om ON om.user_id = u.id \
+         WHERE om.organization_id = $1 AND u.is_active = TRUE \
+         ORDER BY CASE u.role WHEN 'billing_specialist' THEN 0 \
+                         WHEN 'billing_manager' THEN 1 \
+                         WHEN 'rcm_director' THEN 2 \
+                         ELSE 3 END, COALESCE(u.full_name, u.username)",
     )
+    .bind(organization_id)
     .fetch_all(&state.pool)
     .await
     .map_err(AppError::Db)?;
@@ -270,12 +319,15 @@ pub async fn get_user(
     Path(user_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_roles(&principal, &["admin"])?;
+    let organization_id = organization_id(&principal)?;
 
     let row = sqlx::query(
-        "SELECT id, username, email, full_name, role, is_active, created_at, last_login \
-         FROM users WHERE id = $1",
+        "SELECT u.id, u.username, u.email, u.full_name, u.role, u.is_active, u.created_at, u.last_login \
+         FROM users u JOIN organization_memberships om ON om.user_id = u.id \
+         WHERE u.id = $1 AND om.organization_id = $2",
     )
     .bind(user_id)
+    .bind(organization_id)
     .fetch_optional(&state.pool)
     .await
     .map_err(AppError::Db)?
@@ -291,6 +343,8 @@ pub async fn update_user(
     Json(body): Json<UserUpdate>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_roles(&principal, &["admin"])?;
+    let organization_id = organization_id(&principal)?;
+    require_exclusive_member(&state.pool, organization_id, user_id).await?;
 
     // Prevent self-modification of role
     if is_self(&principal, &user_id) && body.role.is_some() {
@@ -370,7 +424,7 @@ pub async fn update_user(
     // release the same work.
     let mut released: u64 = 0;
     if body.is_active == Some(false) {
-        released = release_queue_items(&state.pool, user_id).await?;
+        released = release_queue_items(&state.pool, organization_id, user_id).await?;
     }
 
     let mut changes = serde_json::Map::new();
@@ -414,6 +468,8 @@ pub async fn reset_user_password(
     Json(body): Json<UserPasswordUpdate>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_roles(&principal, &["admin"])?;
+    let organization_id = organization_id(&principal)?;
+    require_exclusive_member(&state.pool, organization_id, user_id).await?;
 
     let user = sqlx::query("SELECT id, username FROM users WHERE id = $1")
         .bind(user_id)
@@ -457,6 +513,8 @@ pub async fn delete_user(
     Query(params): Query<DeleteUserQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_roles(&principal, &["admin"])?;
+    let organization_id = organization_id(&principal)?;
+    require_exclusive_member(&state.pool, organization_id, user_id).await?;
 
     let user = sqlx::query("SELECT id, username, role FROM users WHERE id = $1")
         .bind(user_id)
@@ -474,8 +532,10 @@ pub async fn delete_user(
 
     // Prevent deleting the last admin
     let admin_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM users WHERE role = 'admin' AND id != $1 AND is_active = TRUE",
+        "SELECT COUNT(*) FROM users u JOIN organization_memberships om ON om.user_id = u.id \
+         WHERE om.organization_id = $1 AND u.role = 'admin' AND u.id != $2 AND u.is_active = TRUE",
     )
+    .bind(organization_id)
     .bind(user_id)
     .fetch_one(&state.pool)
     .await
@@ -495,21 +555,25 @@ pub async fn delete_user(
 
         // Their live work goes back to the pool; closed items lose the record
         // of who did them, because that record was the user row.
-        let released = release_queue_items(&state.pool, user_id).await?;
+        let released = release_queue_items(&state.pool, organization_id, user_id).await?;
         let closed_items: (i64,) = sqlx::query_as(&format!(
-            "SELECT COUNT(*) FROM appeals_queue \
-                 WHERE assigned_user_id = $1 AND NOT {OPEN_QUEUE_CLAUSE}"
+            "SELECT COUNT(*) FROM appeals_queue aq JOIN denials d ON d.id = aq.denial_id \
+             JOIN claims c ON c.id = d.claim_id \
+             WHERE aq.assigned_user_id = $1 AND c.organization_id = $2 AND NOT {OPEN_QUEUE_CLAUSE}"
         ))
         .bind(user_id)
+        .bind(organization_id)
         .fetch_one(&state.pool)
         .await
         .map_err(AppError::Db)?;
-        let audit_entries: (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM audit_log WHERE user_id = $1")
-                .bind(user_id)
-                .fetch_one(&state.pool)
-                .await
-                .map_err(AppError::Db)?;
+        let audit_entries: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM audit_log WHERE user_id = $1 AND organization_id = $2",
+        )
+        .bind(user_id)
+        .bind(organization_id)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(AppError::Db)?;
 
         // Written BEFORE the row disappears, so the log records who was
         // erased, by whom, and what it cost.
@@ -570,7 +634,7 @@ pub async fn delete_user(
         .map_err(AppError::Db)?;
 
     // Their live work goes back in the pool, or it is orphaned.
-    let released = release_queue_items(&state.pool, user_id).await?;
+    let released = release_queue_items(&state.pool, organization_id, user_id).await?;
 
     audit_insert(
         &state.pool,
@@ -602,6 +666,8 @@ pub async fn set_totp_policy(
     Json(body): Json<TotpPolicy>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_roles(&principal, &["admin"])?;
+    let organization_id = organization_id(&principal)?;
+    require_exclusive_member(&state.pool, organization_id, user_id).await?;
 
     let user = sqlx::query(
         "SELECT id, username, totp_required, totp_confirmed_at FROM users WHERE id = $1",
@@ -672,6 +738,8 @@ pub async fn reset_totp(
     Path(user_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_roles(&principal, &["admin"])?;
+    let organization_id = organization_id(&principal)?;
+    require_exclusive_member(&state.pool, organization_id, user_id).await?;
 
     let user = sqlx::query("SELECT id, username, totp_required FROM users WHERE id = $1")
         .bind(user_id)

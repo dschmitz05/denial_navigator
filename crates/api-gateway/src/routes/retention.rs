@@ -16,6 +16,7 @@ use denial_auth::rbac::Principal;
 use denial_common::error::AppError;
 use serde::Deserialize;
 use sqlx::Row;
+use uuid::Uuid;
 
 use crate::state::AppState;
 
@@ -25,6 +26,14 @@ fn require_admin(principal: &Principal) -> Result<(), AppError> {
     } else {
         Err(AppError::Forbidden)
     }
+}
+
+fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
+    principal
+        .organization_id
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or(AppError::Forbidden)
 }
 
 #[derive(Deserialize)]
@@ -39,6 +48,7 @@ pub async fn audit_retention_status(
     Extension(principal): Extension<Principal>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_admin(&principal)?;
+    let organization_id = organization_id(&principal)?;
 
     let retention_days = state.default_retention_days as i64;
     let sql = format!(
@@ -47,10 +57,11 @@ pub async fn audit_retention_status(
                 MAX(created_at) AS newest, \
                 COUNT(*) FILTER (WHERE created_at < NOW() - INTERVAL '{retention_days} days') \
                     AS beyond_retention, \
-                pg_size_pretty(pg_total_relation_size('audit_log')) AS on_disk \
-         FROM audit_log"
+                NULL::text AS on_disk \
+         FROM audit_log WHERE organization_id = $1"
     );
     let row = sqlx::query(&sql)
+        .bind(organization_id)
         .fetch_one(&state.pool)
         .await
         .map_err(AppError::Db)?;
@@ -81,6 +92,7 @@ pub async fn prune_audit_log(
     Json(body): Json<PruneRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_admin(&principal)?;
+    let organization_id = organization_id(&principal)?;
 
     let older_than_days = body
         .older_than_days
@@ -99,8 +111,9 @@ pub async fn prune_audit_log(
 
     let preview = sqlx::query(&format!(
         "SELECT COUNT(*) AS n, MIN(created_at) AS from_date, MAX(created_at) AS to_date \
-         FROM audit_log WHERE created_at < NOW() - INTERVAL '{older_than_days} days'"
+         FROM audit_log WHERE organization_id = $1 AND created_at < NOW() - INTERVAL '{older_than_days} days'"
     ))
+    .bind(organization_id)
     .fetch_one(&state.pool)
     .await
     .map_err(AppError::Db)?;
@@ -118,8 +131,9 @@ pub async fn prune_audit_log(
     let to_date: Option<DateTime<Utc>> = preview.try_get("to_date").ok().flatten();
 
     sqlx::query(&format!(
-        "DELETE FROM audit_log WHERE created_at < NOW() - INTERVAL '{older_than_days} days'"
+        "DELETE FROM audit_log WHERE organization_id = $1 AND created_at < NOW() - INTERVAL '{older_than_days} days'"
     ))
+    .bind(organization_id)
     .execute(&state.pool)
     .await
     .map_err(AppError::Db)?;

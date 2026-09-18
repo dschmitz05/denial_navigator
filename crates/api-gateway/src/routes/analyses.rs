@@ -193,6 +193,28 @@ pub async fn store_analysis(
         .and_then(|id| id.as_str())
         .and_then(|id| Uuid::parse_str(id).ok());
 
+    // `parsed_result` is provider-controlled data. A referenced playbook must
+    // belong to the same organization as the claim being analyzed, even for a
+    // trusted internal caller, so an arbitrary UUID cannot create a cross-
+    // tenant relationship in `ai_analyses`.
+    if let Some(playbook_id) = playbook_id {
+        let belongs: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM institutional_playbooks p \
+             JOIN claims c ON c.id = $2 \
+             WHERE p.id = $1 AND p.organization_id = c.organization_id)",
+        )
+        .bind(playbook_id)
+        .bind(claim_id)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(AppError::Db)?;
+        if !belongs {
+            return Err(AppError::BadRequest(
+                "playbook must belong to the claim organization".into(),
+            ));
+        }
+    }
+
     let row = sqlx::query(
         "INSERT INTO ai_analyses \
             (denial_id, claim_id, playbook_id, model_name, provider_name, provider_version, prompt_template_version, \
@@ -393,12 +415,13 @@ async fn generate_analysis_for_request(
             );
             let playbook = sqlx::query(
                 "SELECT id, name, version, recommendation FROM institutional_playbooks \
-                 WHERE status='approved' \
-                   AND (triggers->>'carc_code' IS NULL OR triggers->>'carc_code'=$1) \
-                   AND (triggers->>'cagc' IS NULL OR triggers->>'cagc'=$2) \
-                   AND (triggers->>'payer_name' IS NULL OR lower(triggers->>'payer_name')=lower($3)) \
+                 WHERE organization_id=$1 AND status='approved' \
+                   AND (triggers->>'carc_code' IS NULL OR triggers->>'carc_code'=$2) \
+                   AND (triggers->>'cagc' IS NULL OR triggers->>'cagc'=$3) \
+                   AND (triggers->>'payer_name' IS NULL OR lower(triggers->>'payer_name')=lower($4)) \
                  ORDER BY updated_at DESC LIMIT 1",
             )
+            .bind(organization_id)
             .bind(carc)
             .bind(cagc.as_deref())
             .bind(&payer_name)

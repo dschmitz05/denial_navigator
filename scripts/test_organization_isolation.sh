@@ -17,6 +17,10 @@ OTHER_ORG=''
 OTHER_USER_ID=''
 DEV_CLAIM_ID=''
 OTHER_CLAIM_ID=''
+DEV_DENIAL_ID=''
+DEV_APPEAL_ID=''
+DEV_PLAYBOOK_ID=''
+DEV_ADMIN_ID=''
 
 psql_exec() {
   docker exec "$DB_CONTAINER" psql -q -v ON_ERROR_STOP=1 -U "$DB_USER" -d "$DB_NAME" -Atc "$1"
@@ -25,6 +29,7 @@ psql_exec() {
 cleanup() {
   if [[ -n "$DEV_CLAIM_ID" ]]; then psql_exec "DELETE FROM claims WHERE id = '${DEV_CLAIM_ID}'::uuid" >/dev/null || true; fi
   if [[ -n "$OTHER_CLAIM_ID" ]]; then psql_exec "DELETE FROM claims WHERE id = '${OTHER_CLAIM_ID}'::uuid" >/dev/null || true; fi
+  if [[ -n "$DEV_PLAYBOOK_ID" ]]; then psql_exec "DELETE FROM institutional_playbooks WHERE id = '${DEV_PLAYBOOK_ID}'::uuid" >/dev/null || true; fi
   if [[ -n "$OTHER_ORG" ]]; then psql_exec "DELETE FROM audit_log WHERE organization_id = '${OTHER_ORG}'::uuid" >/dev/null || true; fi
   if [[ -n "$OTHER_USER_ID" ]]; then psql_exec "DELETE FROM users WHERE id = '${OTHER_USER_ID}'::uuid" >/dev/null || true; fi
   if [[ -n "$OTHER_ORG" ]]; then psql_exec "DELETE FROM organizations WHERE id = '${OTHER_ORG}'::uuid" >/dev/null || true; fi
@@ -37,8 +42,9 @@ docker inspect "$DB_CONTAINER" >/dev/null
 curl -fsS "${API_BASE_URL}/health/ready" >/dev/null
 
 OTHER_ORG="$(psql_exec "INSERT INTO organizations (slug, name) VALUES ('${OTHER_SLUG}', 'Isolation Test ${RUN_ID}') RETURNING id")"
-OTHER_USER_ID="$(psql_exec "INSERT INTO users (username, email, password_hash, full_name, role, is_active) VALUES ('${OTHER_USER}', '${OTHER_USER}@example.test', crypt('${TEST_PASSWORD}', gen_salt('bf', 12)), 'Isolation Test User', 'billing_manager', TRUE) RETURNING id")"
-psql_exec "INSERT INTO organization_memberships (organization_id, user_id, role) VALUES ('${OTHER_ORG}'::uuid, '${OTHER_USER_ID}'::uuid, 'billing_manager')" >/dev/null
+OTHER_USER_ID="$(psql_exec "INSERT INTO users (username, email, password_hash, full_name, role, is_active) VALUES ('${OTHER_USER}', '${OTHER_USER}@example.test', crypt('${TEST_PASSWORD}', gen_salt('bf', 12)), 'Isolation Test User', 'admin', TRUE) RETURNING id")"
+psql_exec "INSERT INTO organization_memberships (organization_id, user_id, role) VALUES ('${OTHER_ORG}'::uuid, '${OTHER_USER_ID}'::uuid, 'admin')" >/dev/null
+DEV_ADMIN_ID="$(psql_exec "SELECT id FROM users WHERE username = 'admin' LIMIT 1")"
 
 DEV_CLAIM_ID="$(psql_exec "INSERT INTO claims (organization_id, claim_number, patient_id, payer_name, total_charge, status) VALUES ('${DEV_ORG}'::uuid, 'ISO-DEV-${RUN_ID}', 'ISO-DEV-PATIENT', 'Isolation Payer', 1.00, 'ingested') RETURNING id")"
 OTHER_CLAIM_ID="$(psql_exec "INSERT INTO claims (organization_id, claim_number, patient_id, payer_name, total_charge, status) VALUES ('${OTHER_ORG}'::uuid, 'ISO-OTHER-${RUN_ID}', 'ISO-OTHER-PATIENT', 'Isolation Payer', 1.00, 'ingested') RETURNING id")"
@@ -58,5 +64,37 @@ STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${OT
 
 curl -fsS -H "Authorization: Bearer ${ADMIN_TOKEN}" "${API_BASE_URL}/api/v1/claims?limit=500" \
   | jq -e --arg id "$OTHER_CLAIM_ID" '[.[] | select(.id == $id)] | length == 0' >/dev/null
+
+# Playbooks are organization-owned: a rule created in Development must neither
+# appear in nor be executable from the second organization.
+DEV_PLAYBOOK_ID="$(curl -fsS -X POST -H "Authorization: Bearer ${ADMIN_TOKEN}" -H 'Content-Type: application/json' \
+  --data '{"name":"Isolation rule","triggers":{},"recommendation":{"required_action":"review"}}' \
+  "${API_BASE_URL}/api/v1/playbooks" | jq -er '.id')"
+curl -fsS -H "Authorization: Bearer ${OTHER_TOKEN}" "${API_BASE_URL}/api/v1/playbooks" \
+  | jq -e --arg id "$DEV_PLAYBOOK_ID" '[.[] | select(.id == $id)] | length == 0' >/dev/null
+
+# An administrator is restricted to accounts in their own organization.
+curl -fsS -H "Authorization: Bearer ${OTHER_TOKEN}" "${API_BASE_URL}/api/v1/users" \
+  | jq -e --arg id "$DEV_ADMIN_ID" '[.[] | select(.id == $id)] | length == 0' >/dev/null
+STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${OTHER_TOKEN}" "${API_BASE_URL}/api/v1/users/${DEV_ADMIN_ID}")"
+[[ "$STATUS" == '404' ]]
+
+# A cross-organization assignee is rejected instead of receiving another
+# organization's claim details through queue notifications.
+DEV_DENIAL_ID="$(psql_exec "INSERT INTO denials (claim_id, cagc, charge_amount, status) VALUES ('${DEV_CLAIM_ID}'::uuid, 'CO', 1.00, 'open') RETURNING id")"
+DEV_APPEAL_ID="$(psql_exec "INSERT INTO appeals_queue (denial_id, claim_id, resolution_type, outcome_status) VALUES ('${DEV_DENIAL_ID}'::uuid, '${DEV_CLAIM_ID}'::uuid, 'appeal_letter', 'queued') RETURNING id")"
+STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer ${ADMIN_TOKEN}" -H 'Content-Type: application/json' \
+  --data "{\"assigned_user_id\":\"${OTHER_USER_ID}\"}" "${API_BASE_URL}/api/v1/appeals/${DEV_APPEAL_ID}/assign")"
+[[ "$STATUS" == '404' ]]
+
+# Retention status is tenant scoped. A second-organization audit row cannot
+# change the Development admin's count.
+BEFORE_RETENTION="$(curl -fsS -H "Authorization: Bearer ${ADMIN_TOKEN}" "${API_BASE_URL}/api/v1/retention/audit" | jq -er '.total_entries')"
+psql_exec "INSERT INTO audit_log (organization_id, action, resource_type, details) VALUES ('${OTHER_ORG}'::uuid, 'isolation_test', 'test', '{}'::jsonb)" >/dev/null
+AFTER_RETENTION="$(curl -fsS -H "Authorization: Bearer ${ADMIN_TOKEN}" "${API_BASE_URL}/api/v1/retention/audit" | jq -er '.total_entries')"
+# Each authenticated status read writes its own Development audit event. The
+# second read should therefore add exactly one row, not two (which would mean
+# the second organization's inserted row leaked into the count).
+[[ "$AFTER_RETENTION" -eq "$((BEFORE_RETENTION + 1))" ]]
 
 echo 'Organization isolation integration test passed.'

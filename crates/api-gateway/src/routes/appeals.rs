@@ -102,6 +102,32 @@ fn assert_may_touch(principal: &Principal, assigned_user_id: Option<Uuid>) -> Re
     Ok(())
 }
 
+async fn resolve_assignee(
+    pool: &sqlx::PgPool,
+    organization_id: Uuid,
+    requested: Option<String>,
+) -> Result<Option<Uuid>, AppError> {
+    let Some(requested) = requested.filter(|id| !id.is_empty()) else {
+        return Ok(None);
+    };
+    let user_id = Uuid::parse_str(&requested)
+        .map_err(|_| AppError::BadRequest("Invalid assigned_user_id".into()))?;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM users u JOIN organization_memberships om ON om.user_id = u.id \
+         WHERE u.id = $1 AND om.organization_id = $2 AND u.is_active = TRUE)",
+    )
+    .bind(user_id)
+    .bind(organization_id)
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::Db)?;
+    if exists {
+        Ok(Some(user_id))
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+
 fn row_to_json(row: &sqlx::postgres::PgRow) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     for col in row.columns().iter() {
@@ -405,10 +431,12 @@ pub async fn create_appeal(
         row.and_then(|r| r.try_get::<Uuid, _>("id").ok())
     };
 
-    let assigned_to = body
-        .assigned_user_id
-        .filter(|s| !s.is_empty())
-        .or_else(|| queue_owner(&principal));
+    let assigned_to = resolve_assignee(
+        pool,
+        organization_id,
+        body.assigned_user_id.or_else(|| queue_owner(&principal)),
+    )
+    .await?;
 
     let row = sqlx::query(
         "INSERT INTO appeals_queue \
@@ -419,7 +447,7 @@ pub async fn create_appeal(
     .bind(claim_id)
     .bind(analysis_id)
     .bind(&body.resolution_type)
-    .bind(assigned_to.as_deref())
+    .bind(assigned_to)
     .bind(body.notes.as_deref())
     .fetch_one(pool)
     .await
@@ -715,10 +743,12 @@ pub async fn bulk_queue(
     }
 
     let pool = &state.pool;
-    let assigned_to = body
-        .assigned_user_id
-        .filter(|s| !s.is_empty())
-        .or_else(|| queue_owner(&principal));
+    let assigned_to = resolve_assignee(
+        pool,
+        organization_id,
+        body.assigned_user_id.or_else(|| queue_owner(&principal)),
+    )
+    .await?;
 
     let denial_status = if APPEAL_RESOLUTION_TYPES.contains(&body.resolution_type.as_str()) {
         "in_appeal"
@@ -824,7 +854,7 @@ pub async fn bulk_queue(
         .bind(info.claim_id)
         .bind(info.analysis_id)
         .bind(&body.resolution_type)
-        .bind(assigned_to.as_deref())
+        .bind(assigned_to)
         .bind(body.notes.as_deref())
         .fetch_one(pool)
         .await;
@@ -917,13 +947,17 @@ pub async fn assign_appeal(
 
     if let Some(ref uid) = body.assigned_user_id {
         if !uid.is_empty() {
-            let assignee =
-                sqlx::query("SELECT id, username, role, is_active FROM users WHERE id = $1::uuid")
-                    .bind(uid)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(AppError::Db)?
-                    .ok_or(AppError::NotFound)?;
+            let assignee = sqlx::query(
+                "SELECT u.id, u.username, u.role, u.is_active FROM users u \
+                     JOIN organization_memberships om ON om.user_id = u.id \
+                     WHERE u.id = $1::uuid AND om.organization_id = $2",
+            )
+            .bind(uid)
+            .bind(organization_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(AppError::Db)?
+            .ok_or(AppError::NotFound)?;
 
             let is_active: bool = assignee.get("is_active");
             let username: String = assignee.get("username");

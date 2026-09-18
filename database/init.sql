@@ -208,6 +208,7 @@ CREATE INDEX idx_feedback_loop_paid_created ON feedback_loop(created_at DESC)
 
 CREATE TABLE institutional_playbooks (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL REFERENCES organizations(id),
     name VARCHAR(200) NOT NULL,
     description TEXT,
     triggers JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -221,6 +222,7 @@ CREATE TABLE institutional_playbooks (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX idx_institutional_playbooks_status ON institutional_playbooks(status);
+CREATE INDEX idx_institutional_playbooks_organization_status ON institutional_playbooks(organization_id, status, updated_at DESC);
 CREATE INDEX idx_institutional_playbooks_triggers ON institutional_playbooks USING GIN(triggers);
 ALTER TABLE ai_analyses ADD CONSTRAINT ai_analyses_playbook_id_fkey
     FOREIGN KEY (playbook_id) REFERENCES institutional_playbooks(id) ON DELETE SET NULL;
