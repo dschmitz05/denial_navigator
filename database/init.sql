@@ -62,6 +62,10 @@ CREATE TABLE claims (
     correlation_status VARCHAR(20) NOT NULL DEFAULT 'unmatched'
         CHECK (correlation_status IN ('unmatched', 'matched', 'ambiguous')),
     correlation_confidence DECIMAL(3, 2),
+    -- A payer that pays after this one (FB-06): PR balances go there first.
+    next_payer_name VARCHAR(255),
+    next_payer_source VARCHAR(30)
+        CHECK (next_payer_source IN ('837_other_subscriber', '835_crossover')),
     -- Set when the payer reverses the claim (835 CLP02 22).
     reversed_at TIMESTAMPTZ,
     parsed_at TIMESTAMPTZ,
@@ -188,7 +192,8 @@ CREATE TABLE appeals_queue (
     assigned_user_id UUID,
     resolution_type VARCHAR(100),
     -- 'appeal_letter'  -> Appeals tab; everything below -> Worklist tab.
-    -- 'corrected_claim', 'clinical_docs', 'payer_contact', 'bill_patient', 'write_off'
+    -- 'corrected_claim', 'clinical_docs', 'payer_contact', 'bill_patient',
+    -- 'bill_secondary', 'write_off'
     -- 'bill_patient' and 'write_off' are NOT interchangeable: a PR balance is
     -- billed to the patient and collected; a CO write-off is absorbed.
     outcome_status VARCHAR(50)

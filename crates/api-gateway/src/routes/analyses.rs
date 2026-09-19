@@ -118,11 +118,25 @@ struct DeterministicRecommendationProvider<'a> {
     cagc: &'a str,
     carc: &'a str,
     description: &'a str,
+    /// A payer that pays after this claim's payer, if the claim names one.
+    next_payer: Option<&'a str>,
 }
 
 impl RecommendationProvider for DeterministicRecommendationProvider<'_> {
     async fn recommend(&self) -> Result<serde_json::Value, AppError> {
-        let (category, action, step) = if self.cagc == "PR" {
+        let secondary_step;
+        let (category, action, step) = if let (true, Some(payer)) =
+            (self.cagc == "PR", self.next_payer)
+        {
+            secondary_step = format!(
+                "Send the balance to {payer} with this remittance before billing the patient; bill the patient only for what it leaves."
+            );
+            (
+                "patient_responsibility",
+                "bill_secondary",
+                secondary_step.as_str(),
+            )
+        } else if self.cagc == "PR" {
             (
             "patient_responsibility",
             "bill_patient",
@@ -158,7 +172,7 @@ const ANALYSIS_COLUMNS: &str =
     aa.prompt_tokens, aa.completion_tokens, aa.total_tokens, aa.system_prompt_template, \
     aa.raw_prompt, aa.raw_response, aa.explanation, aa.denial_category, aa.root_cause_summary, \
     aa.required_action, aa.action_plan, aa.steps, aa.citations, aa.needs_appeal, aa.draft_appeal_letter, \
-    aa.confidence_score::float8 AS confidence_score, aa.created_at, aa.updated_at";
+    aa.confidence_score::float8 AS confidence_score, aa.fallback_reason, aa.created_at, aa.updated_at";
 
 /// Keep only unique IDs the model cited from the retrieved-evidence allowlist.
 /// The subsequent database query scopes those IDs to the analyzed claim's
@@ -433,7 +447,7 @@ async fn generate_analysis_for_request(
 
     let denial = sqlx::query(
         "SELECT d.cagc, d.cpt_code, d.carc_code, d.rarc_code, d.claim_id, \
-                c.claim_number, c.patient_name, c.payer_name, c.icd_10_codes, \
+                c.claim_number, c.patient_name, c.payer_name, c.icd_10_codes, c.next_payer_name, \
                 cc.description AS carc_description, \
                 rc.description AS rarc_description \
          FROM denials d \
@@ -460,6 +474,7 @@ async fn generate_analysis_for_request(
     let rarc_code: Option<String> = denial.try_get("rarc_code").ok().flatten();
     let carc_description: Option<String> = denial.try_get("carc_description").ok().flatten();
     let rarc_description: Option<String> = denial.try_get("rarc_description").ok().flatten();
+    let next_payer_name: Option<String> = denial.try_get("next_payer_name").ok().flatten();
     let icd_codes: Vec<String> = denial
         .try_get::<Option<Vec<String>>, _>("icd_10_codes")
         .ok()
@@ -531,6 +546,7 @@ async fn generate_analysis_for_request(
         .build_prompt(&serde_json::json!({
             "claim_id": claim_number,
             "payer_name": payer_name,
+            "next_payer_name": next_payer_name,
             "cpt_code": cpt,
             "icd10_code": icd,
             "cagc": cagc.as_deref().unwrap_or(""),
@@ -574,6 +590,7 @@ async fn generate_analysis_for_request(
                 description: carc_description
                     .as_deref()
                     .unwrap_or("the payer's adjustment reason"),
+                next_payer: next_payer_name.as_deref(),
             }
             .recommend()
             .await?;
@@ -735,6 +752,7 @@ mod tests {
             cagc: "PR",
             carc: "1",
             description: "Deductible amount",
+            next_payer: None,
         }
         .recommend()
         .await
@@ -742,6 +760,25 @@ mod tests {
 
         assert_eq!(recommendation["required_action"], "bill_patient");
         assert_eq!(recommendation["provider"], "deterministic_rules");
+    }
+
+    #[tokio::test]
+    async fn a_patient_balance_goes_to_the_next_payer_first() {
+        let recommendation = DeterministicRecommendationProvider {
+            cagc: "PR",
+            carc: "2",
+            description: "Coinsurance amount",
+            next_payer: Some("SYNTHETIC SECONDARY PLAN"),
+        }
+        .recommend()
+        .await
+        .unwrap();
+
+        assert_eq!(recommendation["required_action"], "bill_secondary");
+        assert!(recommendation["steps"][0]["action"]
+            .as_str()
+            .unwrap()
+            .contains("SYNTHETIC SECONDARY PLAN"));
     }
 }
 

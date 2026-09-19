@@ -342,6 +342,16 @@ unset, a known placeholder, or (for Fernet) not an exact 32-byte key.
   `resolution_source = 'remittance'`, the recovered amount, an audit entry, and
   its open worklist items closed. Recovery analytics count these as recovered.
   `scripts/test_reprocessing.sh` exercises the whole sequence.
+- **A patient balance goes to the next payer first.** The 837 parser records
+  the claim's own payer order (SBR01) and, from an other-subscriber loop (2320
+  SBR / 2330B NM1*PR), a payer that pays later; the 835 parser records a
+  crossover carrier (NM1*TT). Ingestion stores it as `claims.next_payer_name`
+  and `next_payer_source`. A PR adjustment on such a claim is recommended as
+  `bill_secondary`, by the deterministic fallback, by the recommendation
+  consistency check (`denial_engine::recommended_resolution`) and by the model,
+  whose prompt now names the other coverage. Parsing that loop no longer
+  overwrites the next claim's payer name or filing indicator.
+  `scripts/test_secondary_coverage.sh` covers both sources.
 - **Bulk queueing resolves the whole batch in one query** instead of three per
   denial, and reports partial success rather than failing the batch.
 - **The connection pool** is created once at startup with a liveness check;

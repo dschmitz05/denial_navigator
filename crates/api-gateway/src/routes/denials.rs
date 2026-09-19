@@ -689,6 +689,7 @@ pub async fn get_denial(
           aa.explanation, aa.action_plan, aa.steps, aa.citations, aa.draft_appeal_letter, \
          aa.denial_category, aa.required_action, aa.needs_appeal, \
          aa.confidence_score, aa.fallback_reason, aa.provider_name AS analysis_provider, \
+         c.next_payer_name, c.next_payer_source, \
          aq.id AS appeal_id, aq.outcome_status AS appeal_status, \
          aq.resolution_type AS appeal_resolution_type \
          FROM denials d \
@@ -718,10 +719,12 @@ pub async fn get_denial(
     let required_action: Option<String> = row.try_get("required_action").unwrap_or(None);
     let denial_category: Option<String> = row.try_get("denial_category").unwrap_or(None);
 
+    let next_payer_name: Option<String> = row.try_get("next_payer_name").unwrap_or(None);
     let recommendation = recommended_resolution(
         cagc.as_deref(),
         required_action.as_deref(),
         denial_category.as_deref(),
+        next_payer_name.as_deref(),
     );
     denial["recommended_resolution"] = serde_json::to_value(recommendation.resolution).unwrap();
     denial["recommendation_note"] = serde_json::to_value(recommendation.note).unwrap();

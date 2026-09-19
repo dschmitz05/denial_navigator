@@ -301,6 +301,9 @@ struct IngestSection {
 
 #[derive(Deserialize)]
 struct PromptRequest {
+    /// A payer that pays after this one, when the claim names one.
+    #[serde(default)]
+    next_payer_name: Option<String>,
     claim_id: String,
     payer_name: String,
     cpt_code: String,
@@ -564,6 +567,7 @@ async fn build_prompt(
         rarc_code: req.rarc_code,
         rarc_definition: req.rarc_definition,
         retrieved_policies: req.retrieved_policies,
+        next_payer_name: req.next_payer_name,
         phi_disclosure_level: req
             .phi_disclosure_level
             .as_deref()

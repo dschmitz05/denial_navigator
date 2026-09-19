@@ -273,6 +273,8 @@ fn clean_claim(claim: &serde_json::Value, seen_numbers: &mut HashSet<String>) ->
         "service_from": service_from.map(|d| d.to_string()).unwrap_or_default(),
         "service_to": service_to.map(|d| d.to_string()).unwrap_or_default(),
         "diagnosis_codes": diagnosis_codes,
+        "next_payer_name": claim.get("next_payer_name").cloned(),
+        "next_payer_source": claim.get("next_payer_source").cloned(),
     })
 }
 
@@ -631,6 +633,35 @@ async fn upsert_claim(
     Ok(())
 }
 
+/// Records a payer that pays after this claim's payer, when the file names
+/// one; a later file without that information leaves it in place.
+async fn record_next_payer(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    claim: &serde_json::Value,
+) -> Result<(), AppError> {
+    let name = claim
+        .get("next_payer_name")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let (Some(name), Some(number)) = (name, claim.get("claim_id").and_then(|v| v.as_str())) else {
+        return Ok(());
+    };
+    let source = claim.get("next_payer_source").and_then(|v| v.as_str());
+    sqlx::query(
+        "UPDATE claims SET next_payer_name = $3, next_payer_source = $4, updated_at = NOW() \
+         WHERE organization_id = $1 AND claim_number = $2",
+    )
+    .bind(organization_id)
+    .bind(number)
+    .bind(name)
+    .bind(source)
+    .execute(&mut **tx)
+    .await
+    .map_err(AppError::Db)?;
+    Ok(())
+}
+
 /// What storing one parsed file changed.
 struct Stored {
     claims: usize,
@@ -663,6 +694,7 @@ async fn store_remittance(
 
     for claim_data in &cleaned_claims {
         upsert_claim(tx, organization_id, transaction_type, claim_data).await?;
+        record_next_payer(tx, organization_id, claim_data).await?;
     }
 
     let mut denials_written: i64 = 0;

@@ -14,7 +14,9 @@ use axum::{Json, Router};
 use chrono::{DateTime, NaiveDate, Utc};
 use denial_auth::rbac::{Principal, PrincipalKind};
 use denial_common::error::AppError;
-use denial_domain::{ALL_RESOLUTION_TYPES, APPEAL_RESOLUTION_TYPES, TERMINAL_WORK_OUTCOMES};
+use denial_domain::{
+    ALL_RESOLUTION_TYPES, APPEAL_RESOLUTION_TYPES, TERMINAL_DENIAL_STATUSES, TERMINAL_WORK_OUTCOMES,
+};
 use serde::Deserialize;
 use sqlx::{Column, Row};
 use uuid::Uuid;
@@ -195,10 +197,6 @@ fn parse_json_field(val: &mut serde_json::Value) {
     }
 }
 
-/// Denial statuses that leave nothing open on the claim; matches the claims
-/// list's open-denial count.
-const CLOSED_DENIAL_STATUSES: &[&str] = &["appealed", "overruled", "resolved", "written_off"];
-
 pub(crate) async fn refresh_claim_status(
     pool: &sqlx::PgPool,
     claim_id: &Uuid,
@@ -215,7 +213,8 @@ pub(crate) async fn refresh_claim_status(
          WHERE c.id = $1 AND s.total > 0 RETURNING c.status",
     )
     .bind(claim_id)
-    .bind(CLOSED_DENIAL_STATUSES)
+    // Denial statuses, not worklist outcomes: a written-off denial is closed.
+    .bind(TERMINAL_DENIAL_STATUSES)
     .fetch_optional(pool)
     .await
     .map_err(AppError::Db)?;

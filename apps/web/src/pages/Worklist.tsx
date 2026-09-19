@@ -55,6 +55,14 @@ const WORK_TYPES: Record<string, WorkType> = {
     submitLabel: '📤 Mark statement sent',
     skipSubmit: false,
   },
+  bill_secondary: {
+    label: 'Bill secondary payer',
+    icon: '🏥',
+    blurb: 'The claim has other coverage that pays after this payer. Send the patient balance '
+         + 'there with this remittance (or confirm the crossover arrived) before billing the patient.',
+    submitLabel: '📤 Mark sent to secondary payer',
+    skipSubmit: false,
+  },
   write_off: {
     label: 'Write-off',
     icon: '🗑️',

@@ -19,6 +19,7 @@ const ACTIONS: &[&str] = &[
     "clinical_documentation",
     "appeal",
     "bill_patient",
+    "bill_secondary",
     "no_action_required",
 ];
 
