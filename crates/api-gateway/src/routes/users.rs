@@ -115,6 +115,27 @@ async fn require_exclusive_member(
     }
 }
 
+async fn require_exclusive_member_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    user_id: Uuid,
+) -> Result<(), AppError> {
+    let memberships = sqlx::query(
+        "SELECT organization_id FROM organization_memberships WHERE user_id = $1 FOR UPDATE",
+    )
+    .bind(user_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(AppError::Db)?;
+    let allowed = memberships.len() == 1
+        && memberships[0].try_get::<Uuid, _>("organization_id").ok() == Some(organization_id);
+    if allowed {
+        Ok(())
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+
 fn row_to_json(row: &sqlx::postgres::PgRow) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     for col in row.columns().iter() {
@@ -172,8 +193,8 @@ fn row_to_json(row: &sqlx::postgres::PgRow) -> serde_json::Value {
 /// Unassigning is better than refusing to deactivate the user (offboarding
 /// should not be blocked by a queue) and better than deleting the items,
 /// which are real outstanding money.
-async fn release_queue_items(
-    pool: &sqlx::PgPool,
+async fn release_queue_items_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     organization_id: Uuid,
     user_id: Uuid,
 ) -> Result<u64, AppError> {
@@ -186,7 +207,7 @@ async fn release_queue_items(
     let rows = sqlx::query(&sql)
         .bind(user_id)
         .bind(organization_id)
-        .fetch_all(pool)
+        .fetch_all(&mut **tx)
         .await
         .map_err(AppError::Db)?;
     Ok(rows.len() as u64)
@@ -216,6 +237,31 @@ async fn audit_insert(
     if let Err(e) = result {
         tracing::warn!("audit write failed for {action}: {e}");
     }
+}
+
+async fn audit_insert_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    principal: &Principal,
+    action: &str,
+    resource_type: &str,
+    resource_id: &Uuid,
+    details: &serde_json::Value,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "INSERT INTO audit_log (organization_id, user_id, action, resource_type, resource_id, details, ip_address) \
+         VALUES ($1::uuid, $2::uuid, $3, $4, $5::uuid, $6::jsonb, $7::inet)",
+    )
+    .bind(principal.organization_id.as_deref())
+    .bind(principal.user_id.as_deref())
+    .bind(action)
+    .bind(resource_type)
+    .bind(resource_id)
+    .bind(details)
+    .bind(principal.ip.as_deref())
+    .execute(&mut **tx)
+    .await
+    .map_err(AppError::Db)?;
+    Ok(())
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────
@@ -574,9 +620,7 @@ pub async fn delete_user(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_roles(&principal, &["system_admin", "security_admin"])?;
     let organization_id = organization_id(&principal)?;
-    require_exclusive_member(&state.pool, organization_id, user_id).await?;
-
-    let user = sqlx::query(
+    let _user = sqlx::query(
         "SELECT u.id, u.username, om.role FROM users u \
          JOIN organization_memberships om ON om.user_id = u.id \
          WHERE u.id = $1 AND om.organization_id = $2",
@@ -587,13 +631,38 @@ pub async fn delete_user(
     .await
     .map_err(AppError::Db)?
     .ok_or(AppError::NotFound)?;
-    let username: String = user.try_get("username").map_err(AppError::Db)?;
-    let role: String = user.try_get("role").map_err(AppError::Db)?;
+    let mut username: String;
+    let mut role: String;
 
     // Prevent self-deletion
     if is_self(&principal, &user_id) {
         return Err(AppError::BadRequest("Cannot delete yourself".into()));
     }
+
+    let mut tx = state.pool.begin().await.map_err(AppError::Db)?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(organization_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Db)?;
+    sqlx::query("LOCK TABLE organization_memberships IN SHARE ROW EXCLUSIVE MODE")
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Db)?;
+    require_exclusive_member_tx(&mut tx, organization_id, user_id).await?;
+    let locked_user = sqlx::query(
+        "SELECT u.username, om.role FROM users u \
+         JOIN organization_memberships om ON om.user_id = u.id \
+         WHERE u.id = $1 AND om.organization_id = $2 FOR UPDATE",
+    )
+    .bind(user_id)
+    .bind(organization_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(AppError::Db)?
+    .ok_or(AppError::NotFound)?;
+    username = locked_user.try_get("username").map_err(AppError::Db)?;
+    role = locked_user.try_get("role").map_err(AppError::Db)?;
 
     // Prevent deleting the last admin
     let admin_count: (i64,) = sqlx::query_as(
@@ -602,7 +671,7 @@ pub async fn delete_user(
     )
     .bind(organization_id)
     .bind(user_id)
-    .fetch_one(&state.pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(AppError::Db)?;
     if role == "system_admin" && admin_count.0 == 0 {
@@ -620,7 +689,7 @@ pub async fn delete_user(
 
         // Their live work goes back to the pool; closed items lose the record
         // of who did them, because that record was the user row.
-        let released = release_queue_items(&state.pool, organization_id, user_id).await?;
+        let released = release_queue_items_tx(&mut tx, organization_id, user_id).await?;
         let closed_items: (i64,) = sqlx::query_as(&format!(
             "SELECT COUNT(*) FROM appeals_queue aq JOIN denials d ON d.id = aq.denial_id \
              JOIN claims c ON c.id = d.claim_id \
@@ -628,7 +697,7 @@ pub async fn delete_user(
         ))
         .bind(user_id)
         .bind(organization_id)
-        .fetch_one(&state.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(AppError::Db)?;
         let audit_entries: (i64,) = sqlx::query_as(
@@ -636,14 +705,14 @@ pub async fn delete_user(
         )
         .bind(user_id)
         .bind(organization_id)
-        .fetch_one(&state.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(AppError::Db)?;
 
         // Written BEFORE the row disappears, so the log records who was
         // erased, by whom, and what it cost.
-        audit_insert(
-            &state.pool,
+        audit_insert_tx(
+            &mut tx,
             &principal,
             "purge_user",
             "user",
@@ -656,9 +725,16 @@ pub async fn delete_user(
                 "audit_entries_orphaned": audit_entries.0,
             }),
         )
-        .await;
-
-        let mut tx = state.pool.begin().await.map_err(AppError::Db)?;
+        .await?;
+        sqlx::query(
+            "UPDATE audit_log SET user_id = NULL \
+             WHERE organization_id = $1 AND user_id = $2",
+        )
+        .bind(organization_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Db)?;
         // No foreign keys exist, so these would otherwise be left pointing at
         // an id that resolves to nobody.
         sqlx::query(&format!(
@@ -672,11 +748,31 @@ pub async fn delete_user(
         .execute(&mut *tx)
         .await
         .map_err(AppError::Db)?;
-        sqlx::query("UPDATE feedback_loop SET user_id = NULL WHERE user_id = $1")
+        sqlx::query(
+            "UPDATE feedback_loop fl SET user_id = NULL \
+             FROM ai_analyses aa JOIN claims c ON c.id = aa.claim_id \
+             WHERE fl.ai_analysis_id = aa.id AND fl.user_id = $1 \
+               AND c.organization_id = $2",
+        )
+        .bind(user_id)
+        .bind(organization_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Db)?;
+        sqlx::query("DELETE FROM notifications WHERE organization_id = $1 AND user_id = $2")
+            .bind(organization_id)
             .bind(user_id)
             .execute(&mut *tx)
             .await
             .map_err(AppError::Db)?;
+        sqlx::query(
+            "DELETE FROM organization_memberships WHERE organization_id = $1 AND user_id = $2",
+        )
+        .bind(organization_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Db)?;
         sqlx::query("DELETE FROM users WHERE id = $1")
             .bind(user_id)
             .execute(&mut *tx)
@@ -700,22 +796,23 @@ pub async fn delete_user(
     // Soft delete by deactivating
     sqlx::query("UPDATE users SET is_active = FALSE, updated_at = NOW() WHERE id = $1")
         .bind(user_id)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await
         .map_err(AppError::Db)?;
 
     // Their live work goes back in the pool, or it is orphaned.
-    let released = release_queue_items(&state.pool, organization_id, user_id).await?;
+    let released = release_queue_items_tx(&mut tx, organization_id, user_id).await?;
 
-    audit_insert(
-        &state.pool,
+    audit_insert_tx(
+        &mut tx,
         &principal,
         "deactivate_user",
         "user",
         &user_id,
         &serde_json::json!({ "username": username, "queue_items_released": released }),
     )
-    .await;
+    .await?;
+    tx.commit().await.map_err(AppError::Db)?;
 
     Ok(Json(serde_json::json!({
         "status": "deactivated",

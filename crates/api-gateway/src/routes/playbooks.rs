@@ -103,6 +103,7 @@ pub async fn create(
         &serde_json::json!({"username":principal.username,"name":input.name}),
         principal.ip.as_deref(),
         None,
+        principal.organization_id.as_deref(),
     )
     .await;
     Ok((StatusCode::CREATED, Json(out)))
@@ -127,6 +128,7 @@ pub async fn update(
         &serde_json::json!({"username":principal.username}),
         principal.ip.as_deref(),
         None,
+        principal.organization_id.as_deref(),
     )
     .await;
     Ok(Json(row_to_json(&row)))
@@ -152,6 +154,7 @@ pub async fn approve(
         &serde_json::json!({"username":principal.username}),
         principal.ip.as_deref(),
         None,
+        principal.organization_id.as_deref(),
     )
     .await;
     Ok(Json(row_to_json(&row)))
@@ -173,6 +176,7 @@ pub async fn archive(
         &serde_json::json!({"username":principal.username}),
         principal.ip.as_deref(),
         None,
+        principal.organization_id.as_deref(),
     )
     .await;
     Ok(Json(row_to_json(&row)))

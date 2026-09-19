@@ -126,6 +126,7 @@ pub async fn login(
             }),
             ip,
             user_agent,
+            None,
         )
         .await;
         return Err(AppError::RateLimited {
@@ -162,6 +163,7 @@ pub async fn login(
                 }),
                 ip,
                 user_agent,
+                None,
             )
             .await;
             return Err(AppError::Unauthorized);
@@ -187,6 +189,7 @@ pub async fn login(
             }),
             ip,
             user_agent,
+            None,
         )
         .await;
         return Err(AppError::Unauthorized);
@@ -222,6 +225,7 @@ pub async fn login(
                 .and_then(|row| row.try_get::<Uuid, _>("id").ok())
         })
         .ok_or(AppError::Unauthorized)?;
+    let organization_context = organization_id.to_string();
     let username: String = user
         .try_get("username")
         .map_err(|e| AppError::Internal(e.to_string()))?;
@@ -276,6 +280,7 @@ pub async fn login(
             }),
             ip,
             user_agent,
+            Some(organization_context.as_str()),
         )
         .await;
 
@@ -310,6 +315,7 @@ pub async fn login(
         }),
         ip,
         user_agent,
+        Some(organization_context.as_str()),
     )
     .await;
 
@@ -709,6 +715,7 @@ async fn complete_totp(
                 }),
                 None,
                 None,
+                principal.organization_id.as_deref(),
             )
             .await;
             return Err(AppError::Unauthorized);
@@ -743,6 +750,7 @@ async fn complete_totp(
         }),
         None,
         None,
+        principal.organization_id.as_deref(),
     )
     .await;
 

@@ -935,6 +935,7 @@ pub async fn update_denial(
             &serde_json::json!({ "from": from, "to": to }),
             None,
             None,
+            principal.organization_id.as_deref(),
         )
         .await;
     }

@@ -369,6 +369,7 @@ pub async fn generate_digests(
         }),
         None,
         None,
+        principal.organization_id.as_deref(),
     )
     .await;
 

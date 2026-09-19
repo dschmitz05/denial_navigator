@@ -202,6 +202,7 @@ CREATE TABLE feedback_loop (
 );
 
 CREATE INDEX idx_feedback_loop_ai_analysis_id ON feedback_loop(ai_analysis_id);
+CREATE INDEX idx_feedback_loop_user_id ON feedback_loop(user_id);
 CREATE INDEX idx_feedback_loop_accepted ON feedback_loop(accepted);
 CREATE INDEX idx_feedback_loop_was_paid ON feedback_loop(was_paid_on_resubmit);
 CREATE INDEX idx_feedback_loop_paid_created ON feedback_loop(created_at DESC)
@@ -216,8 +217,8 @@ CREATE TABLE institutional_playbooks (
     recommendation JSONB NOT NULL DEFAULT '{}'::jsonb,
     status VARCHAR(20) NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'approved', 'archived')),
     version INTEGER NOT NULL DEFAULT 1,
-    created_by UUID REFERENCES users(id) ON DELETE SET NULL,
-    approved_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    created_by UUID,
+    approved_by UUID,
     approved_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -368,6 +369,15 @@ CREATE TABLE users (
     totp_confirmed_at TIMESTAMPTZ,
     totp_last_used_step BIGINT
 );
+
+ALTER TABLE feedback_loop
+    ADD CONSTRAINT feedback_loop_user_id_fkey
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE institutional_playbooks
+    ADD CONSTRAINT institutional_playbooks_created_by_fkey
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+    ADD CONSTRAINT institutional_playbooks_approved_by_fkey
+    FOREIGN KEY (approved_by) REFERENCES users(id) ON DELETE SET NULL;
 
 CREATE INDEX idx_users_role ON users(role);
 

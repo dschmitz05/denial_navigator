@@ -426,7 +426,7 @@ pub async fn export_claims_csv(
     let bytes = writer
         .into_inner()
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    denial_audit::record(&state.pool, "export_claims_csv", "claim_export", None, principal.user_id.as_deref(), &serde_json::json!({"username": principal.username, "rows": bytes.iter().filter(|&&b| b == b'\n').count().saturating_sub(1)}), principal.ip.as_deref(), None).await;
+    denial_audit::record(&state.pool, "export_claims_csv", "claim_export", None, principal.user_id.as_deref(), &serde_json::json!({"username": principal.username, "rows": bytes.iter().filter(|&&b| b == b'\n').count().saturating_sub(1)}), principal.ip.as_deref(), None, principal.organization_id.as_deref()).await;
     Ok((
         [
             (header::CONTENT_TYPE, "text/csv; charset=utf-8"),

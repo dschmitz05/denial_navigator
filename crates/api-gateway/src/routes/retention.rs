@@ -158,6 +158,7 @@ pub async fn prune_audit_log(
         }),
         principal.ip.as_deref(),
         None,
+        principal.organization_id.as_deref(),
     )
     .await;
 
@@ -295,6 +296,7 @@ pub async fn prune_ai_analyses(
         }),
         principal.ip.as_deref(),
         None,
+        principal.organization_id.as_deref(),
     )
     .await;
 

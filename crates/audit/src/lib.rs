@@ -131,12 +131,6 @@ const LABEL_COLUMNS: &[(&str, &[&str])] = &[
     ("knowledge_doc", &["document_title"]),
 ];
 
-/// The caller's active organization, used to scope every PHI-adjacent label
-/// lookup. A cross-tenant UUID probe must not surface another organization's
-/// record, so the label is only resolved within the caller's own org.
-const CALLER_ORG: &str = "(SELECT organization_id FROM organization_memberships \
-     WHERE user_id = $2::uuid ORDER BY created_at ASC LIMIT 1)";
-
 /// Label queries are scoped to the caller's organization (via `$2`) so a
 /// cross-tenant UUID probe resolves to no row rather than another tenant's
 /// record. `user` is the only unscoped label: a username is not PHI and user
@@ -164,7 +158,11 @@ fn label_query(resource_type: &str) -> Option<&'static str> {
              FROM ai_analyses aa JOIN claims c ON c.id = aa.claim_id \
              WHERE aa.id = $1::uuid AND c.organization_id = ",
         ),
-        "user" => Some("SELECT username AS target_username FROM users WHERE id = $1::uuid"),
+        "user" => Some(
+            "SELECT u.username AS target_username FROM users u \
+             JOIN organization_memberships om ON om.user_id = u.id \
+             WHERE u.id = $1::uuid AND om.organization_id = ",
+        ),
         "knowledge_doc" => Some(
             "SELECT title AS document_title FROM knowledge_documents \
              WHERE id = $1::uuid AND organization_id = ",
@@ -180,7 +178,8 @@ async fn label_for(
     pool: &PgPool,
     resource_type: &str,
     resource_id: Option<&str>,
-    user_id: Option<&str>,
+    _user_id: Option<&str>,
+    organization_id: Option<&str>,
 ) -> serde_json::Value {
     let Some(id) = resource_id else {
         return serde_json::json!({});
@@ -189,24 +188,16 @@ async fn label_for(
         return serde_json::json!({});
     };
 
-    // Only `user` is unscoped; every other label must be resolved within the
-    // caller's own organization. Without a caller we cannot scope it, so we
-    // refuse to label rather than risk surfacing another tenant's record.
-    let org_scoped = resource_type != "user";
-    if org_scoped && user_id.is_none() {
+    // Every label must be resolved within the caller's organization. Without
+    // one we refuse to label rather than risk surfacing another tenant's data.
+    if organization_id.is_none() {
         return serde_json::json!({});
     }
 
-    let query = if org_scoped {
-        format!("{base}{CALLER_ORG}")
-    } else {
-        base.to_string()
-    };
+    let query = format!("{base}$2::uuid");
 
     let mut q = sqlx::query(&query).bind(id);
-    if org_scoped {
-        q = q.bind(user_id);
-    }
+    q = q.bind(organization_id);
 
     let row = match q.fetch_optional(pool).await {
         Ok(Some(row)) => row,
@@ -252,17 +243,24 @@ pub async fn record(
     details: &serde_json::Value,
     ip_address: Option<&str>,
     user_agent: Option<&str>,
+    organization_id: Option<&str>,
 ) {
     let uid = user_id.and_then(|s| Uuid::parse_str(s).ok());
+    if uid.is_some() && organization_id.is_none() {
+        tracing::error!(
+            action,
+            "refusing to write an authenticated audit event without organization context"
+        );
+        return;
+    }
     let rid = resource_id.and_then(|s| Uuid::parse_str(s).ok());
 
     if let Err(e) = sqlx::query(
         "INSERT INTO audit_log \
          (organization_id, user_id, action, resource_type, resource_id, details, ip_address, user_agent) \
-         VALUES ((SELECT organization_id FROM organization_memberships \
-                  WHERE user_id = $1 ORDER BY created_at ASC LIMIT 1), \
-                 $1, $2, $3, $4, $5::jsonb, $6::inet, $7)",
+         VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7::inet, $8)",
     )
+    .bind(organization_id)
     .bind(uid)
     .bind(action)
     .bind(resource_type)
@@ -373,6 +371,7 @@ pub async fn audit(State(state): State<AuditState>, req: Request, next: Next) ->
                 &resource_type,
                 resource_id.as_deref(),
                 user_id.as_deref(),
+                principal.organization_id.as_deref(),
             )
             .await
             {
@@ -405,6 +404,7 @@ pub async fn audit(State(state): State<AuditState>, req: Request, next: Next) ->
             &serde_json::Value::Object(details),
             ip.as_deref(),
             user_agent.as_deref(),
+            principal.organization_id.as_deref(),
         )
         .await;
 

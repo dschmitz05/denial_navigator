@@ -639,6 +639,7 @@ async fn generate_analysis_for_request(
             }),
             principal.ip.as_deref(),
             None,
+            principal.organization_id.as_deref(),
         )
         .await;
     }
