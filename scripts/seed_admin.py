@@ -160,8 +160,8 @@ async def seed():
                 DEFAULT_PASSWORD.encode("utf-8"), bcrypt.gensalt()
             ).decode("utf-8")
             await conn.execute(
-                """INSERT INTO users (username, email, password_hash, full_name, role)
-                   VALUES ($1, $2, $3, $4, $5)""",
+                """INSERT INTO users (username, email, password_hash, full_name, role, must_change_password)
+                   VALUES ($1, $2, $3, $4, $5, TRUE)""",
                 DEFAULT_USERNAME, DEFAULT_EMAIL, hashed, "System Administrator", DEFAULT_ROLE,
             )
             print(f"✓ Created default admin user (username: {DEFAULT_USERNAME}, password: {DEFAULT_PASSWORD})")

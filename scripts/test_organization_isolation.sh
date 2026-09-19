@@ -52,9 +52,9 @@ OTHER_CLAIM_ID="$(psql_exec "INSERT INTO claims (organization_id, claim_number, 
 OTHER_TOKEN="$(curl -fsS -H 'Content-Type: application/json' \
   --data "{\"username\":\"${OTHER_USER}\",\"password\":\"${TEST_PASSWORD}\"}" \
   "${API_BASE_URL}/api/v1/auth/login" | jq -er '.access_token')"
-ADMIN_TOKEN="$(curl -fsS -H 'Content-Type: application/json' \
-  --data '{"username":"admin","password":"admin123"}' \
-  "${API_BASE_URL}/api/v1/auth/login" | jq -er '.access_token')"
+ADMIN_TOKEN="$(jq -n --arg u "${ADMIN_USER:-admin}" --arg p "${ADMIN_PASSWORD:-admin123}" '{username: $u, password: $p}' \
+  | curl -fsS -H 'Content-Type: application/json' --data @- "${API_BASE_URL}/api/v1/auth/login" | jq -er '.access_token')" \
+  || { echo "admin login failed; if the account must change its password first, sign in once in the UI and rerun with ADMIN_PASSWORD set" >&2; exit 1; }
 
 curl -fsS -H "Authorization: Bearer ${OTHER_TOKEN}" "${API_BASE_URL}/api/v1/claims?limit=500" \
   | jq -e --arg id "$OTHER_CLAIM_ID" 'length == 1 and .[0].id == $id' >/dev/null

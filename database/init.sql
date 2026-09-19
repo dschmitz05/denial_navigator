@@ -377,6 +377,9 @@ CREATE TABLE users (
         CHECK (role IN ('system_admin', 'security_admin', 'revenue_cycle_manager',
                         'billing_specialist', 'coding_specialist', 'auditor', 'read_only')),
     is_active BOOLEAN DEFAULT TRUE,
+    -- Set when someone else chose the password (seeded default, admin
+    -- registration or reset); cleared when the user sets their own.
+    must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     last_login TIMESTAMPTZ,

@@ -30,8 +30,9 @@ cleanup
 fail() { echo "FAIL: $*" >&2; exit 1; }
 expect() { [[ "$2" == "$3" ]] || fail "$1: expected '$3', got '$2'"; }
 
-TOKEN="$(curl -fsS -H 'Content-Type: application/json' \
-  --data '{"username":"admin","password":"admin123"}' "${API}/auth/login" | jq -er '.access_token')"
+TOKEN="$(jq -n --arg u "${ADMIN_USER:-admin}" --arg p "${ADMIN_PASSWORD:-admin123}" '{username: $u, password: $p}' \
+  | curl -fsS -H 'Content-Type: application/json' --data @- "${API}/auth/login" | jq -er '.access_token')" \
+  || fail "admin login failed; if the account must change its password first, sign in once in the UI and rerun with ADMIN_PASSWORD set"
 
 ingest() {
   curl -fsS -X POST -H "Authorization: Bearer ${TOKEN}" \

@@ -275,7 +275,7 @@ export default function Users() {
                 </div>
                 <div>
                   <label style={{ fontSize: '0.8rem', fontWeight: 600, display: 'block', marginBottom: 4 }}>Password *</label>
-                  <input className="form-input" type="password" required value={form.password} onChange={e => setForm({...form, password: e.target.value})} style={{ width: '100%' }} placeholder="Min 8 characters" />
+                  <input className="form-input" type="password" required value={form.password} onChange={e => setForm({...form, password: e.target.value})} style={{ width: '100%' }} placeholder="Min 12 characters; they must change it at first sign-in" minLength={12} />
                 </div>
                 <div>
                   <label style={{ fontSize: '0.8rem', fontWeight: 600, display: 'block', marginBottom: 4 }}>Full Name</label>

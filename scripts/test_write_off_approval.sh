@@ -39,9 +39,19 @@ trap cleanup EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 expect() { [[ "$2" == "$3" ]] || fail "$1: expected '$3', got '$2'"; }
 
+# Signs in; an account created by an administrator must set its own password
+# first, so that step is completed with a derived one.
 login() {
-  curl -fsS -H 'Content-Type: application/json' \
-    --data "{\"username\":\"$1\",\"password\":\"$2\"}" "${API}/auth/login" | jq -er '.access_token'
+  local response change
+  response="$(jq -n --arg u "$1" --arg p "$2" '{username: $u, password: $p}' \
+    | curl -fsS -H 'Content-Type: application/json' --data @- "${API}/auth/login")"
+  change="$(jq -r '.password_change_token // empty' <<<"$response")"
+  if [[ -n "$change" ]]; then
+    response="$(jq -n --arg c "$2" --arg n "$2-renewed" '{current_password: $c, new_password: $n}' \
+      | curl -fsS -H "Authorization: Bearer ${change}" -H 'Content-Type: application/json' \
+          --data @- "${API}/auth/change-password")"
+  fi
+  jq -er '.access_token' <<<"$response"
 }
 call() {  # call TOKEN METHOD PATH [BODY] -> prints "HTTP_CODE BODY"
   local out code
@@ -53,7 +63,7 @@ status_of() { cut -d' ' -f1 <<<"$1"; }
 body_of() { cut -d' ' -f2- <<<"$1"; }
 denial_status() { psql_exec "SELECT status FROM denials WHERE id = '$1'"; }
 
-ADMIN="$(login admin admin123)"
+ADMIN="$(login "${ADMIN_USER:-admin}" "${ADMIN_PASSWORD:-admin123}")" || fail "admin login failed; if the account must change its password first, sign in once in the UI and rerun with ADMIN_PASSWORD set"
 STARTED_AT="$(psql_exec "SELECT NOW()")"
 ORIGINAL_THRESHOLD="$(curl -fsS -H "Authorization: Bearer ${ADMIN}" "${API}/settings/write-off-approval" | jq -r '.threshold')"
 

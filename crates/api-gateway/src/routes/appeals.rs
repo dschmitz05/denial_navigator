@@ -254,6 +254,11 @@ pub(crate) async fn record_audit(
     resource_id: Option<&str>,
     details: &serde_json::Value,
 ) {
+    // users.rs runs this exact statement with a Uuid resource id. Postgres
+    // prepared statements are cached per connection by SQL text, so binding a
+    // string here failed ("incorrect binary data format") whenever the other
+    // caller had prepared it first, and the audit entry was lost.
+    let resource_id: Option<Uuid> = resource_id.and_then(|id| Uuid::parse_str(id).ok());
     let result = sqlx::query(
         "INSERT INTO audit_log (organization_id, user_id, action, resource_type, resource_id, details, ip_address) \
          VALUES ($1::uuid, $2::uuid, $3, $4, $5::uuid, $6::jsonb, $7::inet)",

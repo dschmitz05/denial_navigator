@@ -259,6 +259,16 @@ is compared against the token's `iat`, and it is stored via
 `date_trunc('second', NOW())` because `iat` truncates to whole seconds — a
 sub-second timestamp revoked every token the instant it was issued.
 
+**Passwords someone else chose are replaced at first sign-in.**
+`users.must_change_password` is set for the seeded admin, for accounts an
+administrator registers, after an administrator reset, and (migration 037) for
+any account still on the documented default. Sign-in then returns only a
+10-minute token with scope `password_change`, which the middleware confines to
+`POST /auth/change-password` and `GET /auth/me`; TOTP, when required, comes
+first, so a leaked default password alone cannot set a new one. New passwords
+must be at least 12 characters, must not contain the username or be a common
+password (`crates/auth/src/password.rs`), and must differ from the current one.
+
 **Authorisation.** Roles are `system_admin`, `security_admin`,
 `revenue_cycle_manager`, `billing_specialist`, `coding_specialist`, `auditor`,
 and `read_only`, enforced by resource/path permission tables and, for

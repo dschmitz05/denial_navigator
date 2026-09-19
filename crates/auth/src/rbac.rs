@@ -101,6 +101,10 @@ const ADMIN_ONLY: &[&str] = &[SYSTEM_ADMIN, SECURITY_ADMIN];
 const AUDIT_ROLES: &[&str] = &[MANAGER, SYSTEM_ADMIN, SECURITY_ADMIN, AUDITOR];
 const NOBODY: &[&str] = &[];
 
+/// A token issued because the password must be changed (seeded default or
+/// admin-set) may only do that.
+pub const PASSWORD_CHANGE_PATHS: &[&str] = &["/api/v1/auth/change-password", "/api/v1/auth/me"];
+
 /// A token that has only cleared the password step may only touch these.
 const MFA_ONLY_PATHS: &[&str] = &[
     "/api/v1/auth/totp/enroll",
@@ -405,9 +409,9 @@ pub fn authorize(who: &Principal, method: &str, path: &str) -> Result<(), String
             _ => Err(format!("{} may not use {method} {path}", who.username)),
         };
     }
-    // A half-authenticated token is confined to MFA_ONLY_PATHS by the
-    // middleware; nothing further to decide.
-    if who.scope.as_deref() == Some("mfa") {
+    // A half-authenticated or password-change token is confined to its own
+    // paths by the middleware; nothing further to decide.
+    if matches!(who.scope.as_deref(), Some("mfa") | Some("password_change")) {
         return Ok(());
     }
 
@@ -591,6 +595,12 @@ pub async fn decide(
         return Decision::Unauthorized(
             "Two-factor authentication has not been completed".to_string(),
         );
+    }
+    if who.kind == PrincipalKind::User
+        && who.scope.as_deref() == Some("password_change")
+        && !PASSWORD_CHANGE_PATHS.contains(&ctx.path.as_str())
+    {
+        return Decision::Unauthorized("You must change your password first".to_string());
     }
 
     // Every human request must resolve to an active organization membership

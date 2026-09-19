@@ -8,6 +8,13 @@ check `GET /health/ready` and Settings → Service health. The reverse proxy
 serves HTTPS on port 3444; provide a real certificate with `TLS_MODE=provided`
 before production use.
 
+**First sign-in.** A new database seeds `admin` with `INIT_ADMIN_PASSWORD`
+(default `admin123`). That account, any account an administrator creates or
+resets, and any existing account still on `admin123` must choose its own
+password (12+ characters) before it can do anything else. The test scripts in
+`scripts/` sign in as `ADMIN_USER` / `ADMIN_PASSWORD` (default `admin` /
+`admin123`); set them once the admin password has been changed.
+
 The EDI parser runs as a non-root user and polls its mounted `dropzone` volume.
 Files are marked processed only after a successful parse/store cycle, making
 restarts idempotent. Parsed output retention is controlled by

@@ -26,12 +26,17 @@ type LoginResult =
   | { user: AuthUser }
   | { organizations: Array<{ id: string; name: string }> }
   | { mfa: 'totp_required' | 'enrollment_required'; mfaToken: string; username?: string }
+  | { passwordChangeToken: string }
+
+/** A sign-in step that ends either in a session or in a required password change. */
+type SignInStep = { user: AuthUser } | { passwordChangeToken: string }
 
 interface AuthContextValue {
   user: AuthUser | null
   loading: boolean
   login: (username: string, password: string, organizationId?: string) => Promise<LoginResult>
-  completeTotp: (mfaToken: string, code: string, options?: { enrolling?: boolean }) => Promise<AuthUser>
+  completeTotp: (mfaToken: string, code: string, options?: { enrolling?: boolean }) => Promise<SignInStep>
+  completePasswordChange: (token: string, currentPassword: string, newPassword: string) => Promise<void>
   startEnrollment: (mfaToken: string) => Promise<EnrollmentResponse>
   logout: () => void
   hasRole: (roles: readonly string[]) => boolean
@@ -116,6 +121,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         username: typeof data.username === 'string' ? data.username : undefined,
       }
     }
+    if (data.status === 'password_change_required' && typeof data.password_change_token === 'string') {
+      return { passwordChangeToken: data.password_change_token }
+    }
     if (data.status === 'organization_selection' && Array.isArray(data.organizations)) {
       return { organizations: data.organizations as Array<{ id: string; name: string }> }
     }
@@ -135,7 +143,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     })
     const data = await resp.json()
     if (!resp.ok) throw new Error(errorDetail(data, 'That code is not valid'))
-    return acceptSession(data as SessionResponse)
+    if (data.status === 'password_change_required' && typeof data.password_change_token === 'string') {
+      return { passwordChangeToken: data.password_change_token }
+    }
+    return { user: acceptSession(data as SessionResponse) }
+  }
+
+  // The account's password was set by someone else (the seeded default or an
+  // administrator); the restricted token only allows replacing it.
+  const completePasswordChange = async (token: string, currentPassword: string, newPassword: string) => {
+    const resp = await fetch(`${API_BASE}/auth/change-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    })
+    const data = await resp.json().catch(() => ({}))
+    if (!resp.ok) throw new Error(errorDetail(data, 'Could not change the password'))
+    if (typeof data.access_token !== 'string') throw new Error('The password-change response is missing its session')
+    await fetchUser(data.access_token)
   }
 
   const startEnrollment = async (mfaToken: string): Promise<EnrollmentResponse> => {
@@ -161,7 +186,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, completeTotp, startEnrollment, logout, hasRole, can }}>
+    <AuthContext.Provider value={{ user, loading, login, completeTotp, completePasswordChange, startEnrollment, logout, hasRole, can }}>
       {children}
     </AuthContext.Provider>
   )
