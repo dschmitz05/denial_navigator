@@ -113,6 +113,9 @@ curl -fsS -H "Authorization: Bearer ${OTHER_TOKEN}" "${API_BASE_URL}/api/v1/deni
   | jq -e --arg id "$DEV_RULE_ID" '[.[] | select(.id == $id)] | length == 0' >/dev/null
 STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE -H "Authorization: Bearer ${OTHER_TOKEN}" "${API_BASE_URL}/api/v1/denials/deadline-rules/${DEV_RULE_ID}")"
 [[ "$STATUS" == '404' ]]
+STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer ${OTHER_TOKEN}" -H 'Content-Type: application/json' \
+  --data '{"action":"status_inquiry"}' "${API_BASE_URL}/api/v1/claims/${DEV_CLAIM_ID}/followups")"
+[[ "$STATUS" == '404' ]]
 
 # Retention status is tenant scoped. A second-organization audit row cannot
 # change the Development admin's count.

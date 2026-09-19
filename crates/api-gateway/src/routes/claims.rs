@@ -449,5 +449,10 @@ pub fn router() -> Router<AppState> {
         .route("/export.csv", get(export_claims_csv))
         .route("/", get(list_claims).post(create_claim))
         .route("/dashboard/stats", get(dashboard_stats))
+        .route("/unanswered", get(crate::routes::unanswered::list))
+        .route(
+            "/{claim_id}/followups",
+            axum::routing::post(crate::routes::unanswered::record_followup),
+        )
         .route("/{claim_id}", get(get_claim).patch(update_claim))
 }

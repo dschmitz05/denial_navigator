@@ -1645,6 +1645,39 @@
         }
       }
     },
+    "/api/v1/claims/unanswered": {
+      "get": {
+        "summary": "Submitted claims with no remittance past the payer's response time",
+        "tags": [
+          "claims"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Claims submitted on an 837 with no 835 after the payer_response deadline rule (30 days if none), with days left before timely filing when a rule exists. A claim leaves the list when its first 835 arrives.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/api/v1/claims/{claim_id}": {
       "get": {
         "summary": "One claim with its denials and analyses",
@@ -1727,6 +1760,76 @@
                     "type": "number"
                   }
                 }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/claims/{claim_id}/followups": {
+      "post": {
+        "summary": "Record a follow-up on an unanswered claim",
+        "tags": [
+          "claims"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "claim_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Resource id."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "status_inquiry",
+                      "resubmitted",
+                      "payer_contact"
+                    ]
+                  },
+                  "note": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "action"
+                ]
               }
             }
           }
@@ -2339,7 +2442,8 @@
                       "timely_filing",
                       "corrected_claim",
                       "reconsideration",
-                      "appeal_level_2"
+                      "appeal_level_2",
+                      "payer_response"
                     ]
                   },
                   "days": {

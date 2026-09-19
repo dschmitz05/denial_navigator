@@ -44,7 +44,7 @@ rule() {
 RULE_IDS+=("$(rule 'SYNTHETIC TEST PAYER' corrected_claim 90)")
 RULE_IDS+=("$(rule '*' timely_filing 120)")
 
-curl -fsS -X POST -H "Authorization: Bearer ${TOKEN}" -F "file=@${FIXTURE};filename=deadline-test.835" "${API}/ingestion/ingest" >/dev/null
+curl -fsS -X POST -H "Authorization: Bearer ${TOKEN}" -F "file=@${FIXTURE};filename=deadline-test-denial.835" "${API}/ingestion/ingest" >/dev/null
 DENIAL="$(psql_exec "SELECT d.id FROM denials d JOIN claims c ON c.id = d.claim_id WHERE c.claim_number = 'TESTDL1'")"
 psql_exec "INSERT INTO ai_analyses (denial_id, claim_id, model_name, required_action, denial_category) \
            SELECT d.id, d.claim_id, 'deadline-test', 'coding_correction', 'coding_error' FROM denials d WHERE d.id = '${DENIAL}'" >/dev/null

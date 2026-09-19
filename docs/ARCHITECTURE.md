@@ -381,6 +381,15 @@ unset, a known placeholder, or (for Fernet) not an exact 32-byte key.
   that has a rule and marks the one for the recommended resolution
   (`routes/deadlines.rs`). Managers edit the rules in Settings.
   `scripts/test_deadlines.sh` covers it.
+- **Claims the payer never answers are followed up** (`routes/unanswered.rs`).
+  Ingestion stamps `claims.submitted_at` for an 837 and
+  `remittance_received_at` for an 835. A submitted claim with no remittance
+  after the payer's `payer_response` rule (30 days if none) appears on the
+  No Response page with days outstanding and, given a timely-filing rule, the
+  days left to file; staff record status inquiries, resubmissions and payer
+  contacts (`claim_followups`). Its first 835 takes it off the list. Claims
+  from before migration 043 have no submission time and are not listed.
+  `scripts/test_unanswered_claims.sh` covers it.
 - **Bulk queueing resolves the whole batch in one query** instead of three per
   denial, and reports partial success rather than failing the batch.
 - **The connection pool** is created once at startup with a liveness check;

@@ -19,6 +19,10 @@ use uuid::Uuid;
 use crate::routes::appeals::record_audit;
 use crate::state::AppState;
 
+/// Days a payer normally takes to answer a submitted claim (FB-09). Not a
+/// deadline on a denial, so it is kept out of `RULE_TYPES`.
+pub const PAYER_RESPONSE: &str = "payer_response";
+
 /// Rule types, what they are counted from, and a label for people.
 pub const RULE_TYPES: &[(&str, &str, &str)] = &[
     ("timely_filing", "date of service", "Timely filing"),
@@ -183,9 +187,11 @@ pub async fn set_rule(
             "payer_name is required ('*' for the default)".into(),
         ));
     }
-    if !RULE_TYPES.iter().any(|(k, _, _)| *k == input.deadline_type) {
+    let known = RULE_TYPES.iter().any(|(k, _, _)| *k == input.deadline_type)
+        || input.deadline_type == PAYER_RESPONSE;
+    if !known {
         return Err(AppError::Unprocessable(
-            "deadline_type must be timely_filing, corrected_claim, reconsideration or appeal_level_2".into(),
+            "deadline_type must be timely_filing, corrected_claim, reconsideration, appeal_level_2 or payer_response".into(),
         ));
     }
     if !(1..=3650).contains(&input.days) {

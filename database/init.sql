@@ -71,6 +71,9 @@ CREATE TABLE claims (
         CHECK (next_payer_source IN ('837_other_subscriber', '835_crossover')),
     -- Set when the payer reverses the claim (835 CLP02 22).
     reversed_at TIMESTAMPTZ,
+    -- When an 837 submitted it and when its first remittance arrived (FB-09).
+    submitted_at TIMESTAMPTZ,
+    remittance_received_at TIMESTAMPTZ,
     parsed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -557,6 +560,19 @@ CREATE UNIQUE INDEX idx_overpayments_natural_key
 CREATE INDEX idx_overpayments_org_status_due
     ON overpayments (organization_id, status, due_date);
 
+-- FB-09: follow-up on claims the payer has not answered.
+CREATE INDEX idx_claims_unanswered ON claims (organization_id, submitted_at) WHERE remittance_received_at IS NULL;
+CREATE TABLE claim_followups (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL REFERENCES organizations(id),
+    claim_id UUID NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
+    action VARCHAR(30) NOT NULL CHECK (action IN ('status_inquiry', 'resubmitted', 'payer_contact')),
+    note TEXT,
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_claim_followups_claim ON claim_followups (claim_id, created_at DESC);
+
 -- ============================================================
 -- 13. Payer appeal filing windows
 -- ============================================================
@@ -585,7 +601,8 @@ CREATE TABLE payer_deadline_rules (
     organization_id UUID NOT NULL REFERENCES organizations(id),
     payer_name VARCHAR(255) NOT NULL,
     deadline_type VARCHAR(30) NOT NULL
-        CHECK (deadline_type IN ('timely_filing', 'corrected_claim', 'reconsideration', 'appeal_level_2')),
+        CHECK (deadline_type IN ('timely_filing', 'corrected_claim', 'reconsideration',
+                                 'appeal_level_2', 'payer_response')),
     days INTEGER NOT NULL CHECK (days BETWEEN 1 AND 3650),
     notes TEXT,
     updated_by UUID REFERENCES users(id) ON DELETE SET NULL,

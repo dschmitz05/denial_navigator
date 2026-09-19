@@ -31,6 +31,7 @@ function Layout({ children, showNav = true }: LayoutProps) {
     { path: '/denials', label: 'Denials', icon: '🚫' },
     { path: '/appeals', label: 'Appeals', icon: '⚖️' },
     { path: '/worklist', label: 'Worklist', icon: '🛠️' },
+    { path: '/unanswered', label: 'No Response', icon: '📭' },
     { path: '/overpayments', label: 'Overpayments', icon: '💸' },
     { path: '/knowledge', label: 'Knowledge Base', icon: '📚' },
     { path: '/insights', label: 'AI Insights', icon: '📈' },

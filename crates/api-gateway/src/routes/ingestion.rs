@@ -670,6 +670,38 @@ async fn record_next_payer(
     Ok(())
 }
 
+/// Stamps when claims were submitted (837) or first answered (835), so a
+/// submitted claim the payer never answers can be followed up (FB-09).
+async fn record_submission_or_response(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    transaction_type: Option<&str>,
+    claims: &[serde_json::Value],
+) -> Result<(), AppError> {
+    let numbers: Vec<&str> = claims
+        .iter()
+        .filter_map(|c| c.get("claim_id").and_then(|v| v.as_str()))
+        .collect();
+    if numbers.is_empty() {
+        return Ok(());
+    }
+    let column = if transaction_type == Some("837") {
+        "submitted_at"
+    } else {
+        "remittance_received_at"
+    };
+    sqlx::query(&format!(
+        "UPDATE claims SET {column} = COALESCE({column}, NOW()) \
+         WHERE organization_id = $1 AND claim_number = ANY($2::text[])"
+    ))
+    .bind(organization_id)
+    .bind(&numbers)
+    .execute(&mut **tx)
+    .await
+    .map_err(AppError::Db)?;
+    Ok(())
+}
+
 /// What storing one parsed file changed.
 struct Stored {
     claims: usize,
@@ -710,6 +742,7 @@ async fn store_remittance(
         upsert_claim(tx, organization_id, transaction_type, claim_data).await?;
         record_next_payer(tx, organization_id, claim_data).await?;
     }
+    record_submission_or_response(tx, organization_id, transaction_type, &cleaned_claims).await?;
 
     let mut denials_written: i64 = 0;
     for denial_data in &cleaned_denials {
@@ -969,8 +1002,17 @@ pub async fn ingest_file(
                 .map(|dt| dt.format("%d %b %Y at %H:%M").to_string())
                 .unwrap_or_else(|| "unknown".into());
             let file_name: String = previous.get("file_name");
-            let claims_count: i64 = previous.get("claims_count");
-            let denials_count: i64 = previous.get("denials_count");
+            // INTEGER and nullable: reading them as i64 panicked and dropped
+            // the connection instead of returning this 409.
+            let count = |column: &str| {
+                previous
+                    .try_get::<Option<i32>, _>(column)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0)
+            };
+            let claims_count = count("claims_count");
+            let denials_count = count("denials_count");
             return Err(AppError::Conflict(format!(
                 "This exact file was already ingested as '{file_name}' on {when} \
                  ({claims_count} claims, {denials_count} denials). \

@@ -479,6 +479,7 @@ const DEADLINE_TYPES: Record<string, string> = {
   corrected_claim: 'Corrected claim (from remittance)',
   reconsideration: 'Reconsideration (from remittance)',
   appeal_level_2: 'Second-level appeal (from first appeal decision)',
+  payer_response: 'Payer response time (days before a claim needs follow-up)',
 }
 type DeadlineRule = { id: string; payer_name: string; deadline_type: string; days: number; notes?: string | null }
 

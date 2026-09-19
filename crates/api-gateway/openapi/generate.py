@@ -373,7 +373,7 @@ add("/api/v1/denials/deadline-rules",
     put=op("Create or replace a payer deadline rule (manager+)", "denials",
            body=jbody({"payer_name": S(), "deadline_type": S(enum=[
                "timely_filing", "corrected_claim", "reconsideration",
-               "appeal_level_2"]), "days": I(minimum=1, maximum=3650),
+               "appeal_level_2", "payer_response"]), "days": I(minimum=1, maximum=3650),
                "notes": S()}, ["payer_name", "deadline_type", "days"])))
 add("/api/v1/denials/deadline-rules/{rule_id}",
     delete=op("Delete a payer deadline rule (manager+)", "denials",
@@ -702,6 +702,21 @@ add("/api/v1/ingestion/provider-adjustments",
                    P_LIMIT]))
 add("/api/v1/ingestion/provider-adjustments/summary",
     get=op("PLB totals by month, payer and reason", "ingestion"))
+
+# ── unanswered claims ────────────────────────────────────────────────────
+add("/api/v1/claims/unanswered",
+    get=op("Submitted claims with no remittance past the payer's response time",
+           "claims",
+           description="Claims submitted on an 837 with no 835 after the "
+                       "payer_response deadline rule (30 days if none), with "
+                       "days left before timely filing when a rule exists. A "
+                       "claim leaves the list when its first 835 arrives."))
+add("/api/v1/claims/{claim_id}/followups",
+    post=op("Record a follow-up on an unanswered claim", "claims",
+            params=[path_param("claim_id")],
+            body=jbody({"action": S(enum=["status_inquiry", "resubmitted",
+                                          "payer_contact"]), "note": S()},
+                       ["action"])))
 
 # ── overpayments ─────────────────────────────────────────────────────────
 add("/api/v1/overpayments",

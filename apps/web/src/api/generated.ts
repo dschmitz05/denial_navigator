@@ -31,8 +31,10 @@ export interface ApiOperations {
   "POST /api/v1/claims": { body: { "claim_number": string; "patient_id": string; "payer_name": string; "total_charge": number; "icd_10_codes"?: Array<string> } };
   "GET /api/v1/claims/dashboard/stats": Record<string, never>;
   "GET /api/v1/claims/export.csv": { query?: { "status"?: string; "q"?: string } };
+  "GET /api/v1/claims/unanswered": Record<string, never>;
   "GET /api/v1/claims/{claim_id}": { path: { "claim_id": string } };
   "PATCH /api/v1/claims/{claim_id}": { path: { "claim_id": string }; body: { "status"?: string; "total_paid"?: number; "total_adjustment"?: number } };
+  "POST /api/v1/claims/{claim_id}/followups": { path: { "claim_id": string }; body: { "action": "status_inquiry" | "resubmitted" | "payer_contact"; "note"?: string } };
   "GET /api/v1/denials": { query?: { "status"?: string; "carc_code"?: string; "payer_name"?: string; "min_amount"?: number; "max_amount"?: number; "min_age_days"?: number; "max_age_days"?: number; "owner"?: string; "facility_type_code"?: string; "cagc"?: string; "claim_id"?: string; "q"?: string; "priority"?: boolean; "sort"?: "amount" | "deadline" | "created"; "descending"?: boolean; "cursor"?: string; "limit"?: number; "offset"?: number } };
   "GET /api/v1/denials/aging-buckets": Record<string, never>;
   "GET /api/v1/denials/appeal-windows": Record<string, never>;
@@ -42,7 +44,7 @@ export interface ApiOperations {
   "GET /api/v1/denials/by-root-cause": Record<string, never>;
   "GET /api/v1/denials/carc-options": { query?: { "status"?: string } };
   "GET /api/v1/denials/deadline-rules": Record<string, never>;
-  "PUT /api/v1/denials/deadline-rules": { body: { "payer_name": string; "deadline_type": "timely_filing" | "corrected_claim" | "reconsideration" | "appeal_level_2"; "days": number; "notes"?: string } };
+  "PUT /api/v1/denials/deadline-rules": { body: { "payer_name": string; "deadline_type": "timely_filing" | "corrected_claim" | "reconsideration" | "appeal_level_2" | "payer_response"; "days": number; "notes"?: string } };
   "DELETE /api/v1/denials/deadline-rules/{rule_id}": { path: { "rule_id": string } };
   "GET /api/v1/denials/financial-summary": Record<string, never>;
   "GET /api/v1/denials/resolution-timing": Record<string, never>;
