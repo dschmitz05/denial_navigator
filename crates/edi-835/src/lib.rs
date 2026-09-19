@@ -537,6 +537,9 @@ fn check_balance(claim: &ParsedClaim, warnings: &mut Vec<String>) {
     }
 }
 
+/// CLP02 value for a payer's reversal of a previously paid claim.
+pub const REVERSAL_STATUS: &str = "22";
+
 /// One denial row per adjustment that carries a CARC.
 ///
 /// Deliberately NOT limited to claims whose CLP02 is 4. A partially
@@ -552,6 +555,12 @@ fn derive_denials(claims: &[ParsedClaim], payment_info: &ParsedPaymentInfo) -> V
     let mut denials: Vec<ParsedDenial> = Vec::new();
 
     for claim in claims {
+        // A reversal (CLP02 22) takes back an earlier payment and repeats
+        // its adjustments with the signs flipped. Those are not new denials;
+        // the original ones already exist from the first remittance.
+        if claim.claim_status_code == REVERSAL_STATUS {
+            continue;
+        }
         for adjustment in &claim.claim_level_adjustments {
             if !is_denial(adjustment) {
                 continue;
@@ -625,6 +634,25 @@ mod tests {
         assert_eq!(
             result.metadata.transaction_set_identifier.as_deref(),
             Some("835")
+        );
+    }
+
+    #[test]
+    fn a_reversal_loop_creates_no_denials() {
+        let edi = "ISA*00*          *00*          *ZZ*PAYER          *ZZ*PROVIDER       *240201*0800*^*00501*000000009*0*P*:~\
+GS*HP*PAYER*PROVIDER*20240201*0800*9*X*005010X221A1~ST*835*0009~\
+BPR*I*800.00*C*ACH*CCP*01*011000015*DA*1*1**01*021000021*DA*2*20240205~\
+TRN*1*EFT9*1~N1*PR*SYNTHETIC PAYER~N1*PE*SYNTHETIC CLINIC*XX*1999999999~LX*1~\
+CLP*PAT009*22*-800.00*0.00*0.00*MC*PCN9*11*1~SVC*HC:71046*-800.00*0.00**1~CAS*CO*197*-800.00~\
+CLP*PAT009*1*800.00*800.00*0.00*MC*PCN9*11*1~SVC*HC:71046*800.00*800.00**1~\
+SE*12*0009~GE*1*9~IEA*1*000000009~";
+        let result = parse(edi).expect("synthetic reversal 835 parses");
+        assert_eq!(result.claims.len(), 2);
+        assert_eq!(result.claims[0].claim_status_code, super::REVERSAL_STATUS);
+        assert!(
+            result.denials.is_empty(),
+            "reversal CAS lines must not become denials: {:?}",
+            result.denials
         );
     }
 }

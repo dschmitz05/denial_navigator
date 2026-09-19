@@ -58,6 +58,8 @@ CREATE TABLE claims (
     correlation_status VARCHAR(20) NOT NULL DEFAULT 'unmatched'
         CHECK (correlation_status IN ('unmatched', 'matched', 'ambiguous')),
     correlation_confidence DECIMAL(3, 2),
+    -- Set when the payer reverses the claim (835 CLP02 22).
+    reversed_at TIMESTAMPTZ,
     parsed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -97,6 +99,10 @@ CREATE TABLE denials (
         CHECK (status IN ('open', 'analyzed', 'in_progress', 'in_appeal',
                           'appealed', 'overruled', 'resolved', 'written_off')),
     appeal_deadline DATE,
+    -- 'remittance' when a later 835 paid the denied line and closed it.
+    resolution_source VARCHAR(20) CHECK (resolution_source IN ('user', 'remittance')),
+    recovered_amount DECIMAL(12, 2),
+    resolved_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -110,6 +116,18 @@ CREATE INDEX idx_denials_cpt_code ON denials(cpt_code);
 CREATE INDEX idx_denials_denial_date ON denials(denial_date);
 CREATE INDEX idx_denials_appeal_deadline ON denials(appeal_deadline);
 CREATE INDEX idx_denials_charge_amount ON denials(charge_amount DESC);
+-- One row per adjustment occurrence (migration 007); re-ingesting a file must
+-- not duplicate denials.
+CREATE UNIQUE INDEX idx_denials_natural_key ON denials (
+    claim_id,
+    COALESCE(service_line_number, -1),
+    COALESCE(cpt_code, ''),
+    cagc,
+    COALESCE(carc_code, ''),
+    charge_amount,
+    adjustment_amount,
+    COALESCE(denial_date, '1900-01-01'::date)
+);
 
 -- ============================================================
 -- 3. AI Analyses

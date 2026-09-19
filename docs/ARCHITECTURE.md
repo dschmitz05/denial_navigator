@@ -295,7 +295,20 @@ unset, a known placeholder, or (for Fernet) not an exact 32-byte key.
 - **835 upserts never overwrite a non-zero charge with zero.** A remittance
   reports what was paid, not always what was billed.
 - **Duplicate denials are skipped, not re-inserted**, and the reported count
-  comes from `RETURNING`, so "offered" and "stored" are separate numbers.
+  comes from `RETURNING`, so "offered" and "stored" are separate numbers. A
+  payer re-sending a remittance with a new production date is still a
+  duplicate: an active denial with the same claim, line, procedure, group,
+  CARC and amounts is never inserted again.
+- **Reprocessed claims settle their denials** (`crates/api-gateway/src/reprocessing.rs`).
+  A reversal (CLP02 `22`) marks the claim `reversed_at` and is not stored as a
+  claim, so its negated totals never overwrite it and the corrected loop that
+  follows keeps the real claim number; its CAS lines are not denials. When a
+  later remittance pays a claim or line that has an active denial from an
+  earlier file, and no longer applies that group and CARC there, the denial
+  closes itself: `overruled` if it was under appeal, else `resolved`, with
+  `resolution_source = 'remittance'`, the recovered amount, an audit entry, and
+  its open worklist items closed. Recovery analytics count these as recovered.
+  `scripts/test_reprocessing.sh` exercises the whole sequence.
 - **Bulk queueing resolves the whole batch in one query** instead of three per
   denial, and reports partial success rather than failing the batch.
 - **The connection pool** is created once at startup with a liveness check;

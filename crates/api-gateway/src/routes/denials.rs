@@ -407,9 +407,11 @@ pub async fn denial_financial_summary(
     Extension(principal): Extension<Principal>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let organization_id = organization_id(&principal)?;
+    // A later remittance paying the denied line is the payer's own answer, so
+    // it outranks an outcome recorded by hand in the feedback loop.
     let row = sqlx::query(
         "WITH tenant_denials AS ( \
-             SELECT d.id, d.charge_amount \
+             SELECT d.id, d.charge_amount, d.resolution_source \
              FROM denials d JOIN claims c ON c.id = d.claim_id \
              WHERE c.organization_id = $1 \
          ), latest_outcome AS ( \
@@ -419,15 +421,20 @@ pub async fn denial_financial_summary(
              JOIN tenant_denials td ON td.id = aa.denial_id \
              WHERE fl.was_paid_on_resubmit IS NOT NULL \
              ORDER BY aa.denial_id, fl.created_at DESC \
+         ), outcomes AS ( \
+             SELECT td.charge_amount, \
+                    CASE WHEN td.resolution_source = 'remittance' THEN TRUE \
+                         ELSE lo.was_paid_on_resubmit END AS paid \
+             FROM tenant_denials td LEFT JOIN latest_outcome lo ON lo.denial_id = td.id \
          ) \
          SELECT COUNT(*) AS total_denials, \
-                COALESCE(SUM(td.charge_amount), 0)::float8 AS denied_dollars, \
-                COALESCE(SUM(td.charge_amount) FILTER (WHERE lo.was_paid_on_resubmit), 0)::float8 AS recovered_dollars, \
-                COALESCE(SUM(td.charge_amount) FILTER (WHERE lo.was_paid_on_resubmit IS FALSE), 0)::float8 AS not_recovered_dollars, \
-                COALESCE(SUM(td.charge_amount) FILTER (WHERE lo.was_paid_on_resubmit IS NULL), 0)::float8 AS unresolved_dollars, \
-                COUNT(*) FILTER (WHERE lo.was_paid_on_resubmit IS NOT NULL) AS outcome_known_count, \
-                COUNT(*) FILTER (WHERE lo.was_paid_on_resubmit) AS recovered_count \
-         FROM tenant_denials td LEFT JOIN latest_outcome lo ON lo.denial_id = td.id",
+                COALESCE(SUM(charge_amount), 0)::float8 AS denied_dollars, \
+                COALESCE(SUM(charge_amount) FILTER (WHERE paid), 0)::float8 AS recovered_dollars, \
+                COALESCE(SUM(charge_amount) FILTER (WHERE paid IS FALSE), 0)::float8 AS not_recovered_dollars, \
+                COALESCE(SUM(charge_amount) FILTER (WHERE paid IS NULL), 0)::float8 AS unresolved_dollars, \
+                COUNT(*) FILTER (WHERE paid IS NOT NULL) AS outcome_known_count, \
+                COUNT(*) FILTER (WHERE paid) AS recovered_count \
+         FROM outcomes",
     )
     .bind(organization_id)
     .fetch_one(&state.pool)
