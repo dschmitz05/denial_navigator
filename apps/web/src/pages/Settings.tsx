@@ -557,6 +557,137 @@ function PayerDeadlineRules({ canEdit }: { canEdit: boolean }) {
   )
 }
 
+type PayerAlias = { id: string; alias: string; kind: 'name' | 'payer_id' }
+type Payer = { id: string; name: string; aliases: PayerAlias[] }
+type UnmappedName = { name: string; source: string; count: number }
+
+/** Payer names and IDs that mean the same payer, so knowledge documents match claims however each spells it. */
+function PayersAndAliases({ canEdit }: { canEdit: boolean }) {
+  const [payers, setPayers] = useState<Payer[]>([])
+  const [unmapped, setUnmapped] = useState<UnmappedName[]>([])
+  const [newPayer, setNewPayer] = useState('')
+  const [aliasDraft, setAliasDraft] = useState<Record<string, { alias: string; kind: 'name' | 'payer_id' }>>({})
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(() => {
+    fetch(`${API_BASE}/payers`)
+      .then(r => (r.ok ? r.json() : { payers: [], unmapped: [] }))
+      .then(data => { setPayers(data.payers || []); setUnmapped(data.unmapped || []) })
+      .catch(() => { setPayers([]); setUnmapped([]) })
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  const send = async (url: string, method: string, body?: unknown) => {
+    setError(null)
+    const resp = await fetch(url, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    })
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}))
+      setError(typeof data.detail === 'string' ? data.detail : `Could not save (HTTP ${resp.status})`)
+      return false
+    }
+    load()
+    return true
+  }
+  const createPayer = async (name: string) => {
+    if (await send(`${API_BASE}/payers`, 'POST', { name })) setNewPayer('')
+  }
+  const addAlias = async (payerId: string, alias: string, kind: 'name' | 'payer_id' = 'name') => {
+    if (await send(`${API_BASE}/payers/${payerId}/aliases`, 'POST', { alias, kind })) {
+      setAliasDraft({ ...aliasDraft, [payerId]: { alias: '', kind: 'name' } })
+    }
+  }
+
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <h4 style={{ marginBottom: 8 }}>Payers &amp; aliases</h4>
+      <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: 0 }}>
+        Remittances, claims and payer manuals spell payer names differently. Names and payer IDs listed under one
+        payer are treated as the same payer when the AI looks for policies that apply to a denial.
+      </p>
+      <div className="table-container">
+        <table>
+          <thead><tr><th>Payer</th><th>Aliases</th>{canEdit && <th>Add alias</th>}</tr></thead>
+          <tbody>
+            {payers.length === 0 && <tr><td colSpan={canEdit ? 3 : 2} style={{ textAlign: 'center' }}>No payers yet</td></tr>}
+            {payers.map(p => {
+              const draft = aliasDraft[p.id] || { alias: '', kind: 'name' as const }
+              return (
+                <tr key={p.id}>
+                  <td>
+                    {p.name}
+                    {canEdit && <button className="btn btn-sm" style={{ marginLeft: 8 }}
+                      onClick={() => send(`${API_BASE}/payers/${p.id}`, 'DELETE')}>Delete</button>}
+                  </td>
+                  <td>
+                    {p.aliases.map(a => (
+                      <span key={a.id} className="badge" style={{ marginRight: 6, display: 'inline-block', marginBottom: 4 }}>
+                        {a.kind === 'payer_id' ? `ID ${a.alias}` : a.alias}
+                        {canEdit && <button className="btn btn-sm" style={{ marginLeft: 4, padding: '0 4px' }} title="Remove alias"
+                          onClick={() => send(`${API_BASE}/payers/${p.id}/aliases/${a.id}`, 'DELETE')}>×</button>}
+                      </span>
+                    ))}
+                  </td>
+                  {canEdit && (
+                    <td>
+                      <div style={{ display: 'flex', gap: 4 }}>
+                        <input className="form-input" style={{ maxWidth: 200 }} placeholder="Name or payer ID" value={draft.alias}
+                          onChange={e => setAliasDraft({ ...aliasDraft, [p.id]: { ...draft, alias: e.target.value } })} />
+                        <select className="form-select" value={draft.kind}
+                          onChange={e => setAliasDraft({ ...aliasDraft, [p.id]: { ...draft, kind: e.target.value as 'name' | 'payer_id' } })}>
+                          <option value="name">Name</option>
+                          <option value="payer_id">Payer ID</option>
+                        </select>
+                        <button className="btn btn-sm" disabled={!draft.alias.trim()} onClick={() => addAlias(p.id, draft.alias, draft.kind)}>Add</button>
+                      </div>
+                    </td>
+                  )}
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+      {canEdit && (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' }}>
+          <input className="form-input" style={{ maxWidth: 280 }} placeholder="New payer name" value={newPayer}
+            onChange={e => setNewPayer(e.target.value)} />
+          <button className="btn btn-primary" disabled={!newPayer.trim()} onClick={() => createPayer(newPayer)}>Add payer</button>
+          {error && <span style={{ color: 'var(--danger)' }}>{error}</span>}
+        </div>
+      )}
+      {unmapped.length > 0 && (
+        <details style={{ marginTop: 12 }}>
+          <summary>{unmapped.length} payer name{unmapped.length === 1 ? '' : 's'} not mapped to a payer</summary>
+          <table style={{ marginTop: 8 }}>
+            <thead><tr><th>Name</th><th>Seen in</th><th>Count</th>{canEdit && payers.length > 0 && <th>Add as alias of</th>}</tr></thead>
+            <tbody>
+              {unmapped.map(u => (
+                <tr key={`${u.source}:${u.name}`}>
+                  <td>{u.name}</td>
+                  <td>{u.source}</td>
+                  <td>{u.count}</td>
+                  {canEdit && payers.length > 0 && (
+                    <td>
+                      <select className="form-select" defaultValue="" onChange={e => e.target.value && addAlias(e.target.value, u.name)}>
+                        <option value="">Choose payer…</option>
+                        {payers.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                      </select>
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </details>
+      )}
+    </div>
+  )
+}
+
 export default function Settings() {
   const { can } = useAuth()
   const canEdit = can.manageKnowledge()      // policy curation, same as documents
@@ -767,6 +898,7 @@ export default function Settings() {
           )}
 
           <PayerDeadlineRules canEdit={canEdit} />
+          <PayersAndAliases canEdit={canEdit} />
 
           {can.manageUsers() && <WriteOffThreshold />}
           {can.manageUsers() && <OverpaymentRefundDays />}

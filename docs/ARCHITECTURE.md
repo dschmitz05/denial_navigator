@@ -176,6 +176,18 @@ Retrieval is filtered by payer: a denial is argued from documents whose
 scope for every denial. Archived documents are excluded, and results below
 `MIN_SIMILARITY` are dropped rather than padded out with weak matches.
 
+Payer names are spelled differently by remittances, claims and payer manuals
+("BlueCross BlueShield", "BLUECROSS BLUESHIELD OF ILLINOIS"), so a document
+also matches when its `payer_name` and the claim's payer name or payer ID are
+aliases of one payer (`payers`, `payer_aliases`, migration 044). Aliases are
+compared after `normalize_payer_name` (lower case, punctuation and repeated
+spaces removed) and are per organization. Managers map them in Settings →
+Payers & aliases, which also lists the payer names in claims and documents that
+no alias covers yet (`routes/payers.rs`). The analysis search also passes the
+claim's date of service as `effective_on`, so a policy not yet in effect or
+already expired on that date is not used as evidence.
+`scripts/test_payer_retrieval.sh` covers both.
+
 ### LLM Service (`llm-service/` · `crates/llm-service/`)
 
 Builds the denial prompt, calls llama.cpp through the shared OpenAI-compatible

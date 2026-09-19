@@ -113,6 +113,7 @@ ROUTE_PREFIXES = {
     "settings": "/api/v1/settings",
     "write_offs": "/api/v1/write-offs",
     "overpayments": "/api/v1/overpayments",
+    "payers": "/api/v1/payers",
 }
 HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
 
@@ -718,6 +719,26 @@ add("/api/v1/claims/{claim_id}/followups",
                                           "payer_contact"]), "note": S()},
                        ["action"])))
 
+# ── payers and aliases ───────────────────────────────────────────────────
+add("/api/v1/payers",
+    get=op("Payers with their aliases, and payer names not yet mapped", "payers",
+           description="Claims and documents name payers however their source "
+                       "spelled them; a document matches a claim when both "
+                       "names (or the claim's payer ID) are aliases of one payer."),
+    post=op("Create a payer; its name becomes its first alias (manager+)", "payers",
+            body=jbody({"name": S()}, ["name"])))
+add("/api/v1/payers/{payer_id}",
+    delete=op("Delete a payer and its aliases (manager+)", "payers",
+              params=[path_param("payer_id")]))
+add("/api/v1/payers/{payer_id}/aliases",
+    post=op("Add a name or payer-ID alias (manager+)", "payers",
+            description="409 when the alias already belongs to a payer.",
+            params=[path_param("payer_id")],
+            body=jbody({"alias": S(), "kind": S(enum=["name", "payer_id"])}, ["alias"])))
+add("/api/v1/payers/{payer_id}/aliases/{alias_id}",
+    delete=op("Remove an alias (manager+)", "payers",
+              params=[path_param("payer_id"), path_param("alias_id")]))
+
 # ── overpayments ─────────────────────────────────────────────────────────
 add("/api/v1/overpayments",
     get=op("Overpayments found in remittances, with refund deadlines", "overpayments",
@@ -832,6 +853,7 @@ doc = {
             ("playbooks", "Manager-curated deterministic resolution rules"),
             ("write-offs", "Write-off approval above the organization threshold"),
             ("overpayments", "Overpayments and their refund deadlines"),
+            ("payers", "Payers and the names and IDs that resolve to them"),
             ("settings", "Organization and system settings (admin)"),
             ("system", "Health"),
             ("retention", "Audit-log and AI-analysis retention (admin)"),

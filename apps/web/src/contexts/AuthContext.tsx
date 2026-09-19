@@ -134,7 +134,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     mfaToken: string,
     code: string,
     { enrolling = false }: { enrolling?: boolean } = {},
-  ): Promise<AuthUser> => {
+  ): Promise<SignInStep> => {
     const path = enrolling ? '/auth/totp/confirm' : '/auth/login/totp'
     const resp = await fetch(`${API_BASE}${path}`, {
       method: 'POST',

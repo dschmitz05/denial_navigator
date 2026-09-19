@@ -74,6 +74,11 @@ export interface ApiOperations {
   "POST /api/v1/notifications/{notification_id}/read": { path: { "notification_id": string } };
   "GET /api/v1/overpayments": { query?: { "status"?: "identified" | "refunded" | "recouped" | "disputed" } };
   "POST /api/v1/overpayments/{id}/status": { path: { "id": string }; body: { "status": "identified" | "refunded" | "recouped" | "disputed"; "note"?: string } };
+  "GET /api/v1/payers": Record<string, never>;
+  "POST /api/v1/payers": { body: { "name": string } };
+  "DELETE /api/v1/payers/{payer_id}": { path: { "payer_id": string } };
+  "POST /api/v1/payers/{payer_id}/aliases": { path: { "payer_id": string }; body: { "alias": string; "kind"?: "name" | "payer_id" } };
+  "DELETE /api/v1/payers/{payer_id}/aliases/{alias_id}": { path: { "payer_id": string; "alias_id": string } };
   "GET /api/v1/playbooks": { query?: { "status"?: string } };
   "POST /api/v1/playbooks": { body: { "name": string; "description"?: string; "triggers"?: Record<string, unknown>; "recommendation"?: Record<string, unknown> } };
   "POST /api/v1/playbooks/test": { body: { "carc_code"?: string; "cagc"?: string; "payer_name"?: string } };

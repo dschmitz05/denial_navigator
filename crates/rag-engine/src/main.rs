@@ -97,15 +97,66 @@ struct AppState {
 // ── Search ──
 
 /// Semantic search: embed the query, then cosine-rank chunks in pgvector.
+/// Which documents a search may return.
+struct Scope<'a> {
+    organization_id: uuid::Uuid,
+    source_type: Option<&'a str>,
+    payer: Option<&'a str>,
+    payer_id_number: Option<&'a str>,
+    jurisdiction: Option<&'a str>,
+    effective_on: Option<&'a str>,
+}
+
+/// Appends the scope conditions shared by vector and lexical search.
+///
+/// Payer-agnostic documents (NULL payer_name) stay in scope. A document also
+/// matches when its payer name and the claim's payer (by name or payer ID)
+/// are aliases of the same payer, so one payer spelled several ways, or
+/// named by ID, still finds its policies (FB-11). The date of service keeps
+/// out documents not in effect then.
+fn push_scope(qb: &mut QueryBuilder<'_, sqlx::Postgres>, scope: &Scope<'_>) {
+    qb.push(" AND kd.organization_id = ");
+    qb.push_bind(scope.organization_id);
+    if let Some(st) = scope.source_type {
+        qb.push(" AND kd.source_type = ");
+        qb.push_bind(st.to_string());
+    }
+    if let Some(p) = scope.payer {
+        qb.push(" AND (kd.payer_name IS NULL OR lower(kd.payer_name) = lower(");
+        qb.push_bind(p.to_string());
+        qb.push(
+            ") OR normalize_payer_name(kd.payer_name) IN (\
+                 SELECT a2.alias_normalized FROM payer_aliases a1 \
+                 JOIN payer_aliases a2 ON a2.payer_id = a1.payer_id \
+                 WHERE a1.organization_id = ",
+        );
+        qb.push_bind(scope.organization_id);
+        qb.push(" AND a1.alias_normalized IN (normalize_payer_name(");
+        qb.push_bind(p.to_string());
+        qb.push("), normalize_payer_name(");
+        qb.push_bind(scope.payer_id_number.unwrap_or_default().to_string());
+        qb.push("))))");
+    }
+    if let Some(j) = scope.jurisdiction {
+        qb.push(" AND lower(COALESCE(kd.metadata->>'jurisdiction', '')) = lower(");
+        qb.push_bind(j.to_string());
+        qb.push(")");
+    }
+    if let Some(date) = scope.effective_on {
+        // Cast: bound as text, compared with DATE columns.
+        qb.push(" AND (kd.effective_date IS NULL OR kd.effective_date <= ");
+        qb.push_bind(date.to_string());
+        qb.push("::date) AND (kd.expiration_date IS NULL OR kd.expiration_date >= ");
+        qb.push_bind(date.to_string());
+        qb.push("::date)");
+    }
+}
+
 async fn search_similar(
     state: &AppState,
     query: &str,
     top_k: i64,
-    source_type: Option<&str>,
-    payer: Option<&str>,
-    jurisdiction: Option<&str>,
-    effective_on: Option<&str>,
-    organization_id: uuid::Uuid,
+    scope: &Scope<'_>,
 ) -> Result<Vec<Value>, AppError> {
     let embeddings = state
         .embeddings
@@ -136,32 +187,7 @@ async fn search_similar(
          WHERE kc.embedding IS NOT NULL \
          AND kd.status <> 'archived'",
     );
-    qb.push(" AND kd.organization_id = ");
-    qb.push_bind(organization_id);
-    if let Some(st) = source_type {
-        qb.push(" AND kd.source_type = ");
-        qb.push_bind(st.to_string());
-    }
-    if let Some(p) = payer {
-        // Payer-agnostic documents carry a NULL payer_name and stay in scope;
-        // matched loosely on case because payer names arrive in whatever case
-        // the payer sends them.
-        qb.push(" AND (kd.payer_name IS NULL OR lower(kd.payer_name) = lower(");
-        qb.push_bind(p.to_string());
-        qb.push("))");
-    }
-    if let Some(j) = jurisdiction {
-        qb.push(" AND lower(COALESCE(kd.metadata->>'jurisdiction', '')) = lower(");
-        qb.push_bind(j.to_string());
-        qb.push(")");
-    }
-    if let Some(date) = effective_on {
-        qb.push(" AND (kd.effective_date IS NULL OR kd.effective_date <= ");
-        qb.push_bind(date.to_string());
-        qb.push(") AND (kd.expiration_date IS NULL OR kd.expiration_date >= ");
-        qb.push_bind(date.to_string());
-        qb.push(")");
-    }
+    push_scope(&mut qb, scope);
     qb.push(" AND (1 - (kc.embedding <=> ");
     qb.push_bind(vec.clone());
     qb.push("::vector) >= ");
@@ -209,11 +235,7 @@ async fn search_lexical(
     state: &AppState,
     query: &str,
     top_k: i64,
-    source_type: Option<&str>,
-    payer: Option<&str>,
-    jurisdiction: Option<&str>,
-    effective_on: Option<&str>,
-    organization_id: uuid::Uuid,
+    scope: &Scope<'_>,
 ) -> Result<Vec<Value>, AppError> {
     let mut qb = QueryBuilder::<sqlx::Postgres>::default();
     qb.push("SELECT kc.id, kc.knowledge_document_id, kc.chunk_index, kc.content, kc.token_count, kc.metadata, kd.title AS document_title, kd.source_type, 0.0::float8 AS similarity_score, ts_rank_cd(to_tsvector('english', kc.content), websearch_to_tsquery('english', ");
@@ -221,29 +243,7 @@ async fn search_lexical(
     qb.push(")) AS keyword_score FROM knowledge_chunks kc JOIN knowledge_documents kd ON kd.id = kc.knowledge_document_id WHERE kd.status <> 'archived' AND to_tsvector('english', kc.content) @@ websearch_to_tsquery('english', ");
     qb.push_bind(query.to_string());
     qb.push(")");
-    qb.push(" AND kd.organization_id = ");
-    qb.push_bind(organization_id);
-    if let Some(st) = source_type {
-        qb.push(" AND kd.source_type = ");
-        qb.push_bind(st.to_string());
-    }
-    if let Some(p) = payer {
-        qb.push(" AND (kd.payer_name IS NULL OR lower(kd.payer_name) = lower(");
-        qb.push_bind(p.to_string());
-        qb.push("))");
-    }
-    if let Some(j) = jurisdiction {
-        qb.push(" AND lower(COALESCE(kd.metadata->>'jurisdiction', '')) = lower(");
-        qb.push_bind(j.to_string());
-        qb.push(")");
-    }
-    if let Some(date) = effective_on {
-        qb.push(" AND (kd.effective_date IS NULL OR kd.effective_date <= ");
-        qb.push_bind(date.to_string());
-        qb.push(") AND (kd.expiration_date IS NULL OR kd.expiration_date >= ");
-        qb.push_bind(date.to_string());
-        qb.push(")");
-    }
+    push_scope(&mut qb, scope);
     qb.push(" ORDER BY keyword_score DESC LIMIT ");
     qb.push_bind(top_k);
     let rows = qb.build().fetch_all(&state.pool).await?;
@@ -282,6 +282,8 @@ struct Filters {
     jurisdiction: Option<String>,
     effective_on: Option<String>,
     organization_id: Option<uuid::Uuid>,
+    /// The claim's payer ID (835 N1*PR / 837 NM1*PR), tried as an alias too.
+    payer_id_number: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -418,30 +420,18 @@ async fn search_knowledge(
     }
     let filters = req.filters.unwrap_or_default();
     let organization_id = filters.organization_id.ok_or(AppError::Forbidden)?;
+    let scope = Scope {
+        organization_id,
+        source_type: filters.source_type.as_deref(),
+        payer: filters.payer.as_deref(),
+        payer_id_number: filters.payer_id_number.as_deref(),
+        jurisdiction: filters.jurisdiction.as_deref(),
+        effective_on: filters.effective_on.as_deref(),
+    };
     let results = if state.cfg.vector_search_enabled {
-        search_similar(
-            &state,
-            &req.query,
-            req.top_k,
-            filters.source_type.as_deref(),
-            filters.payer.as_deref(),
-            filters.jurisdiction.as_deref(),
-            filters.effective_on.as_deref(),
-            organization_id,
-        )
-        .await?
+        search_similar(&state, &req.query, req.top_k, &scope).await?
     } else {
-        search_lexical(
-            &state,
-            &req.query,
-            req.top_k,
-            filters.source_type.as_deref(),
-            filters.payer.as_deref(),
-            filters.jurisdiction.as_deref(),
-            filters.effective_on.as_deref(),
-            organization_id,
-        )
-        .await?
+        search_lexical(&state, &req.query, req.top_k, &scope).await?
     };
     Ok(Json(json!({
         "results": results,

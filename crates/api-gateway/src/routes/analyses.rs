@@ -448,6 +448,7 @@ async fn generate_analysis_for_request(
     let denial = sqlx::query(
         "SELECT d.cagc, d.cpt_code, d.carc_code, d.rarc_code, d.claim_id, \
                 c.claim_number, c.patient_name, c.payer_name, c.icd_10_codes, c.next_payer_name, \
+                c.service_from, c.payer_id_number, \
                 cc.description AS carc_description, \
                 rc.description AS rarc_description \
          FROM denials d \
@@ -475,6 +476,8 @@ async fn generate_analysis_for_request(
     let carc_description: Option<String> = denial.try_get("carc_description").ok().flatten();
     let rarc_description: Option<String> = denial.try_get("rarc_description").ok().flatten();
     let next_payer_name: Option<String> = denial.try_get("next_payer_name").ok().flatten();
+    let service_from: Option<chrono::NaiveDate> = denial.try_get("service_from").ok().flatten();
+    let payer_id_number: Option<String> = denial.try_get("payer_id_number").ok().flatten();
     let icd_codes: Vec<String> = denial
         .try_get::<Option<Vec<String>>, _>("icd_10_codes")
         .ok()
@@ -505,6 +508,10 @@ async fn generate_analysis_for_request(
             5,
             serde_json::json!({
                 "payer": payer_name,
+                "payer_id_number": payer_id_number,
+                // Only policies in effect on the date of service count as
+                // evidence for this claim.
+                "effective_on": service_from.map(|d| d.to_string()),
                 "organization_id": organization_id,
             }),
         )

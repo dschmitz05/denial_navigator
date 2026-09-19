@@ -594,6 +594,37 @@ CREATE UNIQUE INDEX idx_payer_appeal_policies_name
 INSERT INTO payer_appeal_policies (payer_name, appeal_window_days, notes)
 VALUES ('*', 90, 'Default filing window for payers without a specific policy.');
 
+-- FB-11: payers and the spellings and IDs that resolve to them.
+CREATE OR REPLACE FUNCTION normalize_payer_name(p TEXT)
+RETURNS TEXT
+LANGUAGE sql
+IMMUTABLE
+AS $fn$
+    SELECT trim(regexp_replace(lower(COALESCE(p, '')), '[^a-z0-9]+', ' ', 'g'));
+$fn$;
+
+CREATE TABLE payers (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL REFERENCES organizations(id),
+    name VARCHAR(255) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX idx_payers_org_name
+    ON payers (organization_id, normalize_payer_name(name));
+
+CREATE TABLE payer_aliases (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL REFERENCES organizations(id),
+    payer_id UUID NOT NULL REFERENCES payers(id) ON DELETE CASCADE,
+    alias VARCHAR(255) NOT NULL,
+    alias_normalized VARCHAR(255) NOT NULL,
+    kind VARCHAR(10) NOT NULL DEFAULT 'name' CHECK (kind IN ('name', 'payer_id')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+-- An alias belongs to one payer per organization.
+CREATE UNIQUE INDEX idx_payer_aliases_org_alias
+    ON payer_aliases (organization_id, alias_normalized);
+
 -- FB-10: other payer clocks (timely filing, corrected claim, reconsideration,
 -- second-level appeal), per organization; payer_name '*' is the default.
 CREATE TABLE payer_deadline_rules (
