@@ -1,0 +1,433 @@
+{
+  "_comment": "SYNTHETIC TEST DATA for Denial Navigator. Every document and playbook here is fabricated for testing retrieval and recommendations. None is a real CMS LCD, payer policy, fee schedule, or contract, including those filed under a real payer's name. LCD numbers use the fictional LTEST- prefix. Load with scripts/seed_test_knowledge.sh.",
+  "documents": [
+    {
+      "title": "[TEST] LCD LTEST-001: Arthrocentesis and Intra-articular Injection of Major Joints",
+      "source_type": "cms_lcd",
+      "payer_name": null,
+      "jurisdiction": "TEST MAC Jurisdiction T1",
+      "version_label": "2026.1",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - not a real CMS Local Coverage Determination.\n\nCoverage indications. Arthrocentesis, aspiration and/or injection of a major joint (CPT 20610 without ultrasound guidance, 20611 with ultrasound guidance) is reasonable and necessary for primary osteoarthritis of the knee (ICD-10 M17.0, M17.10-M17.12) when the patient has persistent pain limiting function despite at least 6 weeks of conservative therapy, such as NSAIDs, activity modification, or physical therapy.\n\nFrequency. No more than 4 injections per joint in a rolling 12-month period. Injections in the same joint less than 12 weeks apart require documentation of at least 50% relief from the prior injection.\n\nDocumentation requirements. The record must show the joint and laterality, the failed conservative therapy and its duration, a pain or function score before the procedure, the substance injected, and for 20611 the retained ultrasound image.\n\nLimitations. Ultrasound guidance (20611) is not covered for a palpable knee effusion without documented body-habitus difficulty. Claims billed without a supporting diagnosis are denied under CARC 50 with RARC N115."
+    },
+    {
+      "title": "[TEST] LCD LTEST-002: Outpatient Physical Therapy - Therapeutic Exercise",
+      "source_type": "cms_lcd",
+      "payer_name": null,
+      "jurisdiction": "TEST MAC Jurisdiction T1",
+      "version_label": "2026.1",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - not a real CMS Local Coverage Determination.\n\nCoverage indications. Therapeutic exercise (CPT 97110) is covered to develop strength, endurance, range of motion and flexibility when a physician-certified plan of care documents measurable functional goals. Hip pain (ICD-10 M25.551, M25.552) is a supporting diagnosis when accompanied by a functional deficit such as reduced gait speed, inability to climb stairs, or a limited range of motion measured in degrees.\n\nPlan of care. The plan must be certified within 30 days of the initial evaluation and recertified at least every 90 days. It must state the diagnosis, long-term goals, and the type, amount, frequency and duration of services.\n\nProgress reporting. A progress report is required at least every 10 treatment days. Services continuing after the patient reaches a plateau, or when the exercise could be safely performed independently, are maintenance and are not covered.\n\nUnits. 97110 is a timed code billed per 15 minutes using the 8-minute rule. Billing more than 4 units per date of service requires documentation of medical necessity for the extended session."
+    },
+    {
+      "title": "[TEST] LCD LTEST-003: Comprehensive Metabolic Panel",
+      "source_type": "cms_lcd",
+      "payer_name": null,
+      "jurisdiction": "TEST MAC Jurisdiction T1",
+      "version_label": "2026.1",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - not a real CMS Local Coverage Determination.\n\nCoverage indications. The comprehensive metabolic panel (CPT 80053) is covered to evaluate and monitor conditions affecting electrolytes, glucose, and renal or hepatic function, including diabetes mellitus (E11.x), chronic kidney disease (N18.x), hypertension on diuretic or ACE-inhibitor therapy, and suspected dehydration.\n\nScreening. A CMP ordered only as part of a routine general examination without abnormal findings (ICD-10 Z00.00) is a screening test. Screening laboratory panels are outside the scope of this benefit and are denied as non-covered unless a specific screening benefit applies. Where the member's plan covers preventive services, the deductible does not apply to a covered preventive panel.\n\nFrequency. For stable, monitored chronic conditions, up to 4 panels per 12 months are covered. More frequent testing requires a documented change in condition or therapy.\n\nPanel integrity. When all component tests of 80053 are performed, the panel code must be billed. Billing components separately is unbundling and the separately billed components are denied."
+    },
+    {
+      "title": "[TEST] LCD LTEST-004: Chest Radiography, Two Views",
+      "source_type": "cms_lcd",
+      "payer_name": null,
+      "jurisdiction": "TEST MAC Jurisdiction T1",
+      "version_label": "2026.1",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - not a real CMS Local Coverage Determination.\n\nCoverage indications. A two-view chest radiograph (CPT 71046) is covered for new or worsening respiratory symptoms, including cough, dyspnea, or hypoxia; for suspected pneumonia (J18.9); and for chronic obstructive pulmonary disease (J44.9, J44.1) when there is a suspected exacerbation, a change in sputum, or a failure to respond to treatment.\n\nNot covered. Routine annual chest imaging in a stable COPD patient without new symptoms is not reasonable and necessary. Repeat imaging within 6 weeks for resolving pneumonia is covered only with documented clinical non-response.\n\nDocumentation. The order must state the clinical indication and symptoms. A diagnosis code alone, such as J44.9, without a documented symptom or change in status, does not establish medical necessity and is subject to denial under CARC 50 with RARC N115.\n\nComorbidities. Diabetes with hyperglycemia (E11.65) does not by itself support chest imaging but may be reported as a secondary diagnosis."
+    },
+    {
+      "title": "[TEST] LCD LTEST-005: Complete Blood Count with Automated Differential",
+      "source_type": "cms_lcd",
+      "payer_name": null,
+      "jurisdiction": "TEST MAC Jurisdiction T1",
+      "version_label": "2026.1",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - not a real CMS Local Coverage Determination.\n\nCoverage indications. A complete blood count with automated differential (CPT 85025) is covered to evaluate signs or symptoms of infection, anemia, bleeding, or hematologic disease, and to monitor drug therapy with known hematologic toxicity.\n\nChronic disease. For diabetes mellitus with hyperglycemia (E11.65) or COPD (J44.9), a CBC is covered when there is a clinical reason documented in the order, such as suspected infection, fatigue suggesting anemia, or a medication requiring monitoring. A CBC ordered solely because a chronic diagnosis exists, without a stated reason, is not covered.\n\nFrequency. Up to 2 CBCs per 12 months are covered for stable chronic disease monitoring. Additional tests require a documented change in clinical status.\n\nCoding. Do not bill 85025 together with 85027 (CBC without differential) on the same date; 85027 is included in 85025."
+    },
+    {
+      "title": "[TEST] LCD LTEST-006: Evaluation and Management Services on the Day of a Minor Procedure",
+      "source_type": "cms_lcd",
+      "payer_name": null,
+      "jurisdiction": "TEST MAC Jurisdiction T1",
+      "version_label": "2026.1",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - not a real CMS Local Coverage Determination.\n\nGlobal surgery. Minor procedures, such as joint injection (20610), carry a 0-day global period that includes the decision to perform the procedure and the routine pre-procedure assessment. An E/M service on the same date is separately payable only when it is significant and separately identifiable, and it must be reported with modifier 25.\n\nSeparately identifiable. The E/M documentation must address a problem beyond the procedure, such as management of a separate chronic condition (for example, diabetes E11.9) or a new complaint. Documentation that only supports the need for the procedure does not support modifier 25.\n\nLevel selection. The E/M level is chosen on medical decision making (MDM) or total time on the date of service. A level 5 visit (99215) requires high MDM, or at least 40 minutes of total time, documented in the record.\n\nDenials. An E/M reported without modifier 25 on the same date as a minor procedure is bundled into the procedure and denied under CARC 97 with RARC N19."
+    },
+    {
+      "title": "[TEST] ACME Health Plan: Professional Claim Submission Requirements",
+      "source_type": "payer_policy",
+      "payer_name": "ACME HEALTH PLAN",
+      "version_label": "2026-03",
+      "effective_date": "2026-03-01",
+      "content": "SYNTHETIC TEST DOCUMENT - ACME Health Plan is fictional.\n\nRequired data. Professional claims (837P or CMS-1500) must include the rendering provider's NPI and taxonomy, the member ID exactly as shown on the ID card, a valid place-of-service code, an ICD-10 diagnosis pointer on every service line, and the referring provider's NPI when a referral is required.\n\nIncomplete claims. Claims missing required data are denied with CARC 16 and a RARC identifying the missing element. A CARC 16 denial is not an adverse determination and cannot be appealed. Correct and resubmit the claim as a replacement claim (frequency code 7) with the original claim number, within 90 days of the denial.\n\nCrossover claims. When ACME is secondary to Medicare, the claim is received by automatic crossover. A separate submission from the provider for the same service is denied with CARC 16 and RARC N522 as a duplicate of a claim processed, or to be processed, as a crossover claim. Check crossover status before resubmitting, and do not submit a second claim while the crossover is pending.\n\nStatus checks. Claim status is available through the ACME provider portal or an X12 276/277 inquiry."
+    },
+    {
+      "title": "[TEST] ACME Health Plan: Bundling, NCCI Edits, and Modifier Use",
+      "source_type": "payer_policy",
+      "payer_name": "ACME HEALTH PLAN",
+      "version_label": "2026-01",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - ACME Health Plan is fictional.\n\nACME applies National Correct Coding Initiative (NCCI) procedure-to-procedure edits and medically unlikely edits to professional claims. A service included in another service billed on the same date is denied with CARC 97 and RARC N19 (procedure code incidental to primary procedure).\n\nModifier 25. An E/M service (99212-99215) on the same date as a procedure with a 0 or 10 day global period is paid only when it is significant and separately identifiable and is billed with modifier 25. Routine management of an established chronic condition, such as diabetes (E11.9), in the same visit may support modifier 25 when documented separately from the procedure.\n\nModifier 59 and X{EPSU}. Use modifier 59, or the more specific XE, XS, XP or XU, only to indicate a distinct procedural service. ACME audits modifier 59 use. Repeated use without supporting documentation results in prepayment review.\n\nCorrecting a bundling denial. If a modifier was omitted in error, submit a corrected claim with the modifier. If the modifier was present and documentation supports it, submit a first-level appeal with the visit note."
+    },
+    {
+      "title": "[TEST] ACME Health Plan: Laboratory Services Reimbursement Policy",
+      "source_type": "payer_policy",
+      "payer_name": "ACME HEALTH PLAN",
+      "version_label": "2026-01",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - ACME Health Plan is fictional.\n\nIn-office laboratory. ACME reimburses CLIA-waived tests performed in the physician office. Non-waived tests, including the comprehensive metabolic panel (80053), are reimbursed to the office only when the practice holds a CLIA certificate of compliance or accreditation; otherwise, refer them to an ACME preferred reference laboratory.\n\nPreventive laboratory. Laboratory tests billed with a routine examination diagnosis (Z00.00, Z00.01) are processed under the member's preventive benefit when a covered preventive service applies. A CMP is not a designated preventive panel; when billed with Z00.00 only, it processes under the medical benefit and is subject to the deductible (CARC 1) and coinsurance (CARC 2).\n\nAllowed amounts. Laboratory services are paid at the lesser of billed charges or the ACME laboratory fee schedule. The difference between billed charges and the allowed amount is a contractual adjustment (CARC 45) and may not be billed to the member."
+    },
+    {
+      "title": "[TEST] BCBS of Illinois: Provider Appeals and Reconsideration Process",
+      "source_type": "payer_policy",
+      "payer_name": "BLUECROSS BLUESHIELD OF ILLINOIS",
+      "version_label": "2026-01",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - fabricated for testing. Not an actual Blue Cross Blue Shield of Illinois policy.\n\nClaim reconsideration. A request to reprocess a claim because of a billing or processing error must be submitted within 180 days of the remittance date. Reconsideration is not an appeal and does not use an appeal level.\n\nFirst-level appeal. Appeals of an adverse determination, including medical necessity (CARC 50) and authorization (CARC 197) denials, must be received within 180 days of the initial determination. Include the appeal form, a copy of the remittance advice, a letter explaining why the service meets policy, and the supporting clinical records.\n\nSecond-level appeal. If the first-level appeal is upheld, a second-level appeal may be filed within 60 days of the first-level decision and is reviewed by a physician of the same or similar specialty.\n\nTimeframes. Standard appeals are decided within 30 calendar days. Expedited appeals, for urgent care, are decided within 72 hours.\n\nNot appealable. Member cost-share adjustments (CARC 1 deductible, CARC 2 coinsurance) reflect the member's benefit plan and are not subject to provider appeal."
+    },
+    {
+      "title": "[TEST] BCBS of Illinois: Medical Necessity Denials and LCD Alignment",
+      "source_type": "payer_policy",
+      "payer_name": "BLUECROSS BLUESHIELD OF ILLINOIS",
+      "version_label": "2026-02",
+      "effective_date": "2026-02-01",
+      "content": "SYNTHETIC TEST DOCUMENT - fabricated for testing. Not an actual Blue Cross Blue Shield of Illinois policy.\n\nFor Medicare Advantage members, medical necessity for outpatient services is determined using the applicable CMS Local Coverage Determination. A denial based on an LCD is issued with CARC 50 and RARC N115, which directs the provider to the governing LCD.\n\nResponding to CARC 50 / N115. Identify the LCD that applies to the service and compare the claim's diagnosis codes and documentation with its covered indications. If a covered diagnosis was documented but not coded, submit a corrected claim. If the documentation supports the service but the payer misapplied the policy, file a first-level appeal quoting the LCD indication and attaching the visit note, order, and test results.\n\nAdvance Beneficiary Notice. For Original Medicare-equivalent services expected to be denied, the member may sign a notice of non-coverage before the service. Without a signed notice, the member may not be billed for a service denied as not medically necessary.\n\nPeer-to-peer. The ordering physician may request a peer-to-peer review within 14 days of the denial."
+    },
+    {
+      "title": "[TEST] Northwind Mutual: Telehealth Services Policy",
+      "source_type": "payer_policy",
+      "payer_name": "NORTHWIND MUTUAL",
+      "version_label": "2026-01",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - Northwind Mutual is fictional. Included as a distractor: it belongs to a payer with no claims in the test data and should never be retrieved for ACME or BCBS of Illinois denials.\n\nTelehealth visits are covered when delivered by real-time audio and video from a HIPAA-compliant platform. Report place of service 10 for a visit to the patient's home or 02 for other locations, and append modifier 95 to the E/M code. Audio-only visits are covered only for behavioral health and must be reported with modifier 93.\n\nTelehealth E/M levels are selected using the same medical decision making or total time rules as in-person visits. Remote physiologic monitoring (99453-99458) requires at least 16 days of data in a 30-day period.\n\nClaims billed with an in-person place of service for a telehealth visit are denied with CARC 5 (the procedure code or bill type is inconsistent with the place of service)."
+    },
+    {
+      "title": "[TEST] ACME Health Plan 2026 Professional Fee Schedule: Evaluation and Management",
+      "source_type": "fee_schedule",
+      "payer_name": "ACME HEALTH PLAN",
+      "version_label": "2026",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - ACME Health Plan is fictional. Rates are invented.\n\nACME PPO participating professional fee schedule, place of service 11 (office), non-facility rates.\n\nCPT 99212 established patient, straightforward MDM: $62.30\nCPT 99213 established patient, low MDM: $98.40\nCPT 99214 established patient, moderate MDM: $138.10\nCPT 99215 established patient, high MDM: $194.60\nCPT 99203 new patient, low MDM: $118.70\nCPT 99204 new patient, moderate MDM: $176.20\n\nPayment is the lesser of billed charges or the rate above. Charges above the allowed amount are adjusted with CARC 45 as a contractual obligation (group code CO); the provider may not bill the member for the difference.\n\nModifier 25 does not change the allowed amount of the E/M service. Facility place-of-service rates (POS 19, 22) are 72% of the non-facility rate."
+    },
+    {
+      "title": "[TEST] ACME Health Plan 2026 Fee Schedule: Laboratory",
+      "source_type": "fee_schedule",
+      "payer_name": "ACME HEALTH PLAN",
+      "version_label": "2026",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - ACME Health Plan is fictional. Rates are invented.\n\nACME laboratory fee schedule for in-office and reference laboratory services.\n\nCPT 80048 basic metabolic panel: $10.90\nCPT 80053 comprehensive metabolic panel: $14.20\nCPT 80061 lipid panel: $17.60\nCPT 83036 hemoglobin A1c: $12.80\nCPT 85025 CBC with automated differential: $8.10\nCPT 85027 CBC without differential: $6.70\nCPT 36415 routine venipuncture: $3.00, once per date of service\n\nA comprehensive metabolic panel billed at $300.00 is allowed at $14.20, and the remaining $285.80 is a CARC 45 contractual adjustment. That adjustment is correct and is not an underpayment. Appeal a CARC 45 adjustment only when the allowed amount paid differs from the rate on this schedule."
+    },
+    {
+      "title": "[TEST] ACME Health Plan 2026 Fee Schedule: Rehabilitation Services",
+      "source_type": "fee_schedule",
+      "payer_name": "ACME HEALTH PLAN",
+      "version_label": "2026",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - ACME Health Plan is fictional. Rates are invented.\n\nACME outpatient physical and occupational therapy rates, per unit.\n\nCPT 97110 therapeutic exercise, each 15 minutes: $29.80\nCPT 97112 neuromuscular re-education, each 15 minutes: $33.40\nCPT 97140 manual therapy, each 15 minutes: $27.90\nCPT 97530 therapeutic activities, each 15 minutes: $35.10\nCPT 97161-97163 PT evaluation, low to high complexity: $101.20 / $101.20 / $101.20\n\nTimed codes are paid per unit up to 4 units per code per date of service. A 97110 line billed at $400.00 for 4 units is allowed at $119.20 (4 x $29.80); the $280.80 difference is a CARC 45 contractual adjustment. Therapy provided by an assistant (modifier CQ) is paid at 85% of the listed rate."
+    },
+    {
+      "title": "[TEST] ACME Health Plan 2026 Fee Schedule: Musculoskeletal Procedures",
+      "source_type": "fee_schedule",
+      "payer_name": "ACME HEALTH PLAN",
+      "version_label": "2026",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - ACME Health Plan is fictional. Rates are invented.\n\nACME professional rates for joint procedures, place of service 11.\n\nCPT 20600 arthrocentesis, small joint, without ultrasound: $52.40\nCPT 20605 arthrocentesis, intermediate joint, without ultrasound: $55.90\nCPT 20610 arthrocentesis, major joint (knee, shoulder, hip), without ultrasound: $78.50\nCPT 20611 arthrocentesis, major joint, with ultrasound guidance and permanent recording: $104.30\nHCPCS J3301 triamcinolone acetonide, per 10 mg: $1.90\nHCPCS J7325 hyaluronan, per dose: per the ACME specialty drug schedule\n\nBilateral procedures are billed on one line with modifier 50 and paid at 150% of the unilateral rate. 20610 carries a 0-day global period; a same-day E/M is payable only with modifier 25. Payment for 20610 is conditional on prior authorization where required by the ACME prior authorization list."
+    },
+    {
+      "title": "[TEST] BCBS of Illinois 2026 PPO Fee Schedule: Evaluation and Management",
+      "source_type": "fee_schedule",
+      "payer_name": "BLUECROSS BLUESHIELD OF ILLINOIS",
+      "version_label": "2026",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - fabricated for testing. Not an actual Blue Cross Blue Shield of Illinois fee schedule. Rates are invented.\n\nPPO professional allowances, place of service 11.\n\nCPT 99213 established patient, low MDM: $104.70\nCPT 99214 established patient, moderate MDM: $146.90\nCPT 99215 established patient, high MDM: $205.30\n\nThe allowed amount is divided between the plan and the member according to the member's benefits. The member portion appears on the remittance as group code PR: CARC 1 for the deductible, CARC 2 for coinsurance, and CARC 3 for a copay. For example, a 99214 billed at $1,200.00 is allowed at $146.90; if the member has not met the deductible, the full $146.90 is CARC 1 (PR) and is collectible from the member, and the remaining $1,053.10 is a CARC 45 (CO) contractual adjustment that is not collectible.\n\nModifier 25 on an E/M does not change its allowance."
+    },
+    {
+      "title": "[TEST] BCBS of Illinois 2026 PPO Fee Schedule: Radiology and Laboratory",
+      "source_type": "fee_schedule",
+      "payer_name": "BLUECROSS BLUESHIELD OF ILLINOIS",
+      "version_label": "2026",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - fabricated for testing. Not an actual Blue Cross Blue Shield of Illinois fee schedule. Rates are invented.\n\nPPO allowances for outpatient diagnostic services.\n\nCPT 71045 chest x-ray, single view, global: $31.20\nCPT 71046 chest x-ray, two views, global: $38.60 (professional component modifier 26: $11.40; technical component modifier TC: $27.20)\nCPT 71250 CT chest without contrast, global: $162.80\nCPT 80053 comprehensive metabolic panel: $15.10\nCPT 85025 CBC with automated differential: $8.90\n\nServices requiring notification under the outpatient diagnostic notification program are paid only when a valid notification number is on file for the date of service. Without one, the line is denied with CARC 197 regardless of these allowances.\n\nGlobal billing is permitted only when the practice owns the equipment and interprets the study."
+    },
+    {
+      "title": "[TEST] ACME Health Plan PPO Agreement - Exhibit B: Compensation",
+      "source_type": "contract",
+      "payer_name": "ACME HEALTH PLAN",
+      "version_label": "Agreement 2024, Exhibit B rev. 2026",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - ACME Health Plan is fictional and so is this agreement.\n\nB.1 Payment. For covered services rendered to ACME PPO members, ACME shall pay the lesser of (a) the provider's billed charges or (b) the applicable ACME fee schedule in effect on the date of service, less any member cost share.\n\nB.2 Payment in full. The amount in B.1 is payment in full. The provider shall not bill the member for any amount above the allowed amount; that difference is reported as CARC 45 under group code CO.\n\nB.3 Member cost share. The provider may collect deductible, coinsurance, and copay amounts reported under group code PR. These amounts may not be waived routinely.\n\nB.4 Fee schedule updates. ACME may revise the fee schedule once per calendar year with 90 days' written notice.\n\nB.5 Underpayment. If ACME pays less than the amount required by B.1, the provider may submit a payment dispute within 12 months of the payment date. A CARC 45 adjustment that correctly applies the fee schedule is not an underpayment."
+    },
+    {
+      "title": "[TEST] ACME Health Plan PPO Agreement - Article 6: Claims, Corrections and Disputes",
+      "source_type": "contract",
+      "payer_name": "ACME HEALTH PLAN",
+      "version_label": "Agreement 2024",
+      "effective_date": "2024-07-01",
+      "content": "SYNTHETIC TEST DOCUMENT - ACME Health Plan is fictional and so is this agreement.\n\n6.1 Timely filing. The provider shall submit initial claims within 120 days of the date of service. Claims received after this limit are denied with CARC 29 and may not be billed to the member.\n\n6.2 Corrected claims. Corrected or replacement claims must be received within 90 days of the original remittance. A claim denied with CARC 16 for missing or invalid information shall be corrected and resubmitted, not appealed.\n\n6.3 Provider appeals. The provider may appeal an adverse determination within 60 days of the remittance date. ACME shall decide the appeal within 30 days. A second-level appeal may be filed within 30 days of the first-level decision.\n\n6.4 Clean claims. ACME shall pay or deny a clean claim within 30 days of receipt. Interest accrues at 9% per year on clean claims paid late.\n\n6.5 Overpayments. ACME may recover an overpayment by offset only after 45 days' written notice identifying the claim and the reason."
+    },
+    {
+      "title": "[TEST] ACME Health Plan PPO Agreement - Article 7: Utilization Management",
+      "source_type": "contract",
+      "payer_name": "ACME HEALTH PLAN",
+      "version_label": "Agreement 2024",
+      "effective_date": "2024-07-01",
+      "content": "SYNTHETIC TEST DOCUMENT - ACME Health Plan is fictional and so is this agreement.\n\n7.1 Prior authorization. The provider shall obtain authorization before rendering services on the ACME prior authorization list in effect on the date of service. ACME shall publish list changes at least 60 days before they take effect.\n\n7.2 Failure to authorize. Services requiring authorization that are rendered without it are denied with CARC 197. The member may not be billed for these services.\n\n7.3 Retro-authorization. ACME shall accept a retro-authorization request within 3 business days of the service when (a) the service was urgent or emergent, (b) the member's eligibility or coverage could not be verified at the time of service, or (c) the need for the service was identified during the visit and delaying it would have harmed the member.\n\n7.4 Appeal of authorization denials. A denial under 7.2 may be appealed under Article 6.3 with documentation that one of the conditions in 7.3 applied, or that the service was not on the prior authorization list for the date of service.\n\n7.5 Clinical criteria. ACME shall make the clinical criteria used for authorization decisions available on request."
+    },
+    {
+      "title": "[TEST] BCBS of Illinois PPO Agreement - Section 5: Member Financial Responsibility",
+      "source_type": "contract",
+      "payer_name": "BLUECROSS BLUESHIELD OF ILLINOIS",
+      "version_label": "Agreement 2023",
+      "effective_date": "2023-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - fabricated for testing. Not an actual Blue Cross Blue Shield of Illinois contract.\n\n5.1 Hold harmless. Except for applicable cost share, the provider shall look only to the plan for payment of covered services and shall not bill the member for any amount denied for provider liability reasons (group code CO), including contractual adjustments, bundling, and lack of authorization.\n\n5.2 Cost share. The provider shall bill the member for deductible (CARC 1), coinsurance (CARC 2), and copay (CARC 3) amounts reported under group code PR, and shall make reasonable collection efforts. Routine waiver of cost share is a breach of this Agreement.\n\n5.3 Collection at time of service. The provider may collect a copay at the time of service. Deductible and coinsurance should be collected after the remittance is received, based on the amounts it reports.\n\n5.4 Statements. Member statements shall itemize the date of service, the service, the amount paid by the plan, and the member balance, and shall include a contact number for billing questions."
+    },
+    {
+      "title": "[TEST] BCBS of Illinois PPO Agreement - Section 8: Payment Disputes",
+      "source_type": "contract",
+      "payer_name": "BLUECROSS BLUESHIELD OF ILLINOIS",
+      "version_label": "Agreement 2023",
+      "effective_date": "2023-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - fabricated for testing. Not an actual Blue Cross Blue Shield of Illinois contract.\n\n8.1 Scope. A payment dispute concerns the amount paid on a claim, such as a fee schedule or contractual rate applied incorrectly. Disputes about coverage or medical necessity follow the appeal process instead.\n\n8.2 Filing. A payment dispute must be submitted within 180 days of the remittance date and must identify the claim, the amount paid, the amount expected, and the contract provision relied on.\n\n8.3 Resolution. The plan shall respond within 45 days. If the dispute is not resolved, either party may request mediation within 60 days of the response.\n\n8.4 Arbitration. Disputes not resolved by mediation are resolved by binding arbitration under the rules in Exhibit F. Claims may be aggregated only when they involve the same contract provision.\n\n8.5 No member involvement. Members shall not be billed or otherwise involved in any payment dispute between the provider and the plan."
+    },
+    {
+      "title": "[TEST] BCBS of Illinois PPO Agreement - Amendment 4: 2026 Rates and Notification Program",
+      "source_type": "contract",
+      "payer_name": "BLUECROSS BLUESHIELD OF ILLINOIS",
+      "version_label": "Amendment 4",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - fabricated for testing. Not an actual Blue Cross Blue Shield of Illinois contract.\n\n1. Rate adjustment. Effective January 1, 2026, professional fee schedule allowances increase by 3.0% over the 2025 schedule. Laboratory allowances are unchanged.\n\n2. Outpatient diagnostic notification program. Effective January 1, 2026, the provider shall obtain a notification number before performing outpatient diagnostic imaging and laboratory services ordered for members enrolled in the plan's narrow-network HMO product, when the service is performed outside the member's assigned medical group. This includes plain-film radiography (such as 71046) and laboratory panels (such as 85025).\n\n3. Consequence. Services requiring notification that are performed without it are denied with CARC 197 and RARC N130 and are the provider's liability.\n\n4. Grace period. Through March 31, 2026, the plan will accept notification up to 5 business days after the service. After that date, notification must precede the service except in an emergency."
+    },
+    {
+      "title": "[TEST] ACME Health Plan Prior Authorization List 2026: Musculoskeletal Injections",
+      "source_type": "prior_auth_policy",
+      "payer_name": "ACME HEALTH PLAN",
+      "version_label": "2026-Q1",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - ACME Health Plan is fictional.\n\nServices requiring prior authorization for ACME PPO and HMO members:\n\n- Major joint injection or aspiration (CPT 20610, 20611) when it is the fourth or later injection in the same joint within 12 months, or when a viscosupplement (J7318-J7333) is injected.\n- Any major joint injection for a diagnosis other than osteoarthritis (M17.x, M16.x, M19.x) or crystal arthropathy.\n\nAuthorization is not required for the first three corticosteroid injections per joint per 12 months for osteoarthritis. However, claims for 20610 are denied with CARC 197 and RARC N130 when the claim history shows three prior injections in the same joint in 12 months and no authorization is on file.\n\nHow to request. Submit through the ACME portal with the diagnosis and laterality, the dates and outcomes of prior injections, and the conservative therapy tried. Standard requests are decided in 5 business days.\n\nRetro-authorization is available only under the conditions in the ACME PPO Agreement, Article 7.3."
+    },
+    {
+      "title": "[TEST] ACME Health Plan: Retro-Authorization Requests",
+      "source_type": "prior_auth_policy",
+      "payer_name": "ACME HEALTH PLAN",
+      "version_label": "2026-01",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - ACME Health Plan is fictional.\n\nWhen a claim is denied with CARC 197 because no authorization was on file, the provider may request retro-authorization instead of filing an appeal, if the request is made within 3 business days of the date of service and one of the following applies:\n\n1. The service was urgent or emergent.\n2. Eligibility could not be verified at the time of service because of a plan system outage or an eligibility change that had not been posted.\n3. The clinical need was identified during the visit and delaying the service would have caused harm.\n\nRequests made after 3 business days are handled as a first-level appeal, and the same documentation is required.\n\nRequired documentation. The visit note showing why the service was needed that day, evidence supporting the condition relied on (for example, a portal screenshot of the failed eligibility check), and the clinical information that a prospective request would have required.\n\nIf retro-authorization is approved, ACME reprocesses the original claim automatically; do not submit a new claim."
+    },
+    {
+      "title": "[TEST] ACME Health Plan: Outpatient Rehabilitation Authorization",
+      "source_type": "prior_auth_policy",
+      "payer_name": "ACME HEALTH PLAN",
+      "version_label": "2026-01",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - ACME Health Plan is fictional.\n\nPhysical therapy, occupational therapy, and speech therapy do not require authorization for the initial evaluation and the first 12 treatment visits per condition per calendar year. Visit 13 and later require authorization.\n\nAuthorization request. Submit the plan of care, the most recent progress report, objective measures (for example, range of motion in degrees, gait speed, or a standardized outcome score), and the remaining functional goals. ACME approves visits in blocks of up to 8.\n\nTimed codes. Authorization is by visit, not by unit. Units billed per visit must follow the 8-minute rule. A 97110 line billed with more than 4 units on one date is reviewed for medical necessity.\n\nDenials. Visits beyond 12 without authorization are denied with CARC 197. Visits within the first 12 that are billed with a charge above the fee schedule are adjusted with CARC 45; that is a pricing adjustment, not an authorization denial."
+    },
+    {
+      "title": "[TEST] BCBS of Illinois: Outpatient Diagnostic Notification Program",
+      "source_type": "prior_auth_policy",
+      "payer_name": "BLUECROSS BLUESHIELD OF ILLINOIS",
+      "version_label": "2026-01",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - fabricated for testing. Not an actual Blue Cross Blue Shield of Illinois program.\n\nWho it applies to. Members enrolled in the narrow-network HMO product whose outpatient diagnostic services are performed outside their assigned medical group.\n\nServices included. Diagnostic radiology, including plain films such as a two-view chest x-ray (71046), and laboratory services such as a CBC (85025) and metabolic panels.\n\nHow to notify. The ordering or performing provider submits notification through the provider portal before the service. The portal issues a notification number immediately for services on the automatic-approval list, which includes 71046 and 85025 when ordered with a supporting diagnosis such as J44.9 (COPD) or E11.65 (type 2 diabetes with hyperglycemia).\n\nDenials. A service performed without a notification number is denied with CARC 197 and RARC N130. Because notification is automatic for these services, the usual fix is to obtain the notification number (retroactively, if within the grace period) and request reconsideration, not to file a clinical appeal.\n\nGrace period. Through March 31, 2026, notification is accepted up to 5 business days after the service."
+    },
+    {
+      "title": "[TEST] BCBS of Illinois: Laboratory Services at Non-Preferred Labs",
+      "source_type": "prior_auth_policy",
+      "payer_name": "BLUECROSS BLUESHIELD OF ILLINOIS",
+      "version_label": "2026-01",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - fabricated for testing. Not an actual Blue Cross Blue Shield of Illinois policy.\n\nPreferred laboratories. PPO and HMO members should have laboratory testing performed at a preferred reference laboratory or in the office of a physician holding a CLIA certificate.\n\nIn-office testing. Physician offices may bill the CBC (85025), basic and comprehensive metabolic panels (80048, 80053), lipid panel (80061), and hemoglobin A1c (83036) without notification when the test is performed in the office for the office's own patient.\n\nSend-out testing. Tests sent by the office to a non-preferred laboratory require notification for HMO members under the outpatient diagnostic notification program. Without notification, the laboratory claim is denied with CARC 197 and RARC N130.\n\nPurchased tests. An office may not bill a test performed by an outside laboratory as its own. Report the performing laboratory's CLIA number in the claim."
+    },
+    {
+      "title": "[TEST] BCBS of Illinois: Authorization Denials - Peer-to-Peer and Expedited Review",
+      "source_type": "prior_auth_policy",
+      "payer_name": "BLUECROSS BLUESHIELD OF ILLINOIS",
+      "version_label": "2026-01",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - fabricated for testing. Not an actual Blue Cross Blue Shield of Illinois policy.\n\nPeer-to-peer. When a prior authorization request is denied for medical necessity, the ordering physician may request a peer-to-peer conversation with the plan medical director within 14 calendar days of the decision. A peer-to-peer can reverse the denial without a formal appeal.\n\nExpedited review. For urgent services, when waiting for a standard decision could seriously jeopardize the member's health, the provider may request expedited review. Expedited decisions are made within 72 hours.\n\nAfter a claim denial. If the service was already performed and the claim was denied with CARC 197, a peer-to-peer is no longer available. Use reconsideration if a notification or authorization number exists but was not on the claim, or a first-level appeal if no authorization was obtained and the circumstances justify an exception.\n\nWhat to include in an appeal of CARC 197: the date the need was identified, why prior authorization was not obtained, the clinical notes, and any authorization or notification number obtained afterwards."
+    },
+    {
+      "title": "[TEST] Criteria: Intra-articular Knee Injection for Osteoarthritis",
+      "source_type": "medical_necessity_criteria",
+      "payer_name": null,
+      "version_label": "2026",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - invented clinical criteria for testing only. Not medical guidance.\n\nA corticosteroid injection or aspiration of the knee (20610) for primary osteoarthritis of the right knee (M17.11) or left knee (M17.12) meets criteria when ALL of the following are documented:\n\n1. Knee pain on most days for at least 3 months, with functional limitation (for example, difficulty with stairs, walking tolerance under 30 minutes, or a WOMAC or KOOS score).\n2. Radiographic evidence of osteoarthritis (Kellgren-Lawrence grade 2 or higher), or clinical diagnosis with crepitus, bony enlargement, and morning stiffness under 30 minutes.\n3. At least 6 weeks of failed conservative management: oral or topical NSAIDs unless contraindicated, and physical therapy or a home exercise program.\n4. No infection at the injection site and no injection in the same knee within the prior 12 weeks.\n\nRepeat injections require documentation of at least 50% improvement lasting 6 weeks or more after the prior injection. A fourth injection in 12 months requires review for surgical referral."
+    },
+    {
+      "title": "[TEST] Criteria: Outpatient Therapeutic Exercise for Hip Pain",
+      "source_type": "medical_necessity_criteria",
+      "payer_name": null,
+      "version_label": "2026",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - invented clinical criteria for testing only. Not medical guidance.\n\nTherapeutic exercise (97110) for right hip pain (M25.551) or left hip pain (M25.552) meets criteria when:\n\n1. A licensed therapist's evaluation documents a measurable deficit: hip range of motion limited by 15 degrees or more, abductor or extensor strength of 4/5 or lower, a Timed Up and Go over 12 seconds, or a Lower Extremity Functional Scale under 60/80.\n2. The plan of care states specific, time-bound functional goals.\n3. The patient is expected to improve significantly within a reasonable and predictable period.\n4. The services require the skills of a therapist; exercises the patient can do independently are a home program, not skilled therapy.\n\nContinuation requires objective progress on at least one goal at each 10-visit progress report. When 2 consecutive reports show no measurable change, continued therapy no longer meets criteria.\n\nUnits over 4 per session need a documented reason, such as a patient tolerating a longer session after surgery."
+    },
+    {
+      "title": "[TEST] Criteria: High-Complexity Established Patient Visit (99215)",
+      "source_type": "medical_necessity_criteria",
+      "payer_name": null,
+      "version_label": "2026",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - invented criteria for testing only.\n\nA level 5 established patient visit (99215) is supported when the note documents high medical decision making, meeting 2 of these 3 elements, or at least 40 minutes of total practitioner time on the date of service:\n\n1. Problems: a chronic illness with severe exacerbation or progression, or an acute or chronic illness posing a threat to life or bodily function.\n2. Data: extensive review, such as independent interpretation of a test performed by another physician plus review of external notes and ordering tests, or discussion of management with an external physician.\n3. Risk: drug therapy requiring intensive monitoring for toxicity, a decision about emergency hospitalization, or a decision about major surgery.\n\nExample. Low back pain (M54.50) managed with over-the-counter analgesics and home exercise is typically low MDM (99213). It supports 99215 only with red-flag findings, such as a new neurologic deficit or suspected cauda equina, prompting urgent imaging and referral.\n\nIncomplete documentation. When the level cannot be determined from the record, the payer may deny with CARC 16 and request the visit note."
+    },
+    {
+      "title": "[TEST] Criteria: Metabolic Panel - Screening Versus Diagnostic Use",
+      "source_type": "medical_necessity_criteria",
+      "payer_name": null,
+      "version_label": "2026",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - invented criteria for testing only.\n\nA comprehensive metabolic panel (80053) is diagnostic, and processed under the medical benefit, when ordered for a documented sign, symptom, abnormal prior result, or a monitored condition such as diabetes (E11.x), hypertension on medications affecting electrolytes, or chronic kidney disease.\n\nIt is screening when ordered for a patient with no symptoms or relevant conditions during a routine general examination (Z00.00 encounter without abnormal findings).\n\nBilling guidance:\n- If the physician identified a finding during the examination (Z00.01) and ordered the panel for it, code the finding as the primary diagnosis for the laboratory line.\n- If the panel was purely screening, expect it to process under the member's cost share. A deductible (CARC 1, group PR) on a screening panel is a correct benefit application and should be billed to the patient, not appealed.\n- Do not add diagnosis codes that are not documented in order to obtain coverage."
+    },
+    {
+      "title": "[TEST] Criteria: Chest Radiograph in Chronic Obstructive Pulmonary Disease",
+      "source_type": "medical_necessity_criteria",
+      "payer_name": null,
+      "version_label": "2026",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - invented clinical criteria for testing only. Not medical guidance.\n\nA two-view chest radiograph (71046) in a patient with COPD (J44.9) meets criteria when at least one of the following is documented:\n\n1. Suspected exacerbation: increased dyspnea, increased sputum volume, or purulent sputum (report J44.1 when an exacerbation is diagnosed).\n2. Fever, focal lung findings, or hypoxia (SpO2 below 90% or a drop of 4 points or more from baseline), suggesting pneumonia.\n3. Hemoptysis, unexplained weight loss, or a new mass on examination.\n4. Failure to improve within 72 hours of treatment for an exacerbation.\n\nDoes not meet criteria: routine surveillance imaging in stable COPD, or imaging ordered only because the patient has COPD and diabetes (E11.65) without a new symptom.\n\nWhen the note documents a qualifying symptom but the claim lists only J44.9, correct the claim to include the symptom or exacerbation code instead of appealing."
+    },
+    {
+      "title": "[TEST] Criteria: Complete Blood Count in Diabetes and COPD",
+      "source_type": "medical_necessity_criteria",
+      "payer_name": null,
+      "version_label": "2026",
+      "effective_date": "2026-01-01",
+      "content": "SYNTHETIC TEST DOCUMENT - invented clinical criteria for testing only. Not medical guidance.\n\nA CBC with differential (85025) in a patient with type 2 diabetes with hyperglycemia (E11.65) or COPD (J44.9) meets criteria when the order documents one of the following:\n\n1. Signs of infection: fever, a suspected foot or skin infection in a diabetic patient, or suspected pneumonia in COPD.\n2. Symptoms suggesting anemia: fatigue, pallor, dyspnea out of proportion to lung disease, or a known chronic kidney disease stage 3 or higher.\n3. Monitoring for medications with hematologic effects.\n4. Polycythemia evaluation in COPD with chronic hypoxemia.\n\nDoes not meet criteria: a CBC ordered at every chronic-care visit without a stated reason.\n\nWhen the CBC was ordered together with a chest radiograph for a suspected COPD exacerbation or infection, the same documented symptoms support both services."
+    }
+  ],
+  "playbooks": [
+    {
+      "name": "[TEST] ACME CO-45: verify allowed amount, then contractual adjustment",
+      "description": "CARC 45 is a pricing adjustment under the ACME agreement (Exhibit B), not a denial. Appeal only if the allowed amount differs from the fee schedule.",
+      "triggers": {"carc_code": "45", "cagc": "CO", "payer_name": "ACME HEALTH PLAN"},
+      "recommendation": {
+        "denial_category": "other",
+        "required_action": "write_off",
+        "root_cause_summary": "Billed charge exceeds the ACME fee schedule allowance; the difference is a contractual adjustment.",
+        "steps": [
+          "Look up the CPT on the 2026 ACME fee schedule for the place of service.",
+          "Confirm the allowed amount on the remittance matches the schedule (times units for timed codes).",
+          "If it matches, post the CARC 45 amount as a contractual adjustment. Do not bill the patient.",
+          "If it does not match, file a payment dispute under Exhibit B.5 within 12 months."
+        ],
+        "needs_appeal": false
+      }
+    },
+    {
+      "name": "[TEST] ACME CO-97 bundling: check modifier 25 before appealing",
+      "description": "E/M bundled into a same-day procedure (CARC 97 / N19).",
+      "triggers": {"carc_code": "97", "cagc": "CO", "payer_name": "ACME HEALTH PLAN"},
+      "recommendation": {
+        "denial_category": "bundled_service",
+        "required_action": "coding_correction",
+        "root_cause_summary": "E/M billed on the same date as a minor procedure without modifier 25, so it was bundled.",
+        "steps": [
+          "Check whether a procedure with a 0 or 10 day global period was billed on the same date.",
+          "Review the note for a significant, separately identifiable E/M (for example, diabetes management).",
+          "If documented and modifier 25 was missing, submit a corrected claim with modifier 25.",
+          "If modifier 25 was present, appeal with the visit note."
+        ],
+        "needs_appeal": false
+      }
+    },
+    {
+      "name": "[TEST] ACME CO-197: retro-authorization or appeal",
+      "description": "Missing authorization for a major joint injection or therapy beyond visit 12.",
+      "triggers": {"carc_code": "197", "cagc": "CO", "payer_name": "ACME HEALTH PLAN"},
+      "recommendation": {
+        "denial_category": "lack_of_preauth",
+        "required_action": "appeal",
+        "root_cause_summary": "Service on the ACME prior authorization list was billed with no authorization on file.",
+        "steps": [
+          "Confirm the service is on the ACME prior authorization list for the date of service.",
+          "If within 3 business days and an Article 7.3 condition applies, request retro-authorization.",
+          "Otherwise file a first-level appeal within 60 days with the note and injection history.",
+          "Do not bill the patient (Agreement 7.2)."
+        ],
+        "needs_appeal": true
+      }
+    },
+    {
+      "name": "[TEST] ACME CO-16: correct and resubmit, do not appeal",
+      "description": "Missing or invalid claim information, including crossover duplicates (N522).",
+      "triggers": {"carc_code": "16", "cagc": "CO", "payer_name": "ACME HEALTH PLAN"},
+      "recommendation": {
+        "denial_category": "missing_info",
+        "required_action": "coding_correction",
+        "root_cause_summary": "Claim lacked required information or duplicated a crossover claim.",
+        "steps": [
+          "Read the RARC to identify the missing element; N522 means a crossover claim already exists.",
+          "For N522, check crossover status in the ACME portal and do not resubmit while it is pending.",
+          "Otherwise correct the claim and resubmit as a replacement (frequency code 7) within 90 days."
+        ],
+        "needs_appeal": false
+      }
+    },
+    {
+      "name": "[TEST] BCBSIL CO-197 notification: obtain number and request reconsideration",
+      "description": "Outpatient diagnostic notification program denials (CARC 197 / N130).",
+      "triggers": {"carc_code": "197", "cagc": "CO", "payer_name": "BLUECROSS BLUESHIELD OF ILLINOIS"},
+      "recommendation": {
+        "denial_category": "lack_of_preauth",
+        "required_action": "clinical_documentation",
+        "root_cause_summary": "Diagnostic service for a narrow-network HMO member performed without a notification number.",
+        "steps": [
+          "Confirm the member is in the narrow-network HMO and the service was outside the assigned medical group.",
+          "Obtain the notification number in the portal (automatic for 71046 and 85025 with a supporting diagnosis).",
+          "Submit reconsideration with the notification number; appeal only if notification is refused."
+        ],
+        "needs_appeal": false
+      }
+    },
+    {
+      "name": "[TEST] BCBSIL CO-50 / N115: compare with the LCD, correct or appeal",
+      "description": "Medical necessity denials based on a Local Coverage Determination.",
+      "triggers": {"carc_code": "50", "cagc": "CO", "payer_name": "BLUECROSS BLUESHIELD OF ILLINOIS"},
+      "recommendation": {
+        "denial_category": "medical_necessity",
+        "required_action": "appeal",
+        "root_cause_summary": "Claim diagnoses did not match the covered indications of the governing LCD.",
+        "steps": [
+          "Identify the LCD for the service and compare its covered indications with the claim diagnoses.",
+          "If a covered diagnosis is documented but was not coded, submit a corrected claim.",
+          "If documentation supports the service, file a first-level appeal within 180 days quoting the LCD.",
+          "Do not bill the member unless a signed notice of non-coverage is on file."
+        ],
+        "needs_appeal": true
+      }
+    },
+    {
+      "name": "[TEST] Any payer PR-1 deductible: bill the patient",
+      "description": "Deductible applied under the member's benefits.",
+      "triggers": {"carc_code": "1", "cagc": "PR"},
+      "recommendation": {
+        "denial_category": "patient_responsibility",
+        "required_action": "bill_patient",
+        "root_cause_summary": "Member deductible applied; the amount is the patient's responsibility.",
+        "steps": [
+          "Confirm the PR-1 amount does not exceed the allowed amount on the remittance.",
+          "Transfer the balance to patient responsibility and send an itemized statement.",
+          "Do not appeal; cost share is not subject to provider appeal."
+        ],
+        "needs_appeal": false
+      }
+    },
+    {
+      "name": "[TEST] Any payer PR-2 coinsurance: bill the patient",
+      "description": "Coinsurance applied under the member's benefits.",
+      "triggers": {"carc_code": "2", "cagc": "PR"},
+      "recommendation": {
+        "denial_category": "patient_responsibility",
+        "required_action": "bill_patient",
+        "root_cause_summary": "Member coinsurance applied; the amount is the patient's responsibility.",
+        "steps": [
+          "Confirm the coinsurance amount against the allowed amount and the member's coinsurance rate.",
+          "Transfer the balance to patient responsibility and send an itemized statement.",
+          "Do not waive routinely; the payer agreement requires collection efforts."
+        ],
+        "needs_appeal": false
+      }
+    }
+  ]
+}
