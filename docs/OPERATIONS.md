@@ -50,6 +50,22 @@ organization's approved retention/encryption policy.
 4. Verify service health, then run the synthetic 835 and 837
    fixtures. Retain the previous image digest until this verification passes.
 
+## Service health
+
+Settings → System health (`GET /api/v1/system/health`) reports each service. The
+two model rows test real function, not just reachability:
+
+- **LLM provider** comes from the recommendation service, which lists the LLM
+  server's models with its API key and checks that the model it will request
+  (`LLM_MODEL`, or the first served model for `auto`) is served. A wrong model
+  name, rejected key or unreachable server shows here with the server's reason.
+- **Embedding provider** comes from the retrieval service, which embeds a probe
+  string and requires a 768-dimension vector, the size of the index. The result
+  is cached for 30 seconds. It reads *Turned off* when `VECTOR_SEARCH_ENABLED=false`.
+
+Either row failing makes the overall status *degraded*: analyses fall back to
+deterministic rules and new documents cannot be embedded until it is fixed.
+
 ## Air-gapped hosts
 
 Build/pull images and package the Rust/frontend dependency caches on a

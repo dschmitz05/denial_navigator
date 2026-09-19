@@ -13,8 +13,9 @@ type AppealWindow = AnyRecord & { payer_name: string; appeal_window_days?: numbe
 const STATUS_LOOK: Record<string, { icon: string; word: string; tone: string }> = {
   ok:       { icon: '✅', word: 'Running',      tone: 'success' },
   degraded: { icon: '⚠️', word: 'Degraded',     tone: 'warning' },
-  down:     { icon: '❌', word: 'Not reachable', tone: 'danger' },
+  down:     { icon: '❌', word: 'Not working',  tone: 'danger' },
   starting: { icon: '⏳', word: 'Starting',      tone: 'warning' },
+  disabled: { icon: '⏸️', word: 'Turned off',   tone: '' },
 }
 
 const KIND_LABEL: Record<string, string> = {

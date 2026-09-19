@@ -1,6 +1,9 @@
 //! RAG Engine Service — embedding generation, vector store, and semantic
 //! retrieval. Ported from `rag-engine/main.py`.
 
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
 use axum::{
     extract::State,
     http::StatusCode,
@@ -317,9 +320,63 @@ struct PromptRequest {
 
 // ── Handlers ──
 
+/// Dimensions of `knowledge_chunks.embedding`. A provider returning any other
+/// length would fail every chunk insert and every search.
+const EMBEDDING_DIMENSIONS: usize = 768;
+const EMBEDDING_CHECK_TTL: Duration = Duration::from_secs(30);
+
+static EMBEDDING_CHECK: OnceLock<Mutex<Option<(Instant, Value)>>> = OnceLock::new();
+
+/// The vector length the provider returns, or why it cannot be used.
+fn check_embedding(result: Result<Vec<Vec<f64>>, AppError>) -> Result<usize, String> {
+    let vectors = result.map_err(|error| error.to_string())?;
+    let dimensions = vectors
+        .first()
+        .map(Vec::len)
+        .ok_or("embedding provider returned no vector")?;
+    if dimensions == EMBEDDING_DIMENSIONS {
+        Ok(dimensions)
+    } else {
+        Err(format!(
+            "embedding provider returned {dimensions} dimensions; the index needs {EMBEDDING_DIMENSIONS}"
+        ))
+    }
+}
+
+/// Embeds a probe string, so a stopped server, a wrong URL or a model with the
+/// wrong dimensions is reported here instead of when a document is uploaded.
+async fn embedding_status(state: &AppState) -> Value {
+    if !state.cfg.vector_search_enabled {
+        return json!({"status": "disabled", "detail": "VECTOR_SEARCH_ENABLED=false; lexical search only"});
+    }
+    let cache = EMBEDDING_CHECK.get_or_init(|| Mutex::new(None));
+    if let Some((at, value)) = cache.lock().unwrap().as_ref() {
+        if at.elapsed() < EMBEDDING_CHECK_TTL {
+            return value.clone();
+        }
+    }
+    let input = ["health check".to_string()];
+    let probe = state.embeddings.embed(EmbedKind::Query, &input);
+    let result = match tokio::time::timeout(Duration::from_secs(3), probe).await {
+        Ok(result) => check_embedding(result),
+        Err(_) => Err("embedding provider did not answer within 3 seconds".into()),
+    };
+    let value = match result {
+        Ok(dimensions) => json!({
+            "status": "ok",
+            "detail": format!("{dimensions}-dimension vectors from {}", state.cfg.embedding_model),
+        }),
+        Err(reason) => json!({"status": "down", "detail": reason}),
+    };
+    *cache.lock().unwrap() = Some((Instant::now(), value.clone()));
+    value
+}
+
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
+    let embedding = embedding_status(&state).await;
     Json(json!({
         "status": "healthy",
+        "embedding": embedding,
         "embedding_model": state.cfg.embedding_model,
         "embedding_prefixes": {
             "query": state.cfg.embed_prefixes.query,
@@ -587,4 +644,35 @@ async fn main() {
     axum::serve(listener, build_router(state))
         .await
         .expect("RAG engine error");
+}
+
+#[cfg(test)]
+mod health_tests {
+    use super::{check_embedding, EMBEDDING_DIMENSIONS};
+    use denial_common::error::AppError;
+
+    #[test]
+    fn a_768_dimension_vector_is_healthy() {
+        assert_eq!(
+            check_embedding(Ok(vec![vec![0.0; EMBEDDING_DIMENSIONS]])),
+            Ok(EMBEDDING_DIMENSIONS)
+        );
+    }
+
+    #[test]
+    fn wrong_dimensions_name_both_sizes() {
+        assert_eq!(
+            check_embedding(Ok(vec![vec![0.0; 384]])),
+            Err("embedding provider returned 384 dimensions; the index needs 768".into())
+        );
+    }
+
+    #[test]
+    fn provider_errors_and_empty_results_are_unhealthy() {
+        assert!(check_embedding(Err(AppError::Upstream(
+            "embedding server 404 Not Found".into()
+        )))
+        .is_err());
+        assert!(check_embedding(Ok(vec![])).is_err());
+    }
 }
