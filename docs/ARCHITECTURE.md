@@ -176,6 +176,31 @@ Retrieval is filtered by payer: a denial is argued from documents whose
 scope for every denial. Archived documents are excluded, and results below
 `MIN_SIMILARITY` are dropped rather than padded out with weak matches.
 
+**The evidence cut** decides what the model is allowed to argue from, and was
+calibrated with `scripts/eval_retrieval.py` over the labelled queries in
+`scripts/fixtures/retrieval_eval.json`:
+
+- **Anchors.** A chunk must contain one of the query's own terms as a whole
+  word. When the query carries codes, only the codes anchor — a denial query
+  also carries its CARC wording ("Non-covered charge"), which unrelated
+  policies share. This is what makes a denial no document covers return
+  nothing.
+- **`MIN_SIMILARITY`** (0.62) and **`RELATIVE_CUT`** (0.04, dropping results
+  that far below the best match).
+- **`ANCHOR_MAX_SHARE`** (0.25): a term carried by more than this share of the
+  scoped chunks is too common to anchor on.
+
+Two measured facts shape this. Similarity alone cannot tell a good match from a
+bad one with nomic-embed-text: the correct document scores 0.62–0.84 and the
+best wrong one 0.61–0.75, so raising `MIN_SIMILARITY` discards real policies
+before it stops weak ones. And the query's wording matters more than the
+threshold — asking with bare codes and the payer name put the right document
+first 57% of the time, against 86% for the labelled form `build_search_query`
+now sends (`routes/analyses.rs`), which is also what the anchors key on. When
+nothing survives the cut, the analysis records the `no_evidence` fallback
+reason rather than citing weak matches. `scripts/test_retrieval_cut.sh` covers
+it end to end, and `scripts/eval_retrieval.py --check` is the CI gate.
+
 Payer names are spelled differently by remittances, claims and payer manuals
 ("BlueCross BlueShield", "BLUECROSS BLUESHIELD OF ILLINOIS"), so a document
 also matches when its `payer_name` and the claim's payer name or payer ID are

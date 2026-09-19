@@ -36,6 +36,10 @@ struct Config {
     chunk_chars: usize,
     chunk_overlap: usize,
     min_similarity: f64,
+    /// Drop results scoring more than this below the best match.
+    relative_cut: f64,
+    /// A term in more than this share of the scoped chunks is too common to anchor on.
+    anchor_max_share: f64,
     embed_batch: usize,
     vector_search_enabled: bool,
     phi_disclosure_level: PhiDisclosureLevel,
@@ -69,7 +73,9 @@ impl Config {
             embed_base_url: env_or("EMBED_BASE_URL", "http://10.10.10.98:8081"),
             chunk_chars: env_usize("CHUNK_CHARS", 1500),
             chunk_overlap: env_usize("CHUNK_OVERLAP", 200),
-            min_similarity: env_f64("MIN_SIMILARITY", 0.25),
+            min_similarity: env_f64("MIN_SIMILARITY", 0.62),
+            relative_cut: env_f64("RELATIVE_CUT", 0.04),
+            anchor_max_share: env_f64("ANCHOR_MAX_SHARE", 0.25),
             embed_batch: env_usize("EMBED_BATCH", 16),
             vector_search_enabled: env_bool("VECTOR_SEARCH_ENABLED", true),
             phi_disclosure_level: PhiDisclosureLevel::parse(&env_or(
@@ -152,6 +158,62 @@ fn push_scope(qb: &mut QueryBuilder<'_, sqlx::Postgres>, scope: &Scope<'_>) {
     }
 }
 
+/// Words too common to tell one policy from another; anchors must be terms a
+/// document would only carry if it were about the query.
+const STOP_WORDS: &[&str] = &[
+    "the", "and", "for", "was", "were", "are", "with", "without", "when", "that", "this", "these",
+    "those", "not", "any", "all", "each", "per", "its", "from", "such", "shall", "may", "must",
+    "than", "then", "also", "other", "more", "most", "least", "less", "same", "only", "into",
+    "under", "over", "about", "which", "what", "how", "have", "has", "can", "after", "before",
+    "claim", "claims", "service", "services", "provider", "member", "patient", "payer", "plan",
+    "denied", "denial", "code", "date",
+    // Labels the denial query itself puts in front of each code
+    // (`build_search_query` in the API): they say nothing about the claim, and
+    // anchoring on "icd-10" matched every document that names the code system.
+    "cpt", "icd", "icd-10", "icd10", "carc", "rarc", "hcpcs",
+];
+
+/// The terms a document must mention to be about this query.
+///
+/// A query carrying codes is anchored on the codes alone. A denial's query
+/// also carries its CARC wording ("Non-covered charge"), which is boilerplate
+/// shared by unrelated policies: anchoring on it returned documents for an
+/// ambulance claim no policy in the knowledge base covers, while the codes say
+/// exactly what the claim was for.
+fn anchor_tokens(query: &str) -> Vec<String> {
+    let tokens = query_tokens(query);
+    let codes: Vec<String> = tokens
+        .iter()
+        .filter(|t| t.chars().any(|c| c.is_ascii_digit()))
+        .cloned()
+        .collect();
+    if codes.is_empty() {
+        tokens
+    } else {
+        codes
+    }
+}
+
+/// The query's content words: codes such as `80053` or `M17.11` and terms long
+/// enough to carry meaning. Punctuation inside a code is kept.
+fn query_tokens(query: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    for raw in query.split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-')) {
+        let token = raw.trim_matches(|c| c == '.' || c == '-').to_lowercase();
+        if token.len() < 3 || STOP_WORDS.contains(&token.as_str()) {
+            continue;
+        }
+        if !tokens.contains(&token) {
+            tokens.push(token);
+        }
+    }
+    tokens
+}
+
+/// Matches a token as a whole word, so `20610` does not match `206100`.
+const WORD_MATCH: &str = " ~* ('(^|[^a-z0-9])' || ";
+const WORD_MATCH_END: &str = " || '([^a-z0-9]|$)')";
+
 async fn search_similar(
     state: &AppState,
     query: &str,
@@ -167,38 +229,63 @@ async fn search_similar(
         return Ok(vec![]);
     }
     let vec = format_vector(&embeddings[0]);
+    let tokens = anchor_tokens(query);
 
+    // Three filters, in order. `anchors` are the query terms rare enough in
+    // scope to mean something (a CPT code, "peer-to-peer"); a chunk carrying
+    // none of them is about something else however close its vector sits,
+    // which is what keeps a query no document answers from being handed weak
+    // matches as evidence. Then the absolute floor, then the relative cut:
+    // once there is a best match, anything far below it is noise beside it.
     let mut qb = QueryBuilder::<sqlx::Postgres>::default();
     qb.push(
-        "SELECT kc.id, kc.knowledge_document_id, kc.chunk_index, kc.content, \
-         kc.token_count, kc.metadata, kd.title AS document_title, kd.source_type, \
-         1 - (kc.embedding <=> ",
+        "WITH scope AS (\
+           SELECT kc.id, kc.knowledge_document_id, kc.chunk_index, kc.content, \
+                  kc.token_count, kc.metadata, kc.embedding, \
+                  kd.title AS document_title, kd.source_type \
+           FROM knowledge_chunks kc \
+           JOIN knowledge_documents kd ON kd.id = kc.knowledge_document_id \
+           WHERE kc.embedding IS NOT NULL AND kd.status <> 'archived'",
+    );
+    push_scope(&mut qb, scope);
+    qb.push("), anchors AS (SELECT t FROM unnest(");
+    qb.push_bind(tokens.clone());
+    qb.push("::text[]) AS t WHERE (SELECT count(*) FROM scope s WHERE s.content");
+    qb.push(WORD_MATCH);
+    qb.push("t");
+    qb.push(WORD_MATCH_END);
+    qb.push(") <= ceil(");
+    qb.push_bind(state.cfg.anchor_max_share);
+    qb.push(
+        " * (SELECT count(*) FROM scope))), kept AS (\
+         SELECT s.*, 1 - (s.embedding <=> ",
     );
     qb.push_bind(vec.clone());
     qb.push(
         "::vector) AS similarity_score, \
-         ts_rank_cd(to_tsvector('english', kc.content), websearch_to_tsquery('english', ",
+         LEAST(ts_rank_cd(to_tsvector('english', s.content), websearch_to_tsquery('english', ",
     );
     qb.push_bind(query.to_string());
     qb.push(
-        ")) AS keyword_score \
-         FROM knowledge_chunks kc \
-         JOIN knowledge_documents kd ON kd.id = kc.knowledge_document_id \
-         WHERE kc.embedding IS NOT NULL \
-         AND kd.status <> 'archived'",
+        ")), 1.0) AS keyword_score \
+         FROM scope s \
+         WHERE (NOT EXISTS (SELECT 1 FROM anchors) \
+                OR EXISTS (SELECT 1 FROM anchors a WHERE s.content",
     );
-    push_scope(&mut qb, scope);
-    qb.push(" AND (1 - (kc.embedding <=> ");
+    qb.push(WORD_MATCH);
+    qb.push("a.t");
+    qb.push(WORD_MATCH_END);
+    qb.push(")) AND 1 - (s.embedding <=> ");
     qb.push_bind(vec.clone());
     qb.push("::vector) >= ");
     qb.push_bind(state.cfg.min_similarity);
-    qb.push(" OR to_tsvector('english', kc.content) @@ websearch_to_tsquery('english', ");
-    qb.push_bind(query.to_string());
-    qb.push(")) ORDER BY (0.7 * (1 - (kc.embedding <=> ");
-    qb.push_bind(vec);
-    qb.push("::vector)) + 0.3 * LEAST(ts_rank_cd(to_tsvector('english', kc.content), websearch_to_tsquery('english', ");
-    qb.push_bind(query.to_string());
-    qb.push(")), 1.0)) DESC LIMIT ");
+    qb.push(
+        ") SELECT id, knowledge_document_id, chunk_index, content, token_count, metadata, \
+                 document_title, source_type, similarity_score, keyword_score \
+          FROM kept WHERE similarity_score >= (SELECT max(similarity_score) FROM kept) - ",
+    );
+    qb.push_bind(state.cfg.relative_cut);
+    qb.push(" ORDER BY (0.7 * similarity_score + 0.3 * keyword_score) DESC LIMIT ");
     qb.push_bind(top_k);
 
     let rows = qb.build().fetch_all(&state.pool).await?;
@@ -218,12 +305,13 @@ async fn search_similar(
             "document_title": r.try_get::<Option<String>, _>("document_title").ok(),
             "source_type": r.try_get::<Option<String>, _>("source_type").ok(),
             "similarity_score": r.try_get::<f64, _>("similarity_score").unwrap_or(0.0),
-            "keyword_score": r.try_get::<f32, _>("keyword_score").unwrap_or(0.0),
+            "keyword_score": r.try_get::<f64, _>("keyword_score").unwrap_or(0.0),
         }));
     }
     tracing::info!(
-        "Vector search '{}' -> {} chunks",
+        "Vector search '{}' ({} anchors) -> {} chunks",
         &query.chars().take(40).collect::<String>(),
+        tokens.len(),
         results.len()
     );
     Ok(results)
@@ -668,5 +756,39 @@ mod health_tests {
         )))
         .is_err());
         assert!(check_embedding(Ok(vec![])).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{anchor_tokens, query_tokens};
+
+    #[test]
+    fn a_denial_query_anchors_on_its_codes_not_the_carc_wording() {
+        assert_eq!(
+            anchor_tokens("CPT A0429 CARC 96: Non-covered charge. Ambulance transport"),
+            vec!["a0429"],
+            "the procedure code alone; 96 is too short to be a term"
+        );
+    }
+
+    #[test]
+    fn a_question_without_codes_anchors_on_its_rarer_words() {
+        let tokens = anchor_tokens("prior authorization denied, request a peer-to-peer");
+        assert!(tokens.contains(&"authorization".to_string()));
+        assert!(tokens.contains(&"peer-to-peer".to_string()));
+        assert!(
+            !tokens.contains(&"denied".to_string()),
+            "too common to anchor on"
+        );
+    }
+
+    #[test]
+    fn codes_keep_their_punctuation_and_repeat_once() {
+        assert_eq!(
+            query_tokens("ICD-10 M17.11 the M17.11 knee"),
+            vec!["m17.11", "knee"],
+            "the code system label is not a term, and a repeat adds nothing"
+        );
     }
 }

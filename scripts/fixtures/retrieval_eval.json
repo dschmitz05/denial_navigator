@@ -1,0 +1,138 @@
+{
+  "description": "Retrieval evaluation queries over scripts/fixtures/test_knowledge.json (FB-12). The coded queries are written the way build_search_query in routes/analyses.rs builds them from a denial; the rest are the natural-language questions a specialist asks the knowledge base. 'relevant' lists every document that is acceptable evidence; an empty list means no document applies and retrieval should return nothing.",
+  "queries": [
+    {
+      "payer": "ACME HEALTH PLAN",
+      "query": "CPT 20610 ICD-10 M17.11 CARC 197: Precertification/authorization/notification/pre-treatment absent",
+      "relevant": [
+        "[TEST] ACME Health Plan Prior Authorization List 2026: Musculoskeletal Injections",
+        "[TEST] ACME Health Plan: Retro-Authorization Requests",
+        "[TEST] Criteria: Intra-articular Knee Injection for Osteoarthritis",
+        "[TEST] LCD LTEST-001: Arthrocentesis and Intra-articular Injection of Major Joints"
+      ]
+    },
+    {
+      "payer": "ACME HEALTH PLAN",
+      "query": "CPT 97110 ICD-10 M25.551 CARC 50: These are non-covered services because this is not deemed a 'medical necessity' by the payer",
+      "relevant": [
+        "[TEST] Criteria: Outpatient Therapeutic Exercise for Hip Pain",
+        "[TEST] LCD LTEST-002: Outpatient Physical Therapy - Therapeutic Exercise",
+        "[TEST] ACME Health Plan: Outpatient Rehabilitation Authorization"
+      ]
+    },
+    {
+      "payer": "ACME HEALTH PLAN",
+      "query": "CPT 80053 ICD-10 E11.65 CARC 50: These are non-covered services because this is not deemed a 'medical necessity' by the payer",
+      "relevant": [
+        "[TEST] LCD LTEST-003: Comprehensive Metabolic Panel",
+        "[TEST] Criteria: Metabolic Panel - Screening Versus Diagnostic Use",
+        "[TEST] ACME Health Plan: Laboratory Services Reimbursement Policy"
+      ]
+    },
+    {
+      "payer": "BLUECROSS BLUESHIELD OF ILLINOIS",
+      "query": "CPT 71046 ICD-10 J44.9 CARC 50: These are non-covered services because this is not deemed a 'medical necessity' by the payer",
+      "relevant": [
+        "[TEST] LCD LTEST-004: Chest Radiography, Two Views",
+        "[TEST] Criteria: Chest Radiograph in Chronic Obstructive Pulmonary Disease",
+        "[TEST] BCBS of Illinois: Medical Necessity Denials and LCD Alignment"
+      ]
+    },
+    {
+      "payer": "BLUECROSS BLUESHIELD OF ILLINOIS",
+      "query": "CPT 85025 ICD-10 E11.65 CARC 50: These are non-covered services because this is not deemed a 'medical necessity' by the payer",
+      "relevant": [
+        "[TEST] LCD LTEST-005: Complete Blood Count with Automated Differential",
+        "[TEST] Criteria: Complete Blood Count in Diabetes and COPD",
+        "[TEST] BCBS of Illinois: Medical Necessity Denials and LCD Alignment"
+      ]
+    },
+    {
+      "payer": "ACME HEALTH PLAN",
+      "query": "CPT 99214 CARC 97: The benefit for this service is included in the payment/allowance for another service that has already been adjudicated",
+      "relevant": [
+        "[TEST] LCD LTEST-006: Evaluation and Management Services on the Day of a Minor Procedure",
+        "[TEST] ACME Health Plan: Bundling, NCCI Edits, and Modifier Use"
+      ]
+    },
+    {
+      "payer": "ACME HEALTH PLAN",
+      "query": "CPT 99213 CARC 29: The time limit for filing has expired",
+      "relevant": [
+        "[TEST] ACME Health Plan PPO Agreement - Article 6: Claims, Corrections and Disputes"
+      ]
+    },
+    {
+      "payer": "BLUECROSS BLUESHIELD OF ILLINOIS",
+      "query": "CPT 99214 CARC 45: Charge exceeds fee schedule/maximum allowable or contracted/legislated fee arrangement",
+      "relevant": [
+        "[TEST] BCBS of Illinois 2026 PPO Fee Schedule: Evaluation and Management",
+        "[TEST] BCBS of Illinois PPO Agreement - Section 8: Payment Disputes",
+        "[TEST] BCBS of Illinois PPO Agreement - Amendment 4: 2026 Rates and Notification Program"
+      ]
+    },
+    {
+      "payer": "ACME HEALTH PLAN",
+      "query": "claim rejected because the rendering provider NPI and taxonomy were missing",
+      "relevant": [
+        "[TEST] ACME Health Plan: Professional Claim Submission Requirements"
+      ]
+    },
+    {
+      "payer": "BLUECROSS BLUESHIELD OF ILLINOIS",
+      "query": "how long do we have to request a reconsideration or file an appeal",
+      "relevant": [
+        "[TEST] BCBS of Illinois: Provider Appeals and Reconsideration Process"
+      ]
+    },
+    {
+      "payer": "BLUECROSS BLUESHIELD OF ILLINOIS",
+      "query": "prior authorization denied for medical necessity, request a peer-to-peer",
+      "relevant": [
+        "[TEST] BCBS of Illinois: Authorization Denials - Peer-to-Peer and Expedited Review"
+      ]
+    },
+    {
+      "payer": "BLUECROSS BLUESHIELD OF ILLINOIS",
+      "query": "lab test sent to a non-preferred reference laboratory was denied",
+      "relevant": [
+        "[TEST] BCBS of Illinois: Laboratory Services at Non-Preferred Labs"
+      ]
+    },
+    {
+      "payer": "BLUECROSS BLUESHIELD OF ILLINOIS",
+      "query": "can we bill the member the balance after the plan payment",
+      "relevant": [
+        "[TEST] BCBS of Illinois PPO Agreement - Section 5: Member Financial Responsibility"
+      ]
+    },
+    {
+      "payer": "BLUECROSS BLUESHIELD OF ILLINOIS",
+      "query": "HMO member outpatient imaging outside the assigned medical group without notification",
+      "relevant": [
+        "[TEST] BCBS of Illinois: Outpatient Diagnostic Notification Program",
+        "[TEST] BCBS of Illinois PPO Agreement - Amendment 4: 2026 Rates and Notification Program"
+      ]
+    },
+    {
+      "payer": "ACME HEALTH PLAN",
+      "query": "ACME HEALTH PLAN 99213 telehealth video visit place of service 10 denied",
+      "relevant": []
+    },
+    {
+      "payer": "ACME HEALTH PLAN",
+      "query": "CPT A0429 CARC 96: Non-covered charge. Ambulance transport and mileage",
+      "relevant": []
+    },
+    {
+      "payer": "BLUECROSS BLUESHIELD OF ILLINOIS",
+      "query": "CPT D2740 CARC 96: Non-covered charge. Porcelain dental crown",
+      "relevant": []
+    },
+    {
+      "payer": "ACME HEALTH PLAN",
+      "query": "CPT E1130 CARC 96: Non-covered charge. Manual wheelchair rental",
+      "relevant": []
+    }
+  ]
+}

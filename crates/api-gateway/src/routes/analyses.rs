@@ -81,6 +81,72 @@ pub struct StoreAnalysis {
 
 /// Values of `ai_analyses.fallback_reason`. Anything else from a caller is
 /// dropped rather than stored.
+/// The description an organization has imported for a code, if any. CPT and
+/// ICD-10 descriptions are licensed, so these tables are often empty and the
+/// query then carries the bare code.
+async fn code_description(pool: &sqlx::PgPool, table: &str, code: Option<&str>) -> Option<String> {
+    let code = code?;
+    let sql = format!("SELECT description FROM {table} WHERE code = $1 AND is_active");
+    sqlx::query_scalar(&sql)
+        .bind(code)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn code_descriptions(
+    pool: &sqlx::PgPool,
+    table: &str,
+    codes: &[String],
+) -> Vec<Option<String>> {
+    let mut out = Vec::with_capacity(codes.len());
+    for code in codes {
+        out.push(code_description(pool, table, Some(code)).await);
+    }
+    out
+}
+
+/// The retrieval query for a denial.
+///
+/// Bare codes retrieve badly: the embedding model has no idea that 80053 is a
+/// metabolic panel, and against the test knowledge base a query of payer name
+/// and codes put the right document first 57% of the time against 93% for this
+/// form (`scripts/eval_retrieval.py`). Each code is labelled the way documents
+/// write it ("CPT 80053"), which is also what the RAG engine anchors on, and
+/// the CARC description supplies the words the denial is actually about. The
+/// payer name is left out: retrieval is already scoped to the payer, and
+/// repeating it pulled in that payer's unrelated documents.
+fn build_search_query(
+    cpt: Option<&str>,
+    cpt_description: Option<&str>,
+    icd: &[String],
+    icd_descriptions: &[Option<String>],
+    carc: Option<&str>,
+    carc_description: Option<&str>,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(code) = cpt.filter(|c| !c.is_empty()) {
+        parts.push(match cpt_description {
+            Some(d) if !d.is_empty() => format!("CPT {code} {d}"),
+            _ => format!("CPT {code}"),
+        });
+    }
+    for (i, code) in icd.iter().filter(|c| !c.is_empty()).enumerate() {
+        parts.push(match icd_descriptions.get(i).and_then(|d| d.as_deref()) {
+            Some(d) if !d.is_empty() => format!("ICD-10 {code} {d}"),
+            _ => format!("ICD-10 {code}"),
+        });
+    }
+    if let Some(code) = carc.filter(|c| !c.is_empty()) {
+        parts.push(match carc_description {
+            Some(d) if !d.is_empty() => format!("CARC {code}: {d}"),
+            _ => format!("CARC {code}"),
+        });
+    }
+    parts.join(" ")
+}
+
 pub const FALLBACK_REASONS: &[&str] = &["llm_error", "retrieval_error", "no_evidence"];
 
 #[derive(Clone, Deserialize)]
@@ -487,15 +553,19 @@ async fn generate_analysis_for_request(
     // All of them, not just the first: a medical-necessity denial usually
     // turns on the secondary diagnosis. Capped so a long list cannot drown
     // out the CPT and CARC terms.
-    let icd = icd_codes
-        .iter()
-        .take(5)
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let icd: Vec<String> = icd_codes.iter().take(5).cloned().collect();
     let cpt = cpt_code.as_deref().unwrap_or("");
     let carc = carc_code.as_deref().unwrap_or("");
-    let search_query = format!("{payer_name} {cpt} {icd} {carc}");
+    let cpt_description = code_description(&state.pool, "cpt_codes", cpt_code.as_deref()).await;
+    let icd_descriptions = code_descriptions(&state.pool, "icd10_codes", &icd).await;
+    let search_query = build_search_query(
+        cpt_code.as_deref(),
+        cpt_description.as_deref(),
+        &icd,
+        &icd_descriptions,
+        carc_code.as_deref(),
+        carc_description.as_deref(),
+    );
 
     let mut retrieval_failed = false;
     let policy_texts: Vec<String> = match state
@@ -555,7 +625,7 @@ async fn generate_analysis_for_request(
             "payer_name": payer_name,
             "next_payer_name": next_payer_name,
             "cpt_code": cpt,
-            "icd10_code": icd,
+            "icd10_code": icd.join(" "),
             "cagc": cagc.as_deref().unwrap_or(""),
             "carc_code": carc,
             "carc_definition": carc_description.as_deref().unwrap_or("Unknown"),
@@ -707,6 +777,50 @@ mod tests {
         cited_evidence_ids, resolve_citation_metadata, DeterministicRecommendationProvider,
         RecommendationProvider,
     };
+
+    #[test]
+    fn a_denial_query_labels_each_code_and_carries_the_carc_wording() {
+        let q = super::build_search_query(
+            Some("80053"),
+            None,
+            &["E11.65".to_string()],
+            &[None],
+            Some("50"),
+            Some("These are non-covered services because this is not deemed a 'medical necessity'"),
+        );
+        assert_eq!(
+            q,
+            "CPT 80053 ICD-10 E11.65 CARC 50: These are non-covered services \
+             because this is not deemed a 'medical necessity'"
+                .replace("             ", "")
+        );
+    }
+
+    #[test]
+    fn descriptions_are_used_when_the_organization_has_imported_them() {
+        let q = super::build_search_query(
+            Some("20610"),
+            Some("Arthrocentesis, major joint"),
+            &["M17.11".to_string()],
+            &[Some(
+                "Unilateral primary osteoarthritis, right knee".to_string(),
+            )],
+            None,
+            None,
+        );
+        assert_eq!(
+            q,
+            "CPT 20610 Arthrocentesis, major joint ICD-10 M17.11 Unilateral primary osteoarthritis, right knee"
+        );
+    }
+
+    #[test]
+    fn a_denial_with_no_codes_has_an_empty_query() {
+        assert_eq!(
+            super::build_search_query(None, None, &[], &[], Some(""), None),
+            ""
+        );
+    }
 
     const FIRST: &str = "11111111-1111-1111-1111-111111111111";
     const SECOND: &str = "22222222-2222-2222-2222-222222222222";

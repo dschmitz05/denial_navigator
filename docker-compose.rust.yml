@@ -101,6 +101,12 @@ services:
       EMBED_QUERY_PREFIX: ${EMBED_QUERY_PREFIX:-}
       EMBED_DOCUMENT_PREFIX: ${EMBED_DOCUMENT_PREFIX:-}
       VECTOR_SEARCH_ENABLED: ${VECTOR_SEARCH_ENABLED:-true}
+      # The evidence cut, calibrated with scripts/eval_retrieval.py. Raising
+      # MIN_SIMILARITY loses real policies before it stops weak ones: the
+      # scores overlap. See docs/ARCHITECTURE.md.
+      MIN_SIMILARITY: ${MIN_SIMILARITY:-0.62}
+      RELATIVE_CUT: ${RELATIVE_CUT:-0.04}
+      ANCHOR_MAX_SHARE: ${ANCHOR_MAX_SHARE:-0.25}
     depends_on:
       postgres:
         condition: service_healthy
