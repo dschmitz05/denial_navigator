@@ -185,11 +185,22 @@ or deterministic fallback through an internal `RecommendationProvider` boundary;
 authorization, tenant scoping, evidence validation, and persistence remain in
 the gateway.
 
-`LLM_MODEL=auto` follows whatever model llama.cpp currently has loaded rather
-than trusting a name pinned in `.env`. The host runs one `llama-server` at a
-time and systemd swaps the model; llama.cpp ignores the `model` field in a
-request, so a stale name never breaks a call — it just records the wrong model
-against the analysis, which is the one field the audit trail must not lie about.
+`LLM_MODEL=auto` follows whatever model the LLM server currently serves rather
+than trusting a name pinned in `.env`: the served name is resolved (and cached
+for a minute) and sent on every request. llama-server ignores the `model`
+field, but vLLM rejects an unknown name with 404, so a literal `auto` once made
+every analysis fall back. A pinned name must be one the server serves; System
+health reports it when it is not.
+
+**Degraded analyses are recorded and shown.** `ai_analyses.fallback_reason` is
+`llm_error` when the model call failed and deterministic rules were used,
+`retrieval_error` when the policy search failed, and `no_evidence` when it
+found nothing, so the model answered without evidence. `GET /analyses/status`
+reports the organization as degraded when its 3 most recent analyses all have a
+reason (an outage now) or when that share over 24 hours reaches
+`AI_DEGRADED_THRESHOLD` (default 0.2). The Denials, Worklist, Claims and
+Appeals pages then show a banner, each such analysis carries a badge, and
+System health has an "AI analyses (24 h)" row.
 
 The health endpoint is bounded to two seconds because the gateway's probe
 budget is three; an unbounded probe made a busy model look like a dead service.

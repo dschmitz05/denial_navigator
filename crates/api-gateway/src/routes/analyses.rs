@@ -74,7 +74,14 @@ pub struct StoreAnalysis {
     pub total_tokens: i64,
     #[serde(default)]
     pub allowed_evidence_ids: Vec<String>,
+    /// Why the analysis is degraded, if it is; see FALLBACK_REASONS.
+    #[serde(default)]
+    pub fallback_reason: Option<String>,
 }
+
+/// Values of `ai_analyses.fallback_reason`. Anything else from a caller is
+/// dropped rather than stored.
+pub const FALLBACK_REASONS: &[&str] = &["llm_error", "retrieval_error", "no_evidence"];
 
 #[derive(Clone, Deserialize)]
 pub struct GenerateAnalysisRequest {
@@ -349,15 +356,15 @@ pub async fn store_analysis(
              prompt_tokens, completion_tokens, total_tokens, \
              system_prompt_template, raw_prompt, raw_response, \
               explanation, denial_category, required_action, root_cause_summary, action_plan, steps, \
-              citations, needs_appeal, draft_appeal_letter, confidence_score) \
+              citations, needs_appeal, draft_appeal_letter, confidence_score, fallback_reason) \
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::jsonb, $19::jsonb, \
-                   $20::jsonb, $21, $22, $23) \
+                   $20::jsonb, $21, $22, $23, $24) \
            RETURNING id, denial_id, claim_id, model_name, provider_name, provider_version, prompt_template_version, \
                prompt_tokens, completion_tokens, \
                total_tokens, system_prompt_template, raw_prompt, raw_response, explanation, \
                denial_category, root_cause_summary, required_action, action_plan, steps, \
                citations, needs_appeal, draft_appeal_letter, confidence_score::float8 AS confidence_score, \
-              created_at, updated_at",
+              fallback_reason, created_at, updated_at",
     )
     .bind(denial_id)
     .bind(claim_id)
@@ -382,6 +389,11 @@ pub async fn store_analysis(
     .bind(needs_appeal)
     .bind(draft_appeal_letter)
     .bind(confidence_score)
+    .bind(
+        a.fallback_reason
+            .as_deref()
+            .filter(|reason| FALLBACK_REASONS.contains(reason)),
+    )
     .fetch_one(&state.pool)
     .await
     .map_err(AppError::Db)?;
@@ -467,6 +479,7 @@ async fn generate_analysis_for_request(
     let carc = carc_code.as_deref().unwrap_or("");
     let search_query = format!("{payer_name} {cpt} {icd} {carc}");
 
+    let mut retrieval_failed = false;
     let policy_texts: Vec<String> = match state
         .rag
         // The RAG service refuses unscoped searches. Forward the organization
@@ -501,8 +514,16 @@ async fn generate_analysis_for_request(
             .unwrap_or_default(),
         Err(e) => {
             tracing::warn!("RAG search failed: {e}");
+            retrieval_failed = true;
             Vec::new()
         }
+    };
+    let retrieval_fallback = if retrieval_failed {
+        Some("retrieval_error")
+    } else if policy_texts.is_empty() {
+        Some("no_evidence")
+    } else {
+        None
     };
 
     let prompt = state
@@ -537,6 +558,7 @@ async fn generate_analysis_for_request(
             "claim_id": claim_db_id.to_string(),
             "prompt": prompt,
             "allowed_evidence_ids": allowed_evidence_ids,
+            "fallback_reason": retrieval_fallback,
             "temperature": request.temperature,
         }),
     };
@@ -602,6 +624,7 @@ async fn generate_analysis_for_request(
                     completion_tokens: 0,
                     total_tokens: 0,
                     allowed_evidence_ids: Vec::new(),
+                    fallback_reason: Some("llm_error".into()),
                 }),
             )
             .await?;
@@ -814,9 +837,85 @@ pub async fn get_generation_job(
     Ok(Json(row_to_json(&row)))
 }
 
+/// Analyses needed before a fallback share is judged; one failure out of two
+/// is noise, not an outage.
+const DEGRADED_MIN_ANALYSES: i64 = 3;
+
+/// Whether AI analyses are degraded: either the organization's most recent
+/// `DEGRADED_MIN_ANALYSES` analyses all fell back or ran without evidence (an
+/// outage happening now), or that share over the last 24 hours reaches
+/// `AI_DEGRADED_THRESHOLD` (default 0.2). The 24-hour share alone reacts too
+/// slowly: after a busy day, several failures in a row are still a small share.
+pub async fn ai_status(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    Ok(Json(
+        ai_fallback_summary(&state.pool, organization_id(&principal)?).await?,
+    ))
+}
+
+/// The body of [`ai_status`], shared with system health.
+pub async fn ai_fallback_summary(
+    pool: &sqlx::PgPool,
+    organization_id: Uuid,
+) -> Result<serde_json::Value, AppError> {
+    let threshold = std::env::var("AI_DEGRADED_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| (0.0..=1.0).contains(v))
+        .unwrap_or(0.2);
+    let row = sqlx::query(
+        "SELECT COUNT(*) AS total, \
+                COUNT(*) FILTER (WHERE aa.fallback_reason IS NOT NULL) AS degraded, \
+                COUNT(*) FILTER (WHERE aa.fallback_reason = 'llm_error') AS llm_error, \
+                COUNT(*) FILTER (WHERE aa.fallback_reason = 'retrieval_error') AS retrieval_error, \
+                COUNT(*) FILTER (WHERE aa.fallback_reason = 'no_evidence') AS no_evidence \
+         FROM ai_analyses aa JOIN claims c ON c.id = aa.claim_id \
+         WHERE c.organization_id = $1 AND aa.created_at > NOW() - INTERVAL '24 hours'",
+    )
+    .bind(organization_id)
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::Db)?;
+    let recent: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT aa.fallback_reason FROM ai_analyses aa JOIN claims c ON c.id = aa.claim_id \
+         WHERE c.organization_id = $1 ORDER BY aa.created_at DESC LIMIT $2",
+    )
+    .bind(organization_id)
+    .bind(DEGRADED_MIN_ANALYSES)
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Db)?;
+    let recent_all_degraded =
+        recent.len() as i64 == DEGRADED_MIN_ANALYSES && recent.iter().all(Option::is_some);
+    let total: i64 = row.get("total");
+    let degraded_count: i64 = row.get("degraded");
+    let share = if total == 0 {
+        0.0
+    } else {
+        degraded_count as f64 / total as f64
+    };
+    Ok(serde_json::json!({
+        "degraded": recent_all_degraded
+            || (total >= DEGRADED_MIN_ANALYSES && share >= threshold),
+        "recent_all_degraded": recent_all_degraded,
+        "window_hours": 24,
+        "analyses": total,
+        "fallback_share": share,
+        "threshold": threshold,
+        "reasons": {
+            "llm_error": row.get::<i64, _>("llm_error"),
+            "retrieval_error": row.get::<i64, _>("retrieval_error"),
+            "no_evidence": row.get::<i64, _>("no_evidence"),
+        },
+    }))
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_analyses))
+        .route("/status", get(ai_status))
         .route("/store", post(store_analysis))
         .route("/generate", post(generate_analysis))
         .route("/generate-jobs", post(enqueue_generation))

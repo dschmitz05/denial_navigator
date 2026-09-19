@@ -73,6 +73,12 @@ two model rows test real function, not just reachability:
 Either row failing makes the overall status *degraded*: analyses fall back to
 deterministic rules and new documents cannot be embedded until it is fixed.
 
+**AI analyses (24 h)** reports what actually happened to the organization's
+analyses: how many fell back to deterministic rules or ran without policy
+evidence. It turns *degraded* when the three most recent analyses all did, or
+when their share over 24 hours reaches `AI_DEGRADED_THRESHOLD` (default 0.2);
+AI pages then show a banner until analyses succeed again.
+
 ## Write-off approval
 
 Settings → Write-off approval (system or security administrators) sets the

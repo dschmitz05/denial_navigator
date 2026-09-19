@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import AssigneeCell, { useAssignableUsers } from '../components/AssigneeCell'
 import WriteOffApprovals from '../components/WriteOffApprovals'
+import AiStatusBanner from '../components/AiStatusBanner'
 
 const API_BASE = '/api/v1'
 
@@ -207,6 +208,7 @@ export default function Worklist() {
 
   return (
     <div className="page-body">
+      <AiStatusBanner />
       <div className="filters-bar">
         <select className="form-select" value={typeFilter} onChange={e => setTypeFilter(e.target.value)}>
           <option value="">All Work Types</option>

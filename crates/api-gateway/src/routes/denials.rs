@@ -688,7 +688,7 @@ pub async fn get_denial(
          aa.id AS ai_analysis_id, \
           aa.explanation, aa.action_plan, aa.steps, aa.citations, aa.draft_appeal_letter, \
          aa.denial_category, aa.required_action, aa.needs_appeal, \
-         aa.confidence_score, \
+         aa.confidence_score, aa.fallback_reason, aa.provider_name AS analysis_provider, \
          aq.id AS appeal_id, aq.outcome_status AS appeal_status, \
          aq.resolution_type AS appeal_resolution_type \
          FROM denials d \

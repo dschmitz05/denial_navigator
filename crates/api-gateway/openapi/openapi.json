@@ -376,6 +376,69 @@
         }
       }
     },
+    "/api/v1/analyses/status": {
+      "get": {
+        "summary": "Whether AI analyses are degraded (last 24 h, caller's organization)",
+        "tags": [
+          "analyses"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Degraded when the 3 most recent analyses all fell back to deterministic rules or ran without policy evidence, or when that share over 24 hours reaches AI_DEGRADED_THRESHOLD (default 0.2; needs 3+ analyses).",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "degraded": {
+                      "type": "boolean"
+                    },
+                    "recent_all_degraded": {
+                      "type": "boolean"
+                    },
+                    "window_hours": {
+                      "type": "integer"
+                    },
+                    "analyses": {
+                      "type": "integer"
+                    },
+                    "fallback_share": {
+                      "type": "number"
+                    },
+                    "threshold": {
+                      "type": "number"
+                    },
+                    "reasons": {
+                      "type": "object",
+                      "properties": {
+                        "llm_error": {
+                          "type": "integer"
+                        },
+                        "retrieval_error": {
+                          "type": "integer"
+                        },
+                        "no_evidence": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
     "/api/v1/analyses/store": {
       "post": {
         "summary": "Store an analysis result (usually called by the LLM service)",

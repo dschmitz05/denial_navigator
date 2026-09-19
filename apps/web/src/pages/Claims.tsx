@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import AiStatusBanner, { FALLBACK_LABEL } from '../components/AiStatusBanner'
 
 const API_BASE = '/api/v1'
 
@@ -186,6 +187,9 @@ function ClaimDetails({ claim, onRefresh, refreshing }: { claim: ClaimDetail; on
                   {a.denial_category && (
                     <span className="badge badge-analyzed">{a.denial_category.replace(/_/g, ' ')}</span>
                   )}
+                  {a.fallback_reason && FALLBACK_LABEL[a.fallback_reason] && (
+                    <span className="badge badge-warning" title="This analysis is degraded">{FALLBACK_LABEL[a.fallback_reason]}</span>
+                  )}
                   {a.required_action && (
                     <span className="badge">{a.required_action.replace(/_/g, ' ')}</span>
                   )}
@@ -306,6 +310,7 @@ export default function Claims() {
 
   return (
     <div className="page-body">
+      <AiStatusBanner />
       <div className="filters-bar">
         <select className="form-select" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
           <option value="">All Statuses</option>

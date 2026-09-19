@@ -105,6 +105,10 @@ struct DenialAnalysisRequest {
     allowed_evidence_ids: Vec<String>,
     #[serde(default = "default_temp")]
     temperature: f64,
+    /// Set by the gateway when retrieval failed or found nothing; stored with
+    /// the analysis so the degradation is visible.
+    #[serde(default)]
+    fallback_reason: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -142,6 +146,7 @@ async fn store_analysis(
     prompt_tokens: i64,
     completion_tokens: i64,
     total_tokens: i64,
+    fallback_reason: Option<&str>,
 ) -> bool {
     let payload = serde_json::json!({
         "denial_id": denial_id,
@@ -157,6 +162,7 @@ async fn store_analysis(
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
+        "fallback_reason": fallback_reason,
     });
     let result = state
         .http
@@ -400,6 +406,7 @@ async fn analyze_denial(
             prompt_tokens,
             completion_tokens,
             prompt_tokens + completion_tokens,
+            req.fallback_reason.as_deref(),
         )
         .await;
 

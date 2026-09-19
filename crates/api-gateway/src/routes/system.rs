@@ -1,7 +1,9 @@
 use axum::extract::State;
 use axum::routing::get;
+use axum::Extension;
 use axum::Json;
 use axum::Router;
+use denial_auth::rbac::Principal;
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -56,6 +58,40 @@ fn llm_provider_row(service_ok: bool, body: &Value) -> (&'static str, String) {
     }
 }
 
+/// The AI analyses row, from the organization's last 24 hours of analyses.
+fn ai_analyses_row(summary: Option<&Value>) -> (&'static str, String) {
+    let Some(summary) = summary else {
+        return ("ok", "No analysis history for this organization".into());
+    };
+    let total = summary.get("analyses").and_then(Value::as_i64).unwrap_or(0);
+    if total == 0 {
+        return ("ok", "No analyses in the last 24 hours".into());
+    }
+    let share = summary
+        .get("fallback_share")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let reasons = summary.get("reasons").cloned().unwrap_or(Value::Null);
+    let count = |key: &str| reasons.get(key).and_then(Value::as_i64).unwrap_or(0);
+    let recent = if summary.get("recent_all_degraded").and_then(Value::as_bool) == Some(true) {
+        "The most recent analyses all fell back. "
+    } else {
+        ""
+    };
+    let detail = format!(
+        "{recent}{:.0}% of {total} degraded: {} model failures, {} retrieval failures, {} without evidence",
+        share * 100.0,
+        count("llm_error"),
+        count("retrieval_error"),
+        count("no_evidence"),
+    );
+    if summary.get("degraded").and_then(Value::as_bool) == Some(true) {
+        ("degraded", detail)
+    } else {
+        ("ok", detail)
+    }
+}
+
 /// The embedding row, from the RAG engine's probe embedding.
 fn embedding_provider_row(service_ok: bool, body: &Value) -> (&'static str, String) {
     if !service_ok {
@@ -77,7 +113,10 @@ fn embedding_provider_row(service_ok: bool, body: &Value) -> (&'static str, Stri
     }
 }
 
-async fn health(State(state): State<AppState>) -> Json<Value> {
+async fn health(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> Json<Value> {
     let db_ok = sqlx::query("SELECT 1").execute(&state.pool).await.is_ok();
 
     let (ediparser_ok, ediparser_detail) = probe(&format!(
@@ -100,8 +139,22 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
     let (llama_status, llama_message) = llm_provider_row(llm_ok, &llm_detail);
     let (embed_status, embed_message) = embedding_provider_row(rag_ok, &rag_detail);
 
+    // Providers can pass their probes while analyses still fall back; this
+    // row reports what actually happened to the organization's analyses.
+    let ai_summary = match principal
+        .organization_id
+        .as_deref()
+        .and_then(|id| uuid::Uuid::parse_str(id).ok())
+    {
+        Some(org) => crate::routes::analyses::ai_fallback_summary(&state.pool, org)
+            .await
+            .ok(),
+        None => None,
+    };
+    let (ai_status, ai_message) = ai_analyses_row(ai_summary.as_ref());
+
     let essential_ok = db_ok && ediparser_ok && rag_ok && llm_ok;
-    let optional_ok = llama_status == "ok" && embed_status != "down";
+    let optional_ok = llama_status == "ok" && embed_status != "down" && ai_status != "degraded";
     let status = |ok: bool| if ok { "ok" } else { "down" };
     let detail = |value: &Value, fallback: &str| {
         value
@@ -128,7 +181,9 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
             { "name": "LLM provider", "status": llama_status, "essential": false,
               "detail": llama_message },
             { "name": "Embedding provider", "status": embed_status, "essential": false,
-              "detail": embed_message }
+              "detail": embed_message },
+            { "name": "AI analyses (24 h)", "status": ai_status, "essential": false,
+              "detail": ai_message }
         ]
     }))
 }
@@ -143,7 +198,7 @@ pub fn router() -> Router<AppState> {
 
 #[cfg(test)]
 mod tests {
-    use super::{embedding_provider_row, llm_provider_row};
+    use super::{ai_analyses_row, embedding_provider_row, llm_provider_row};
     use serde_json::json;
 
     #[test]
@@ -161,6 +216,22 @@ mod tests {
             ("down", "LLM server 401 Unauthorized: invalid key".into())
         );
         assert_eq!(llm_provider_row(false, &json!({})).0, "down");
+    }
+
+    #[test]
+    fn ai_row_is_degraded_only_when_the_summary_says_so() {
+        let quiet = json!({"analyses": 0, "degraded": false});
+        assert_eq!(ai_analyses_row(Some(&quiet)).0, "ok");
+        let bad = json!({"analyses": 5, "fallback_share": 0.6, "degraded": true,
+            "reasons": {"llm_error": 3, "retrieval_error": 0, "no_evidence": 0}});
+        assert_eq!(
+            ai_analyses_row(Some(&bad)),
+            (
+                "degraded",
+                "60% of 5 degraded: 3 model failures, 0 retrieval failures, 0 without evidence"
+                    .into()
+            )
+        );
     }
 
     #[test]

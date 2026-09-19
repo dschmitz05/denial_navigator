@@ -157,6 +157,9 @@ CREATE TABLE ai_analyses (
                                    'bundled_service', 'duplicate_claim', 'timely_filing',
                                    'non_covered_service', 'patient_responsibility', 'other')),
     root_cause_summary TEXT,
+    -- Why the analysis is degraded, if it is (llm_error, retrieval_error, no_evidence).
+    fallback_reason VARCHAR(20)
+        CHECK (fallback_reason IN ('llm_error', 'retrieval_error', 'no_evidence')),
     required_action TEXT,
     action_plan JSONB,
     steps JSONB,
@@ -171,6 +174,7 @@ CREATE TABLE ai_analyses (
 CREATE INDEX idx_ai_analyses_denial_id ON ai_analyses(denial_id);
 CREATE INDEX idx_ai_analyses_claim_id ON ai_analyses(claim_id);
 CREATE INDEX idx_ai_analyses_denial_category ON ai_analyses(denial_category);
+CREATE INDEX idx_ai_analyses_created_fallback ON ai_analyses (created_at DESC, fallback_reason);
 CREATE INDEX idx_ai_analyses_created_at ON ai_analyses(created_at);
 
 -- ============================================================

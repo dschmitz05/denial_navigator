@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import AiStatusBanner, { FALLBACK_LABEL } from '../components/AiStatusBanner'
 
 const API_BASE = '/api/v1'
 
@@ -247,6 +248,7 @@ export default function Denials() {
 
   return (
     <div className="page-body">
+      <AiStatusBanner />
       <div className="filters-bar">
         <select className="form-select" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
           <option value="">Active Only</option>
@@ -436,6 +438,13 @@ export default function Denials() {
                     <div className="card-body">
                       <p style={{ marginBottom: 12 }}><strong>Explanation:</strong> {selectedDenial.explanation}</p>
                       <p style={{ marginBottom: 12 }}><strong>Category:</strong> {selectedDenial.denial_category}</p>
+                      {selectedDenial.fallback_reason && FALLBACK_LABEL[selectedDenial.fallback_reason] && (
+                        <p style={{ marginBottom: 12 }}>
+                          <span className="badge badge-warning" title="This analysis is degraded">
+                            {FALLBACK_LABEL[selectedDenial.fallback_reason]}
+                          </span>
+                        </p>
+                      )}
                       {selectedDenial.required_action && (
                         <p style={{ marginBottom: 12 }}>
                           <strong>Required action:</strong>{' '}

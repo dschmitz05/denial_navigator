@@ -367,6 +367,7 @@ tr:hover td {
 .badge-submitted { background: var(--success-light); color: var(--success); }
 .badge-approved { background: var(--success-light); color: var(--success); }
 .badge-denied-again { background: var(--danger-light); color: var(--danger); }
+.badge-warning { background: var(--warning-light); color: var(--warning-text); }
 
 /* ── Buttons ── */
 .btn {

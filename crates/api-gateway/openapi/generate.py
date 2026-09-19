@@ -402,6 +402,22 @@ add("/api/v1/analyses/generate",
                 "404": {"$ref": "#/components/responses/NotFound"},
                 "429": {"description": "Rate limited."},
                 "401": {"$ref": "#/components/responses/Unauthorized"}}))
+add("/api/v1/analyses/status",
+    get=op("Whether AI analyses are degraded (last 24 h, caller's organization)",
+           "analyses",
+           description="Degraded when the 3 most recent analyses all fell back "
+                       "to deterministic rules or ran without policy evidence, "
+                       "or when that share over 24 hours reaches "
+                       "AI_DEGRADED_THRESHOLD (default 0.2; needs 3+ analyses).",
+           responses={"200": {"description": "OK", "content": {"application/json": {
+               "schema": {"type": "object", "properties": {
+                   "degraded": B(), "recent_all_degraded": B(),
+                   "window_hours": I(), "analyses": I(),
+                   "fallback_share": N(), "threshold": N(),
+                   "reasons": {"type": "object", "properties": {
+                       "llm_error": I(), "retrieval_error": I(),
+                       "no_evidence": I()}}}}}}},
+               "401": {"$ref": "#/components/responses/Unauthorized"}}))
 add("/api/v1/analyses/generate-jobs",
     post=op("Queue asynchronous recommendation generation", "analyses",
             description="Returns a durable job ID; poll its status endpoint for the result.",
