@@ -1089,6 +1089,10 @@
                   },
                   "password": {
                     "type": "string"
+                  },
+                  "organization_id": {
+                    "type": "string",
+                    "format": "uuid"
                   }
                 },
                 "required": [
@@ -1237,10 +1241,13 @@
                   "role": {
                     "type": "string",
                     "enum": [
+                      "system_admin",
+                      "security_admin",
+                      "revenue_cycle_manager",
                       "billing_specialist",
-                      "billing_manager",
-                      "rcm_director",
-                      "admin"
+                      "coding_specialist",
+                      "auditor",
+                      "read_only"
                     ]
                   }
                 },

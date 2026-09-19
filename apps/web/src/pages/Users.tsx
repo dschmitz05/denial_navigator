@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 
 const API_BASE = '/api/v1'
-const ROLES = ['billing_specialist', 'billing_manager', 'rcm_director', 'admin']
+const ROLES = ['system_admin', 'security_admin', 'revenue_cycle_manager', 'billing_specialist', 'coding_specialist', 'auditor', 'read_only']
 
 type UserRecord = Record<string, any> & { id: string; username: string; email?: string; full_name?: string; role: string; is_active: boolean; totp_required?: boolean; totp_enrolled?: boolean; last_login?: string }
 type UserForm = { username: string; email: string; password: string; full_name: string; role: string }
@@ -212,9 +212,10 @@ export default function Users() {
 
   const roleBadge = (role: string) => {
     const colors: Record<string, string> = {
-      admin: 'var(--danger)',
-      billing_manager: '#ea580c',
-      rcm_director: '#2563eb',
+        system_admin: 'var(--danger)',
+        security_admin: '#7c3aed',
+        revenue_cycle_manager: '#2563eb',
+        coding_specialist: '#ea580c',
       billing_specialist: 'var(--gray-500)',
     }
     return {

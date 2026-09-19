@@ -353,7 +353,7 @@ pub async fn export_claims_csv(
 ) -> Result<Response, AppError> {
     if !matches!(
         principal.role.as_deref(),
-        Some("billing_manager" | "rcm_director" | "admin")
+        Some("revenue_cycle_manager" | "system_admin")
     ) {
         return Err(AppError::Forbidden);
     }

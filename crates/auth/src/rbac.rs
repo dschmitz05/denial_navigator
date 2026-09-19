@@ -6,11 +6,11 @@
 //! service presenting the shared `SERVICE_API_KEY`. Everything else is refused
 //! 401 before a handler runs.
 //!
-//! Roles come from `database/init.sql`:
-//!   billing_specialist  queue operations, view claims
-//!   billing_manager     policy management, bulk operations
-//!   rcm_director        full data access, reporting
-//!   admin               system configuration
+//! Roles come from `database/init.sql` and match plan §2.2:
+//!   system_admin / security_admin  system and security configuration
+//!   revenue_cycle_manager          policy management, bulk operations
+//!   billing_specialist / coding_specialist  queue operations
+//!   auditor / read_only            read-only access
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -79,15 +79,26 @@ impl Principal {
 }
 
 const SPECIALIST: &str = "billing_specialist";
-const MANAGER: &str = "billing_manager";
-const DIRECTOR: &str = "rcm_director";
-const ADMIN: &str = "admin";
+const CODING: &str = "coding_specialist";
+const MANAGER: &str = "revenue_cycle_manager";
+const SYSTEM_ADMIN: &str = "system_admin";
+const SECURITY_ADMIN: &str = "security_admin";
 const AUDITOR: &str = "auditor";
+const READ_ONLY: &str = "read_only";
 
-const ALL_ROLES: &[&str] = &[SPECIALIST, MANAGER, DIRECTOR, ADMIN];
-const MANAGER_UP: &[&str] = &[MANAGER, DIRECTOR, ADMIN];
-const ADMIN_ONLY: &[&str] = &[ADMIN];
-const AUDIT_ROLES: &[&str] = &[MANAGER, DIRECTOR, ADMIN, AUDITOR];
+const ALL_ROLES: &[&str] = &[
+    SPECIALIST,
+    CODING,
+    MANAGER,
+    SYSTEM_ADMIN,
+    SECURITY_ADMIN,
+    AUDITOR,
+    READ_ONLY,
+];
+const WRITE_ROLES: &[&str] = &[SPECIALIST, CODING, MANAGER, SYSTEM_ADMIN];
+const MANAGER_UP: &[&str] = &[MANAGER, SYSTEM_ADMIN];
+const ADMIN_ONLY: &[&str] = &[SYSTEM_ADMIN, SECURITY_ADMIN];
+const AUDIT_ROLES: &[&str] = &[MANAGER, SYSTEM_ADMIN, SECURITY_ADMIN, AUDITOR];
 const NOBODY: &[&str] = &[];
 
 /// A token that has only cleared the password step may only touch these.
@@ -246,7 +257,7 @@ pub fn resolve_from(
         user_id: Some(claims.sub),
         username: claims.username,
         role: Some(claims.role),
-        organization_id: None,
+        organization_id: claims.organization_id,
         reason: None,
         issued_at: Some(claims.iat),
         scope: Some(claims.scope),
@@ -347,21 +358,21 @@ fn resource_of(path: &str) -> String {
 /// `(read_roles, write_roles)` for a resource, or `None` when unknown.
 fn permissions(resource: &str) -> Option<(&'static [&'static str], &'static [&'static str])> {
     Some(match resource {
-        "claims" => (ALL_ROLES, MANAGER_UP),
-        "denials" => (ALL_ROLES, ALL_ROLES),
-        "appeals" => (ALL_ROLES, ALL_ROLES),
-        "analyses" => (ALL_ROLES, ALL_ROLES),
-        "feedback" => (ALL_ROLES, ALL_ROLES),
+        "claims" => (ALL_ROLES, WRITE_ROLES),
+        "denials" => (ALL_ROLES, WRITE_ROLES),
+        "appeals" => (ALL_ROLES, WRITE_ROLES),
+        "analyses" => (ALL_ROLES, WRITE_ROLES),
+        "feedback" => (ALL_ROLES, WRITE_ROLES),
         "knowledge" => (ALL_ROLES, MANAGER_UP),
         "ingestion" => (ALL_ROLES, MANAGER_UP),
         "reference" => (ALL_ROLES, MANAGER_UP),
         "audit" => (AUDIT_ROLES, NOBODY),
         "playbooks" => (MANAGER_UP, MANAGER_UP),
         "users" => (ADMIN_ONLY, ADMIN_ONLY),
-        "auth" => (ALL_ROLES, ALL_ROLES),
+        "auth" => (ALL_ROLES, ADMIN_ONLY),
         "system" => (ALL_ROLES, NOBODY),
         "retention" => (ADMIN_ONLY, ADMIN_ONLY),
-        "notifications" => (ALL_ROLES, ALL_ROLES),
+        "notifications" => (ALL_ROLES, WRITE_ROLES),
         "settings" => (ADMIN_ONLY, ADMIN_ONLY),
         _ => return None,
     })
@@ -370,6 +381,7 @@ fn permissions(resource: &str) -> Option<(&'static [&'static str], &'static [&'s
 /// Path-level exceptions, checked before the resource rules.
 fn path_permission(method: &str, norm: &str) -> Option<&'static [&'static str]> {
     Some(match (method, norm) {
+        ("POST", "/api/v1/auth/change-password") => ALL_ROLES,
         ("GET", "/api/v1/users/assignable") => MANAGER_UP,
         ("POST", "/api/v1/appeals/{id}/assign") => MANAGER_UP,
         ("POST", "/api/v1/users/{id}/totp") => ADMIN_ONLY,
@@ -436,10 +448,12 @@ pub async fn account_is_current(pool: &PgPool, who: &Principal) -> Result<(), St
     let row = sqlx::query(
         // EXTRACT(EPOCH FROM ...) is NUMERIC in Postgres; cast so it decodes
         // into f64 rather than panicking the worker on every request.
-        "SELECT is_active, EXTRACT(EPOCH FROM sessions_valid_from)::float8 AS valid_from, role \
-         FROM users WHERE id = $1::uuid",
+        "SELECT u.is_active, EXTRACT(EPOCH FROM u.sessions_valid_from)::float8 AS valid_from, om.role \
+         FROM users u JOIN organization_memberships om ON om.user_id = u.id \
+         WHERE u.id = $1::uuid AND om.organization_id = $2::uuid",
     )
     .bind(user_id)
+    .bind(who.organization_id.as_deref().unwrap_or_default())
     .fetch_optional(pool)
     .await;
 
@@ -581,24 +595,55 @@ pub async fn decide(
     // before repositories may use its tenant context. Local development users
     // are backfilled into the Development Organization by migration 024.
     if who.kind == PrincipalKind::User {
+        if who.organization_id.is_none() {
+            let membership_count = match who.user_id.as_deref() {
+                Some(user_id) => sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM organization_memberships om \
+                     JOIN organizations o ON o.id = om.organization_id \
+                     WHERE om.user_id = $1::uuid AND o.is_active = TRUE",
+                )
+                .bind(user_id)
+                .fetch_one(pool)
+                .await
+                .ok(),
+                None => None,
+            };
+            if membership_count != Some(1) {
+                return Decision::Unauthorized("Organization selection required".to_string());
+            }
+        }
         let organization_id = match who.user_id.as_deref() {
-            Some(user_id) => sqlx::query_scalar::<_, uuid::Uuid>(
-                "SELECT om.organization_id FROM organization_memberships om \
+            Some(user_id) => sqlx::query(
+                "SELECT om.organization_id, om.role FROM organization_memberships om \
                  JOIN organizations o ON o.id = om.organization_id \
-                 WHERE om.user_id = $1::uuid AND o.is_active = TRUE \
-                 ORDER BY om.created_at ASC LIMIT 1",
+                  WHERE om.user_id = $1::uuid AND o.is_active = TRUE \
+                    AND ($2::uuid IS NULL OR om.organization_id = $2::uuid) \
+                  ORDER BY om.created_at ASC LIMIT 1",
             )
             .bind(user_id)
+            .bind(
+                who.organization_id
+                    .as_deref()
+                    .and_then(|id| id.parse::<uuid::Uuid>().ok()),
+            )
             .fetch_optional(pool)
             .await
             .ok()
             .flatten(),
             None => None,
         };
-        let Some(organization_id) = organization_id else {
+        let Some(row) = organization_id else {
             return Decision::Unauthorized("No active organization membership".to_string());
         };
-        who.organization_id = Some(organization_id.to_string());
+        if let (Ok(organization_id), Ok(role)) = (
+            row.try_get::<uuid::Uuid, _>("organization_id"),
+            row.try_get::<String, _>("role"),
+        ) {
+            who.organization_id = Some(organization_id.to_string());
+            who.role = Some(role);
+        } else {
+            return Decision::Unauthorized("Organization membership unavailable".to_string());
+        }
     }
 
     // A valid signature is not enough; the account behind it must still be

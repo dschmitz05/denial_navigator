@@ -176,7 +176,7 @@ def validate_rust_route_coverage(document):
 # ── auth ──────────────────────────────────────────────────────────────────
 add("/api/v1/auth/login",
     post=op("Password login", "auth", security=[],
-            body=jbody({"username": S(), "password": S()},
+            body=jbody({"username": S(), "password": S(), "organization_id": S(format="uuid")},
                        ["username", "password"]),
             responses={"200": {"description": "A full-scope token, or an "
                                "mfa-scope token when TOTP is required.",
@@ -194,8 +194,9 @@ add("/api/v1/auth/register",
     post=op("Create a user (admin only)", "auth",
             body=jbody({"username": S(), "email": S(), "password": S(),
                         "full_name": S(), "role": S(enum=[
-                            "billing_specialist", "billing_manager",
-                            "rcm_director", "admin"])},
+                            "system_admin", "security_admin",
+                            "revenue_cycle_manager", "billing_specialist",
+                            "coding_specialist", "auditor", "read_only"])},
                        ["username", "email", "password", "role"]),
             responses=CREATED))
 add("/api/v1/auth/change-password",

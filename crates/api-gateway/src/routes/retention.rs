@@ -21,7 +21,10 @@ use uuid::Uuid;
 use crate::state::AppState;
 
 fn require_admin(principal: &Principal) -> Result<(), AppError> {
-    if principal.role.as_deref() == Some("admin") {
+    if matches!(
+        principal.role.as_deref(),
+        Some("system_admin" | "security_admin")
+    ) {
         Ok(())
     } else {
         Err(AppError::Forbidden)

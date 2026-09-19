@@ -247,8 +247,9 @@ is compared against the token's `iat`, and it is stored via
 `date_trunc('second', NOW())` because `iat` truncates to whole seconds — a
 sub-second timestamp revoked every token the instant it was issued.
 
-**Authorisation.** Roles are `billing_specialist`, `billing_manager`,
-`rcm_director`, `admin`, enforced by resource/path permission tables and, for
+**Authorisation.** Roles are `system_admin`, `security_admin`,
+`revenue_cycle_manager`, `billing_specialist`, `coding_specialist`, `auditor`,
+and `read_only`, enforced by resource/path permission tables and, for
 specialists, by row-level queue scoping. The role is baked into the token, so
 every request re-checks it against the account: a demotion takes effect
 immediately rather than at the next login. Changing a user's role also bumps

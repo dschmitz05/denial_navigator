@@ -75,7 +75,8 @@ async fn baseline_current_snapshot(pool: &PgPool) -> Result<(), sqlx::Error> {
     // A database from the current pre-SQLx Compose release has these core
     // tables but does not yet have institutional_playbooks (introduced in
     // migration 017). It is safe to stamp the known manually-applied history
-    // through 013 and let SQLx run the remaining files. Anything else is
+    // through the last migration represented by the snapshot and let SQLx run
+    // the remaining files. Anything else is
     // rejected instead of being guessed at or silently marked up-to-date.
     let (current_snapshot, legacy_v13): (bool, bool) = sqlx::query_as(
         "SELECT to_regclass('public.claims') IS NOT NULL \
@@ -97,20 +98,26 @@ async fn baseline_current_snapshot(pool: &PgPool) -> Result<(), sqlx::Error> {
         ));
     }
 
+    // Current snapshots may predate the newest migrations. Leave migrations
+    // after 031 un-stamped so role normalization and later upgrades execute.
+    const CURRENT_SNAPSHOT_LAST_VERSION: i64 = 29;
     tracing::info!(
         count = if legacy_v13 {
             13
         } else {
-            MIGRATOR.iter().count()
+            MIGRATOR
+                .iter()
+                .filter(|migration| migration.version <= CURRENT_SNAPSHOT_LAST_VERSION)
+                .count()
         },
         legacy_v13,
         "baselining existing database schema for SQLx"
     );
     let mut tx = pool.begin().await?;
-    for migration in MIGRATOR
-        .iter()
-        .filter(|migration| !legacy_v13 || migration.version <= 13)
-    {
+    for migration in MIGRATOR.iter().filter(|migration| {
+        (legacy_v13 && migration.version <= 13)
+            || (!legacy_v13 && migration.version <= CURRENT_SNAPSHOT_LAST_VERSION)
+    }) {
         sqlx::query(
             "INSERT INTO _sqlx_migrations \
              (version, description, success, checksum, execution_time) \

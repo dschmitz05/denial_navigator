@@ -35,7 +35,7 @@ pub struct TestRequest {
 
 fn manager(principal: &Principal) -> Result<(), AppError> {
     match principal.role.as_deref() {
-        Some("billing_manager" | "rcm_director" | "admin") => Ok(()),
+        Some("revenue_cycle_manager" | "system_admin") => Ok(()),
         _ => Err(AppError::Forbidden),
     }
 }

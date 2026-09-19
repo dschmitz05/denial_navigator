@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react'
 
 const API_BASE = '/api/v1'
-const MANAGER_UP = ['billing_manager', 'rcm_director', 'admin'] as const
+const MANAGER_UP = ['revenue_cycle_manager', 'system_admin'] as const
 
 export interface AuthUser {
   id?: string
@@ -24,12 +24,13 @@ interface EnrollmentResponse {
 
 type LoginResult =
   | { user: AuthUser }
+  | { organizations: Array<{ id: string; name: string }> }
   | { mfa: 'totp_required' | 'enrollment_required'; mfaToken: string; username?: string }
 
 interface AuthContextValue {
   user: AuthUser | null
   loading: boolean
-  login: (username: string, password: string) => Promise<LoginResult>
+  login: (username: string, password: string, organizationId?: string) => Promise<LoginResult>
   completeTotp: (mfaToken: string, code: string, options?: { enrolling?: boolean }) => Promise<AuthUser>
   startEnrollment: (mfaToken: string) => Promise<EnrollmentResponse>
   logout: () => void
@@ -97,11 +98,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return data.user
   }
 
-  const login = async (username: string, password: string): Promise<LoginResult> => {
+  const login = async (username: string, password: string, organizationId?: string): Promise<LoginResult> => {
     const resp = await fetch(`${API_BASE}/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ username, password, organization_id: organizationId }),
     })
     const data = await resp.json() as Record<string, unknown>
     if (!resp.ok) throw new Error(errorDetail(data, 'Login failed'))
@@ -113,6 +114,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         mfaToken: data.mfa_token,
         username: typeof data.username === 'string' ? data.username : undefined,
       }
+    }
+    if (data.status === 'organization_selection' && Array.isArray(data.organizations)) {
+      return { organizations: data.organizations as Array<{ id: string; name: string }> }
     }
     return { user: acceptSession(data as unknown as SessionResponse) }
   }
@@ -150,7 +154,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     viewAudit: () => hasRole([...MANAGER_UP, 'auditor']),
     managePlaybooks: () => hasRole(MANAGER_UP),
     editClaims: () => hasRole(MANAGER_UP),
-    manageUsers: () => hasRole(['admin']),
+    manageUsers: () => hasRole(['system_admin', 'security_admin']),
     assignWork: () => hasRole(MANAGER_UP),
   }
 

@@ -90,7 +90,7 @@ parser and LLM service cannot write their results back through the gateway.
 ```bash
 docker compose up -d --build
 
-# Create the admin user. Idempotent - it skips anything already present.
+# Create the system administrator user. Idempotent - it skips anything already present.
 docker compose run --rm --no-deps -v "$PWD/scripts:/seed" api python /seed/seed_admin.py
 ```
 

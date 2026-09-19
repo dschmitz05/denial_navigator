@@ -17,6 +17,8 @@ pub struct Claims {
     pub iat: i64,
     pub exp: i64,
     pub scope: String,
+    #[serde(default)]
+    pub organization_id: Option<String>,
 }
 
 /// Create a new JWT for the given principal.
@@ -28,6 +30,18 @@ pub fn create_token(
     secret: &str,
     expire_minutes: i64,
 ) -> Result<String, jsonwebtoken::errors::Error> {
+    create_token_for_organization(user_id, username, role, scope, None, secret, expire_minutes)
+}
+
+pub fn create_token_for_organization(
+    user_id: &str,
+    username: &str,
+    role: &str,
+    scope: &str,
+    organization_id: Option<&str>,
+    secret: &str,
+    expire_minutes: i64,
+) -> Result<String, jsonwebtoken::errors::Error> {
     let now = Utc::now();
     let claims = Claims {
         sub: user_id.to_string(),
@@ -36,6 +50,7 @@ pub fn create_token(
         iat: now.timestamp(),
         exp: (now + ChronoDuration::minutes(expire_minutes)).timestamp(),
         scope: scope.to_string(),
+        organization_id: organization_id.map(str::to_string),
     };
     encode(
         &Header::new(Algorithm::HS256),

@@ -18,7 +18,7 @@ import Profile from './pages/Profile'
 import Insights from './pages/Insights'
 import Playbooks from './pages/Playbooks'
 
-const MANAGER_UP = ['billing_manager', 'rcm_director', 'admin'] as const
+const MANAGER_UP = ['revenue_cycle_manager', 'system_admin'] as const
 
 function ProtectedRoute({ children, roles }: { children: ReactNode; roles?: readonly string[] }) {
   const { user, loading, hasRole } = useAuth()
@@ -52,8 +52,9 @@ function LoginScreen() {
   const { login } = useAuth()
   const navigate = useNavigate()
 
-  const handleLogin = async (username: string, password: string) => {
-    const result = await login(username, password)
+  const handleLogin = async (username: string, password: string, organizationId?: string) => {
+    const result = await login(username, password, organizationId)
+    if ('organizations' in result) return result
     if ('mfa' in result) return result
     navigate('/')
     return result
@@ -87,7 +88,7 @@ function AppContent() {
       <Route path="/insights" element={<ProtectedRoute><Insights /></ProtectedRoute>} />
       <Route path="/playbooks" element={<ProtectedRoute roles={MANAGER_UP}><Playbooks /></ProtectedRoute>} />
       <Route path="/audit" element={<ProtectedRoute roles={MANAGER_UP}><Audit /></ProtectedRoute>} />
-      <Route path="/users" element={<ProtectedRoute roles={['admin']}><Users /></ProtectedRoute>} />
+      <Route path="/users" element={<ProtectedRoute roles={['system_admin', 'security_admin']}><Users /></ProtectedRoute>} />
       <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
       <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
       <Route path="*" element={<Navigate to="/" replace />} />

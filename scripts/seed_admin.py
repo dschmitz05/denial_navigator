@@ -14,7 +14,7 @@ DATABASE_URL = os.environ.get(
 DEFAULT_USERNAME = "admin"
 DEFAULT_EMAIL = "admin@denialnavigator.local"
 DEFAULT_PASSWORD = "admin123"  # Change immediately after first login
-DEFAULT_ROLE = "admin"
+DEFAULT_ROLE = "system_admin"
 
 # Seed CARC codes
 CARC_CODES = [

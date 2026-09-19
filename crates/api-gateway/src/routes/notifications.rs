@@ -3,7 +3,7 @@
 //! Ported from `api-gateway/routes/notifications.py`. Two kinds: a
 //! `deadline_digest` to the person who owns the work, and an
 //! `overdue_escalation` to managers for overdue work nobody owns. Generation
-//! is idempotent by `(user, kind, day)` - the unique index, not an assumption
+//! is idempotent by `(organization, user, kind, day)` - the unique index, not an assumption
 //! about how often the cron calls this, is what makes "once a day" hold.
 
 use axum::extract::{Path, Query, State};
@@ -18,9 +18,9 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
-/// admin or billing_manager or rcm_director - the roles an unowned overdue
+/// system/revenue-cycle administrators - the roles an unowned overdue
 /// denial is escalated to.
-const MANAGER_UP: &[&str] = &["billing_manager", "rcm_director", "admin"];
+const MANAGER_UP: &[&str] = &["revenue_cycle_manager", "system_admin"];
 
 #[derive(Deserialize)]
 pub struct ListQuery {
@@ -46,6 +46,14 @@ fn me(principal: &Principal) -> Result<Uuid, AppError> {
         .ok_or(AppError::Unauthorized)
 }
 
+fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
+    principal
+        .organization_id
+        .as_deref()
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .ok_or(AppError::Forbidden)
+}
+
 /// `12345.6` -> `"12,345.60"`, matching Python's `{:,.2f}`.
 fn money(v: f64) -> String {
     let neg = v.is_sign_negative();
@@ -68,14 +76,15 @@ pub async fn list_notifications(
     Query(params): Query<ListQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, AppError> {
     let user_id = me(&principal)?;
+    let organization_id = organization_id(&principal)?;
     let limit = params.limit.clamp(1, 200);
 
     let sql = format!(
         "SELECT id, kind, for_date, title, body, payload, read_at, created_at \
            FROM notifications \
-          WHERE user_id = $1 {} \
-          ORDER BY created_at DESC \
-          LIMIT $2",
+          WHERE organization_id = $1 AND user_id = $2 {} \
+           ORDER BY created_at DESC \
+           LIMIT $3",
         if params.unread_only {
             "AND read_at IS NULL"
         } else {
@@ -84,6 +93,7 @@ pub async fn list_notifications(
     );
 
     let rows = sqlx::query(&sql)
+        .bind(organization_id)
         .bind(user_id)
         .bind(limit)
         .fetch_all(&state.pool)
@@ -123,12 +133,14 @@ pub async fn mark_read(
     Path(notification_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let user_id = me(&principal)?;
+    let organization_id = organization_id(&principal)?;
     let row = sqlx::query(
         "UPDATE notifications SET read_at = NOW() \
-          WHERE id = $1 AND user_id = $2 AND read_at IS NULL \
+          WHERE id = $1 AND organization_id = $2 AND user_id = $3 AND read_at IS NULL \
         RETURNING id",
     )
     .bind(notification_id)
+    .bind(organization_id)
     .bind(user_id)
     .fetch_optional(&state.pool)
     .await
@@ -144,9 +156,12 @@ pub async fn mark_all_read(
     Extension(principal): Extension<Principal>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let user_id = me(&principal)?;
+    let organization_id = organization_id(&principal)?;
     let result = sqlx::query(
-        "UPDATE notifications SET read_at = NOW() WHERE user_id = $1 AND read_at IS NULL",
+        "UPDATE notifications SET read_at = NOW() \
+          WHERE organization_id = $1 AND user_id = $2 AND read_at IS NULL",
     )
+    .bind(organization_id)
     .bind(user_id)
     .execute(&state.pool)
     .await
@@ -164,8 +179,11 @@ pub async fn generate_digests(
 ) -> Result<Json<serde_json::Value>, AppError> {
     // A service credential or an admin - not something a specialist triggers,
     // since it writes to everyone's notifications.
-    let allowed =
-        principal.kind == PrincipalKind::Service || principal.role.as_deref() == Some("admin");
+    let allowed = principal.kind == PrincipalKind::Service
+        || matches!(
+            principal.role.as_deref(),
+            Some("system_admin" | "security_admin")
+        );
     if !allowed {
         return Err(AppError::Forbidden);
     }
@@ -176,7 +194,7 @@ pub async fn generate_digests(
 
     // ── per-owner digests ──
     let owners = sqlx::query(&format!(
-        "SELECT aq.assigned_user_id AS user_id, \
+        "SELECT c.organization_id, aq.assigned_user_id AS user_id, \
                 COUNT(*) FILTER (WHERE d.appeal_deadline < CURRENT_DATE)  AS overdue, \
                 COUNT(*) FILTER (WHERE d.appeal_deadline >= CURRENT_DATE) AS upcoming, \
                 MIN(d.appeal_deadline) AS soonest, \
@@ -194,13 +212,16 @@ pub async fn generate_digests(
                  OR aq.outcome_status NOT IN ('approved','overruled','resolved','denied_again','cancelled')) \
             AND d.appeal_deadline IS NOT NULL \
             AND d.appeal_deadline <= CURRENT_DATE + INTERVAL '{horizon} days' \
-          GROUP BY aq.assigned_user_id"
+           GROUP BY c.organization_id, aq.assigned_user_id"
     ))
     .fetch_all(&state.pool)
     .await
     .map_err(AppError::Db)?;
 
     for row in &owners {
+        let org_id: Uuid = row
+            .try_get("organization_id")
+            .map_err(|e| AppError::Internal(e.to_string()))?;
         let owner_id: Uuid = row
             .try_get("user_id")
             .map_err(|e| AppError::Internal(e.to_string()))?;
@@ -235,10 +256,11 @@ pub async fn generate_digests(
         });
 
         let result = sqlx::query(
-            "INSERT INTO notifications (user_id, kind, title, body, payload) \
-             VALUES ($1, 'deadline_digest', $2, $3, $4::jsonb) \
-             ON CONFLICT (user_id, kind, for_date) DO NOTHING",
+            "INSERT INTO notifications (organization_id, user_id, kind, title, body, payload) \
+             VALUES ($1, $2, 'deadline_digest', $3, $4, $5::jsonb) \
+             ON CONFLICT (organization_id, user_id, kind, for_date) DO NOTHING",
         )
+        .bind(org_id)
         .bind(owner_id)
         .bind(&title)
         .bind(&body)
@@ -317,10 +339,11 @@ pub async fn generate_digests(
                     .try_get("id")
                     .map_err(|e| AppError::Internal(e.to_string()))?;
                 let result = sqlx::query(
-                    "INSERT INTO notifications (user_id, kind, title, body, payload) \
-                     VALUES ($1, 'overdue_escalation', $2, $3, $4::jsonb) \
-                     ON CONFLICT (user_id, kind, for_date) DO NOTHING",
+                    "INSERT INTO notifications (organization_id, user_id, kind, title, body, payload) \
+                     VALUES ($1, $2, 'overdue_escalation', $3, $4, $5::jsonb) \
+                     ON CONFLICT (organization_id, user_id, kind, for_date) DO NOTHING",
                 )
+                .bind(org_id)
                 .bind(mid)
                 .bind(&title)
                 .bind(&body)

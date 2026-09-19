@@ -4,11 +4,13 @@
   "displayName": "Denial Navigator (development)",
   "roles": {
     "realm": [
+      { "name": "system_admin" },
+      { "name": "security_admin" },
+      { "name": "revenue_cycle_manager" },
       { "name": "billing_specialist" },
-      { "name": "billing_manager" },
-      { "name": "rcm_director" },
-      { "name": "admin" },
-      { "name": "auditor" }
+      { "name": "coding_specialist" },
+      { "name": "auditor" },
+      { "name": "read_only" }
     ]
   },
   "clients": [

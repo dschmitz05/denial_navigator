@@ -3,12 +3,13 @@ import { useAuth } from '../contexts/AuthContext'
 
 type LoginResult =
   | { user: unknown }
+  | { organizations: Array<{ id: string; name: string }> }
   | { mfa: 'totp_required' | 'enrollment_required'; mfaToken: string }
 
 type Enrollment = { qr_svg: string; secret: string }
 
 type LoginProps = {
-  onLogin: (username: string, password: string) => Promise<LoginResult>
+  onLogin: (username: string, password: string, organizationId?: string) => Promise<LoginResult>
   onComplete?: () => void
 }
 
@@ -24,13 +25,20 @@ export default function Login({ onLogin, onComplete }: LoginProps) {
   const [mfaToken, setMfaToken] = useState<string | null>(null)
   const [code, setCode] = useState('')
   const [enrollment, setEnrollment] = useState<Enrollment | null>(null)
+  const [organizations, setOrganizations] = useState<Array<{ id: string; name: string }>>([])
+  const [organizationId, setOrganizationId] = useState('')
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
     setError('')
     setLoading(true)
     try {
-      const result = await onLogin(username, password)
+      const result = await onLogin(username, password, organizationId || undefined)
+      if ('organizations' in result) {
+        setOrganizations(result.organizations)
+        setStage('organization')
+        return
+      }
       if ('mfa' in result) {
         setMfaToken(result.mfaToken)
         if (result.mfa === 'enrollment_required') {
@@ -85,7 +93,17 @@ export default function Login({ onLogin, onComplete }: LoginProps) {
           <h1 style={{ fontSize: '1.8rem', marginBottom: 8 }}>🧭 Denial Navigator</h1>
           <p style={{ color: 'var(--gray-500)', marginBottom: 32 }}>Healthcare Denial Management</p>
 
-          {stage !== 'password' ? (
+          {stage === 'organization' ? (
+            <form onSubmit={handleSubmit}>
+              <h2>Select organization</h2>
+              <p>Choose where you want to work.</p>
+              <select value={organizationId} onChange={(e) => setOrganizationId(e.target.value)} required>
+                <option value="">Select an organization</option>
+                {organizations.map((organization) => <option key={organization.id} value={organization.id}>{organization.name}</option>)}
+              </select>
+              <button className="btn btn-primary" type="submit" disabled={loading || !organizationId}>Continue</button>
+            </form>
+          ) : stage !== 'password' ? (
             <form onSubmit={handleCode}>
               {error && (
                 <div style={{

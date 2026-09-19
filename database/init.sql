@@ -351,7 +351,8 @@ CREATE TABLE users (
     password_hash VARCHAR(255),
     full_name VARCHAR(255),
     role VARCHAR(50) NOT NULL DEFAULT 'billing_specialist'
-        CHECK (role IN ('billing_specialist', 'billing_manager', 'rcm_director', 'admin', 'auditor')),
+        CHECK (role IN ('system_admin', 'security_admin', 'revenue_cycle_manager',
+                        'billing_specialist', 'coding_specialist', 'auditor', 'read_only')),
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
@@ -468,6 +469,7 @@ $fn$;
 -- idempotent, since the digest runs from cron against four API workers.
 CREATE TABLE notifications (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL,
     user_id UUID NOT NULL,
     kind VARCHAR(50) NOT NULL,
     for_date DATE NOT NULL DEFAULT CURRENT_DATE,
@@ -478,7 +480,7 @@ CREATE TABLE notifications (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE UNIQUE INDEX idx_notifications_once_per_day ON notifications (user_id, kind, for_date);
+CREATE UNIQUE INDEX idx_notifications_once_per_day ON notifications (organization_id, user_id, kind, for_date);
 CREATE INDEX idx_notifications_unread ON notifications (user_id, created_at DESC) WHERE read_at IS NULL;
 
 -- ============================================================

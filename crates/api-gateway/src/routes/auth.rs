@@ -4,7 +4,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use chrono::{DateTime, Utc};
-use denial_auth::auth::{create_token, decode_token, hash_password, verify_password};
+use denial_auth::auth::{
+    create_token, create_token_for_organization, decode_token, hash_password, verify_password,
+};
 use denial_auth::rbac::Principal;
 use denial_common::error::AppError;
 use denial_common::totp;
@@ -25,6 +27,7 @@ const TOTP_WINDOW_MINUTES: i64 = 10;
 pub struct LoginRequest {
     pub username: String,
     pub password: String,
+    pub organization_id: Option<Uuid>,
 }
 
 #[derive(Deserialize)]
@@ -131,11 +134,16 @@ pub async fn login(
     }
 
     let user = sqlx::query(
-        "SELECT id, username, email, full_name, role, is_active, password_hash, \
-                totp_required, totp_confirmed_at, last_login \
-         FROM users WHERE username = $1 AND is_active = TRUE",
+        "SELECT u.id, u.username, u.email, u.full_name, om.role, u.is_active, u.password_hash, \
+                u.totp_required, u.totp_confirmed_at, u.last_login \
+         FROM users u JOIN organization_memberships om ON om.user_id = u.id \
+         JOIN organizations o ON o.id = om.organization_id \
+         WHERE u.username = $1 AND u.is_active = TRUE AND o.is_active = TRUE \
+           AND ($2::uuid IS NULL OR om.organization_id = $2) \
+         ORDER BY om.created_at ASC LIMIT 1",
     )
     .bind(&body.username)
+    .bind(body.organization_id)
     .fetch_optional(&state.pool)
     .await?;
 
@@ -187,6 +195,33 @@ pub async fn login(
     let user_id: Uuid = user
         .try_get("id")
         .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    let organizations = sqlx::query(
+        "SELECT o.id, o.name FROM organization_memberships om \
+         JOIN organizations o ON o.id = om.organization_id \
+         WHERE om.user_id = $1 AND o.is_active = TRUE ORDER BY om.created_at ASC",
+    )
+    .bind(user_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(AppError::Db)?;
+    if body.organization_id.is_none() && organizations.len() > 1 {
+        return Ok(Json(serde_json::json!({
+            "status": "organization_selection",
+            "organizations": organizations.iter().map(|row| serde_json::json!({
+                "id": row.try_get::<Uuid, _>("id").unwrap_or_default(),
+                "name": row.try_get::<String, _>("name").unwrap_or_default(),
+            })).collect::<Vec<_>>(),
+        })));
+    }
+    let organization_id = body
+        .organization_id
+        .or_else(|| {
+            organizations
+                .first()
+                .and_then(|row| row.try_get::<Uuid, _>("id").ok())
+        })
+        .ok_or(AppError::Unauthorized)?;
     let username: String = user
         .try_get("username")
         .map_err(|e| AppError::Internal(e.to_string()))?;
@@ -218,11 +253,12 @@ pub async fn login(
         } else {
             "enrollment_required"
         };
-        let mfa_token = create_token(
+        let mfa_token = create_token_for_organization(
             &user_id.to_string(),
             &username,
             &role,
             "mfa",
+            Some(&organization_id.to_string()),
             &state.config.jwt_secret,
             10,
         )
@@ -251,11 +287,12 @@ pub async fn login(
         })));
     }
 
-    let token = create_token(
+    let token = create_token_for_organization(
         &user_id.to_string(),
         &username,
         &role,
         "full",
+        Some(&organization_id.to_string()),
         &state.config.jwt_secret,
         state.config.jwt_expire_minutes,
     )
@@ -297,11 +334,21 @@ pub async fn me(
     let user_id = principal.user_id.as_ref().ok_or(AppError::Unauthorized)?;
 
     let row = sqlx::query(
-        "SELECT id, username, email, full_name, role, is_active, last_login, \
-                totp_required, (totp_confirmed_at IS NOT NULL) AS totp_enrolled \
-         FROM users WHERE id = $1",
+        "SELECT u.id, u.username, u.email, u.full_name, om.role, u.is_active, u.last_login, \
+                u.totp_required, (u.totp_confirmed_at IS NOT NULL) AS totp_enrolled \
+         FROM users u JOIN organization_memberships om ON om.user_id = u.id \
+         JOIN organizations o ON o.id = om.organization_id \
+         WHERE u.id = $1 AND o.is_active = TRUE \
+           AND om.organization_id = $2::uuid \
+         ORDER BY om.created_at ASC LIMIT 1",
     )
     .bind(Uuid::parse_str(user_id).map_err(|_| AppError::Unauthorized)?)
+    .bind(
+        principal
+            .organization_id
+            .as_deref()
+            .ok_or(AppError::Unauthorized)?,
+    )
     .fetch_optional(&state.pool)
     .await
     .map_err(AppError::Db)?;
@@ -354,7 +401,7 @@ pub async fn register(
     Json(body): Json<RegisterRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let role = principal.role.as_deref().ok_or(AppError::Forbidden)?;
-    if role != "admin" {
+    if !matches!(role, "system_admin" | "security_admin") {
         return Err(AppError::Forbidden);
     }
     let organization_id = principal
@@ -370,10 +417,13 @@ pub async fn register(
     }
 
     let valid_roles = [
+        "system_admin",
+        "security_admin",
+        "revenue_cycle_manager",
         "billing_specialist",
-        "billing_manager",
-        "rcm_director",
-        "admin",
+        "coding_specialist",
+        "auditor",
+        "read_only",
     ];
     if !valid_roles.contains(&body.role.as_str()) {
         return Err(AppError::BadRequest(format!(
@@ -497,11 +547,12 @@ pub async fn change_password(
         .map_err(|e| AppError::Internal(e.to_string()))?;
     let role = principal.role.as_deref().unwrap_or("billing_specialist");
 
-    let token = create_token(
+    let token = create_token_for_organization(
         &uid.to_string(),
         &username,
         role,
         "full",
+        principal.organization_id.as_deref(),
         &state.config.jwt_secret,
         state.config.jwt_expire_minutes,
     )
@@ -525,11 +576,21 @@ async fn mfa_user(
     let uid = Uuid::parse_str(uid).map_err(|_| AppError::Unauthorized)?;
 
     sqlx::query(
-        "SELECT id, username, role, totp_required, totp_secret, \
-                totp_confirmed_at, totp_last_used_step \
-         FROM users WHERE id = $1 AND is_active = TRUE",
+        "SELECT u.id, u.username, om.role, u.totp_required, u.totp_secret, \
+                u.totp_confirmed_at, u.totp_last_used_step \
+         FROM users u JOIN organization_memberships om ON om.user_id = u.id \
+         JOIN organizations o ON o.id = om.organization_id \
+          WHERE u.id = $1 AND u.is_active = TRUE AND o.is_active = TRUE \
+            AND om.organization_id = $2::uuid \
+          ORDER BY om.created_at ASC LIMIT 1",
     )
     .bind(uid)
+    .bind(
+        principal
+            .organization_id
+            .as_deref()
+            .ok_or(AppError::Unauthorized)?,
+    )
     .fetch_optional(&state.pool)
     .await
     .map_err(AppError::Db)?
@@ -703,11 +764,12 @@ async fn complete_totp(
         .try_get("is_active")
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    let token = create_token(
+    let token = create_token_for_organization(
         &user_id.to_string(),
         &username,
         &role,
         "full",
+        principal.organization_id.as_deref(),
         &state.config.jwt_secret,
         state.config.jwt_expire_minutes,
     )

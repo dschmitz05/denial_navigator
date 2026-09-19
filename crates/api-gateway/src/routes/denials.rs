@@ -4,7 +4,7 @@ use axum::Router;
 use axum::{Extension, Json};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, NaiveDate, Utc};
-use denial_auth::rbac::Principal;
+use denial_auth::rbac::{Principal, PrincipalKind};
 use denial_common::error::AppError;
 use denial_db::pgjson::row_to_json;
 use denial_domain::ACTIVE_DENIAL_STATUSES;
@@ -112,6 +112,21 @@ pub async fn list_denials(
     let mut need_where = false;
     qb.push(" WHERE c.organization_id = ")
         .push_bind(organization_id);
+    if principal.kind == PrincipalKind::User
+        && matches!(
+            principal.role.as_deref(),
+            Some("billing_specialist" | "coding_specialist")
+        )
+    {
+        let user_id = principal
+            .user_id
+            .as_deref()
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .ok_or(AppError::Forbidden)?;
+        qb.push(" AND (aq.assigned_user_id IS NULL OR aq.assigned_user_id = ")
+            .push_bind(user_id)
+            .push(")");
+    }
     let mut push_prefix = |qb: &mut QueryBuilder<sqlx::Postgres>, need_where: &mut bool| {
         if *need_where {
             qb.push(" WHERE ");

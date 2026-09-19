@@ -26,7 +26,10 @@ const VALID_LEVELS: &[&str] = &["none", "deidentified", "limited_phi", "full_con
 const DEFAULT_LEVEL: &str = "deidentified";
 
 fn require_admin(principal: &Principal) -> Result<(), AppError> {
-    if principal.role.as_deref() == Some("admin") {
+    if matches!(
+        principal.role.as_deref(),
+        Some("system_admin" | "security_admin")
+    ) {
         Ok(())
     } else {
         Err(AppError::Forbidden)
