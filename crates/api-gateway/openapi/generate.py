@@ -112,6 +112,7 @@ ROUTE_PREFIXES = {
     "retention": "/api/v1/retention",
     "settings": "/api/v1/settings",
     "write_offs": "/api/v1/write-offs",
+    "overpayments": "/api/v1/overpayments",
 }
 HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
 
@@ -688,6 +689,21 @@ add("/api/v1/ingestion/provider-adjustments",
 add("/api/v1/ingestion/provider-adjustments/summary",
     get=op("PLB totals by month, payer and reason", "ingestion"))
 
+# ── overpayments ─────────────────────────────────────────────────────────
+add("/api/v1/overpayments",
+    get=op("Overpayments found in remittances, with refund deadlines", "overpayments",
+           description="paid_above_allowed: a line paid more than its allowed "
+                       "amount; duplicate_payment: the claim paid again under a "
+                       "different payer claim control number with no reversal. "
+                       "A PLB WO recoupment naming the claim marks it recouped.",
+           params=[{"name": "status", "in": "query",
+                    "schema": S(enum=["identified", "refunded", "recouped", "disputed"])}]))
+add("/api/v1/overpayments/{id}/status",
+    post=op("Record what happened to an overpayment (manager+)", "overpayments",
+            params=[path_param("id")],
+            body=jbody({"status": S(enum=["identified", "refunded", "recouped", "disputed"]),
+                        "note": S()}, ["status"])))
+
 # ── write-off approval ───────────────────────────────────────────────────
 add("/api/v1/write-offs",
     get=op("Write-off requests awaiting or past a decision", "write-offs",
@@ -714,6 +730,13 @@ add("/api/v1/settings/phi-disclosure",
            body=jbody({"level": S(enum=["none", "deidentified",
                                         "limited_phi", "full_context"])},
                       ["level"])))
+add("/api/v1/settings/overpayment-refund",
+    get=op("Days from identifying an overpayment to its refund deadline (admin)",
+           "settings"),
+    put=op("Set the overpayment refund window (admin)", "settings",
+           description="Many payers set this by rule (60 days for Medicare); "
+                       "confirm it with compliance staff.",
+           body=jbody({"days": I(minimum=1, maximum=3650)}, ["days"])))
 add("/api/v1/settings/write-off-approval",
     get=op("Write-off approval threshold for the caller's organization (admin)",
            "settings"),
@@ -779,6 +802,7 @@ doc = {
             ("notifications", "Deadline digests and escalations"),
             ("playbooks", "Manager-curated deterministic resolution rules"),
             ("write-offs", "Write-off approval above the organization threshold"),
+            ("overpayments", "Overpayments and their refund deadlines"),
             ("settings", "Organization and system settings (admin)"),
             ("system", "Health"),
             ("retention", "Audit-log and AI-analysis retention (admin)"),

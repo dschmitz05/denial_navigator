@@ -430,6 +430,50 @@ function WriteOffThreshold() {
   )
 }
 
+/** Days from identifying an overpayment to its refund deadline. */
+function OverpaymentRefundDays() {
+  const [value, setValue] = useState('')
+  const [message, setMessage] = useState<{ error: boolean; text: string } | null>(null)
+
+  useEffect(() => {
+    fetch(`${API_BASE}/settings/overpayment-refund`)
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then(d => setValue(String(d.days)))
+      .catch(() => setMessage({ error: true, text: 'Could not load the refund window' }))
+  }, [])
+
+  const save = async () => {
+    const days = Number(value)
+    if (!Number.isInteger(days) || days < 1 || days > 3650) {
+      setMessage({ error: true, text: 'Enter a whole number of days between 1 and 3650' })
+      return
+    }
+    const resp = await fetch(`${API_BASE}/settings/overpayment-refund`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ days }),
+    })
+    setMessage(resp.ok ? { error: false, text: 'Saved' } : { error: true, text: `Could not save (HTTP ${resp.status})` })
+  }
+
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <h4 style={{ marginBottom: 8 }}>Overpayment refund window</h4>
+      <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: 0 }}>
+        Days from identifying an overpayment to its refund deadline. Many payers set this by rule (60 days
+        for Medicare); confirm the value with your compliance team.
+      </p>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <input className="form-input" style={{ maxWidth: 120 }} type="number" min={1} max={3650} step={1}
+          value={value} onChange={e => setValue(e.target.value)} />
+        <span>days</span>
+        <button className="btn btn-primary" onClick={save}>Save</button>
+        {message && <span style={{ color: message.error ? 'var(--danger)' : 'var(--success-text)' }}>{message.text}</span>}
+      </div>
+    </div>
+  )
+}
+
 export default function Settings() {
   const { can } = useAuth()
   const canEdit = can.manageKnowledge()      // policy curation, same as documents
@@ -640,6 +684,7 @@ export default function Settings() {
           )}
 
           {can.manageUsers() && <WriteOffThreshold />}
+          {can.manageUsers() && <OverpaymentRefundDays />}
 
           <ReferenceCodes canEdit={canEdit} />
 

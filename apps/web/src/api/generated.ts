@@ -67,6 +67,8 @@ export interface ApiOperations {
   "POST /api/v1/notifications/generate-digests": Record<string, never>;
   "POST /api/v1/notifications/read-all": Record<string, never>;
   "POST /api/v1/notifications/{notification_id}/read": { path: { "notification_id": string } };
+  "GET /api/v1/overpayments": { query?: { "status"?: "identified" | "refunded" | "recouped" | "disputed" } };
+  "POST /api/v1/overpayments/{id}/status": { path: { "id": string }; body: { "status": "identified" | "refunded" | "recouped" | "disputed"; "note"?: string } };
   "GET /api/v1/playbooks": { query?: { "status"?: string } };
   "POST /api/v1/playbooks": { body: { "name": string; "description"?: string; "triggers"?: Record<string, unknown>; "recommendation"?: Record<string, unknown> } };
   "POST /api/v1/playbooks/test": { body: { "carc_code"?: string; "cagc"?: string; "payer_name"?: string } };
@@ -82,6 +84,8 @@ export interface ApiOperations {
   "POST /api/v1/retention/ai/prune": { body: { "older_than_days"?: number; "confirm": boolean } };
   "GET /api/v1/retention/audit": Record<string, never>;
   "POST /api/v1/retention/audit/prune": { body: { "older_than_days"?: number; "confirm": boolean } };
+  "GET /api/v1/settings/overpayment-refund": Record<string, never>;
+  "PUT /api/v1/settings/overpayment-refund": { body: { "days": number } };
   "GET /api/v1/settings/phi-disclosure": Record<string, never>;
   "PUT /api/v1/settings/phi-disclosure": { body: { "level": "none" | "deidentified" | "limited_phi" | "full_context" } };
   "GET /api/v1/settings/write-off-approval": Record<string, never>;

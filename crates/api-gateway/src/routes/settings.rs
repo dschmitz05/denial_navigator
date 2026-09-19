@@ -161,6 +161,55 @@ pub async fn set_write_off_approval(
     Ok(Json(serde_json::json!({ "threshold": req.threshold })))
 }
 
+#[derive(Deserialize)]
+pub struct SetRefundDaysRequest {
+    pub days: i32,
+}
+
+/// Days from identifying an overpayment to its refund deadline. Many payers
+/// set this by rule (60 days for Medicare); compliance staff should confirm it.
+pub async fn get_overpayment_refund(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_admin(&principal)?;
+    let days: i32 =
+        sqlx::query_scalar("SELECT overpayment_refund_days FROM organizations WHERE id = $1")
+            .bind(organization_id(&principal)?)
+            .fetch_one(&state.pool)
+            .await?;
+    Ok(Json(serde_json::json!({ "days": days })))
+}
+
+pub async fn set_overpayment_refund(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Json(req): Json<SetRefundDaysRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_admin(&principal)?;
+    if !(1..=3650).contains(&req.days) {
+        return Err(AppError::Unprocessable(
+            "days must be between 1 and 3650".into(),
+        ));
+    }
+    let organization_id = organization_id(&principal)?;
+    sqlx::query("UPDATE organizations SET overpayment_refund_days = $2 WHERE id = $1")
+        .bind(organization_id)
+        .bind(req.days)
+        .execute(&state.pool)
+        .await?;
+    crate::routes::appeals::record_audit(
+        &state.pool,
+        &principal,
+        "overpayment_refund_days_changed",
+        "organization",
+        Some(&organization_id.to_string()),
+        &serde_json::json!({ "username": principal.username, "days": req.days }),
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "days": req.days })))
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route(
@@ -170,5 +219,9 @@ pub fn router() -> Router<AppState> {
         .route(
             "/write-off-approval",
             get(get_write_off_approval).put(set_write_off_approval),
+        )
+        .route(
+            "/overpayment-refund",
+            get(get_overpayment_refund).put(set_overpayment_refund),
         )
 }

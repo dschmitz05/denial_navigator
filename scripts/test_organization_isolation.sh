@@ -29,6 +29,7 @@ psql_exec() {
 cleanup() {
   if [[ -n "$DEV_CLAIM_ID" ]]; then psql_exec "DELETE FROM claims WHERE id = '${DEV_CLAIM_ID}'::uuid" >/dev/null || true; fi
   if [[ -n "$OTHER_CLAIM_ID" ]]; then psql_exec "DELETE FROM claims WHERE id = '${OTHER_CLAIM_ID}'::uuid" >/dev/null || true; fi
+  psql_exec "DELETE FROM provider_adjustments WHERE trace_number = 'ISO-${RUN_ID}'" >/dev/null || true
   if [[ -n "$DEV_PLAYBOOK_ID" ]]; then psql_exec "DELETE FROM institutional_playbooks WHERE id = '${DEV_PLAYBOOK_ID}'::uuid" >/dev/null || true; fi
   if [[ -n "$OTHER_ORG" ]]; then psql_exec "DELETE FROM audit_log WHERE organization_id = '${OTHER_ORG}'::uuid" >/dev/null || true; fi
   if [[ -n "$OTHER_USER_ID" ]]; then psql_exec "DELETE FROM users WHERE id = '${OTHER_USER_ID}'::uuid" >/dev/null || true; fi
@@ -95,6 +96,17 @@ curl -fsS -H "Authorization: Bearer ${OTHER_TOKEN}" "${API_BASE_URL}/api/v1/writ
 STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer ${OTHER_TOKEN}" "${API_BASE_URL}/api/v1/write-offs/${DEV_WRITE_OFF_ID}/approve")"
 [[ "$STATUS" == '404' ]]
 [[ "$(psql_exec "SELECT status FROM write_off_requests WHERE id = '${DEV_WRITE_OFF_ID}'")" == 'pending' ]]
+
+# Overpayments and PLB provider adjustments are organization-owned too.
+DEV_OVERPAYMENT_ID="$(psql_exec "INSERT INTO overpayments (organization_id, claim_id, kind, amount, due_date) VALUES ('${DEV_ORG}'::uuid, '${DEV_CLAIM_ID}'::uuid, 'duplicate_payment', 1.00, CURRENT_DATE + 60) RETURNING id")"
+curl -fsS -H "Authorization: Bearer ${OTHER_TOKEN}" "${API_BASE_URL}/api/v1/overpayments" \
+  | jq -e --arg id "$DEV_OVERPAYMENT_ID" '[.[] | select(.id == $id)] | length == 0' >/dev/null
+STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer ${OTHER_TOKEN}" -H 'Content-Type: application/json' \
+  --data '{"status":"refunded"}' "${API_BASE_URL}/api/v1/overpayments/${DEV_OVERPAYMENT_ID}/status")"
+[[ "$STATUS" == '404' ]]
+DEV_PLB_ID="$(psql_exec "INSERT INTO provider_adjustments (organization_id, reason_code, amount, trace_number) VALUES ('${DEV_ORG}'::uuid, 'WO', 1.00, 'ISO-${RUN_ID}') RETURNING id")"
+curl -fsS -H "Authorization: Bearer ${OTHER_TOKEN}" "${API_BASE_URL}/api/v1/ingestion/provider-adjustments" \
+  | jq -e --arg id "$DEV_PLB_ID" '[.[] | select(.id == $id)] | length == 0' >/dev/null
 
 # Retention status is tenant scoped. A second-organization audit row cannot
 # change the Development admin's count.

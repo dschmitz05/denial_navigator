@@ -374,6 +374,8 @@ fn permissions(resource: &str) -> Option<(&'static [&'static str], &'static [&'s
         "playbooks" => (MANAGER_UP, MANAGER_UP),
         // Anyone who can write off may see requests; only managers decide.
         "write-offs" => (WRITE_ROLES, MANAGER_UP),
+        // Refund deadlines are everyone's concern; recording the outcome is a manager's.
+        "overpayments" => (ALL_ROLES, MANAGER_UP),
         "users" => (ADMIN_ONLY, ADMIN_ONLY),
         "auth" => (ALL_ROLES, ADMIN_ONLY),
         "system" => (ALL_ROLES, NOBODY),

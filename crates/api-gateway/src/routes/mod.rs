@@ -8,6 +8,7 @@ pub mod feedback;
 pub mod ingestion;
 pub mod knowledge;
 pub mod notifications;
+pub mod overpayments;
 pub mod playbooks;
 pub mod provider_adjustments;
 pub mod reference;
@@ -36,6 +37,7 @@ pub fn api_router() -> Router<AppState> {
         .nest("/notifications", notifications::router())
         .nest("/playbooks", playbooks::router())
         .nest("/write-offs", write_offs::router())
+        .nest("/overpayments", overpayments::router())
         .nest("/system", system::router())
         .nest("/retention", retention::router())
         .nest("/settings", settings::router())

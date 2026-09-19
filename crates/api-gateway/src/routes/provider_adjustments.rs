@@ -81,6 +81,13 @@ pub async fn store(
         .await
         .map_err(AppError::Db)?;
         stored += result.rows_affected();
+        // A recoupment names the claim it recovers from: the payer took back
+        // the overpayment, so it no longer has to be refunded.
+        if reason == "WO" {
+            if let Some(reference) = text(line, "reference_number") {
+                crate::routes::overpayments::mark_recouped(tx, organization_id, &reference).await?;
+            }
+        }
     }
     Ok(stored)
 }

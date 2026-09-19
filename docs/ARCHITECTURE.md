@@ -360,7 +360,18 @@ unset, a known placeholder, or (for Fernet) not an exact 32-byte key.
   number links the line to that claim, whose detail lists it; the Upload page
   totals them by month, payer and reason. A re-sent payment adds nothing
   (unique key on trace, reason, reference, amount and period).
-  `scripts/test_provider_adjustments.sh` covers it.
+  `scripts/test_provider_adjustments.sh` covers it. A remittance with only PLB lines
+  (a payment that is purely a recoupment) is stored, not skipped as empty.
+- **Overpayments are tracked to a refund deadline** (`routes/overpayments.rs`).
+  Ingestion records a line paid above its allowed amount (`AMT*B6`), and a
+  claim paid again under a different payer claim control number with no
+  reversal; a re-sent remittance keeps its control number and is not a
+  duplicate. Each gets a due date of identification plus the organization's
+  `overpayment_refund_days` (default 60, the Medicare rule; confirm it with
+  compliance). A PLB WO recoupment naming the claim marks it `recouped`;
+  managers record `refunded` or `disputed` on the Overpayments page, and
+  overdue ones reach them in the deadline digest.
+  `scripts/test_overpayments.sh` covers it.
 - **Bulk queueing resolves the whole batch in one query** instead of three per
   denial, and reports partial success rather than failing the batch.
 - **The connection pool** is created once at startup with a liveness check;

@@ -16,7 +16,7 @@ use sqlx::{Column, Row};
 use uuid::Uuid;
 
 use crate::reprocessing;
-use crate::routes::provider_adjustments;
+use crate::routes::{overpayments, provider_adjustments};
 use crate::state::AppState;
 
 const MAX_FILE_SIZE: usize = 25 * 1024 * 1024;
@@ -278,6 +278,10 @@ fn clean_claim(claim: &serde_json::Value, seen_numbers: &mut HashSet<String>) ->
         "service_to": service_to.map(|d| d.to_string()).unwrap_or_default(),
         "diagnosis_codes": diagnosis_codes,
         "next_payer_name": claim.get("next_payer_name").cloned(),
+        // Kept so a later remittance can tell a re-sent payment (same control
+        // number) from a second, duplicate one (FB-08).
+        "payer_claim_control_number": claim.get("payer_claim_control_number").cloned(),
+        "claim_status_code": claim.get("claim_status_code").cloned(),
         "next_payer_source": claim.get("next_payer_source").cloned(),
     })
 }
@@ -673,6 +677,7 @@ struct Stored {
     denials_written: i64,
     claims_reversed: u64,
     provider_adjustments: u64,
+    overpayments: u64,
     settled: Vec<reprocessing::Settled>,
 }
 
@@ -692,6 +697,8 @@ async fn store_remittance(
     denials: &[serde_json::Value],
 ) -> Result<Stored, AppError> {
     let (claims, reversed_numbers) = reprocessing::split_reversals(claims);
+    // Read before the upsert overwrites what each claim had been paid.
+    let prior_payments = overpayments::prior_payments(tx, organization_id, &claims).await?;
     let mut seen_numbers = HashSet::new();
     let cleaned_claims: Vec<serde_json::Value> = claims
         .iter()
@@ -811,6 +818,8 @@ async fn store_remittance(
     // After the claims, so a PLB reference can link to one stored just now.
     let provider_adjustments =
         provider_adjustments::store(tx, organization_id, ingestion_id, payment_info).await?;
+    let found = overpayments::find(&claims, &prior_payments, &reversed_numbers);
+    let overpayments = overpayments::record(tx, organization_id, ingestion_id, &found).await?;
     let settled =
         reprocessing::settle_paid_denials(tx, organization_id, &reprocessing::payments(&claims))
             .await?;
@@ -821,6 +830,7 @@ async fn store_remittance(
         denials_written,
         claims_reversed,
         provider_adjustments,
+        overpayments,
         settled,
     })
 }
@@ -1003,7 +1013,13 @@ pub async fn ingest_file(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    if claims.is_empty() && denials.is_empty() {
+    // A remittance can carry only PLB lines (a payment that is purely a
+    // recoupment), so an empty claim list alone is not "nothing to store".
+    let has_provider_adjustments = result
+        .pointer("/payment_info/provider_adjustments")
+        .and_then(|v| v.as_array())
+        .is_some_and(|lines| !lines.is_empty());
+    if claims.is_empty() && denials.is_empty() && !has_provider_adjustments {
         let _ = sqlx::query(
             "INSERT INTO ingestion_log \
              (organization_id, file_name, file_size_bytes, file_hash, status, claims_count, denials_count) \
@@ -1074,6 +1090,7 @@ pub async fn ingest_file(
             "claims_reversed": stored.claims_reversed,
             "denials_settled": stored.settled.len(),
             "provider_adjustments_stored": stored.provider_adjustments,
+            "overpayments_identified": stored.overpayments,
         })),
     ))
 }
@@ -1197,6 +1214,7 @@ pub async fn store_parsed_data(
         "claims_reversed": stored.claims_reversed,
         "denials_settled": stored.settled.len(),
         "provider_adjustments_stored": stored.provider_adjustments,
+        "overpayments_identified": stored.overpayments,
     })))
 }
 

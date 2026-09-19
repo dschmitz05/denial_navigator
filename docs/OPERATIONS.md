@@ -88,6 +88,15 @@ write-off needs approval; raise it to let small balances be written off
 directly. Managers approve or reject pending write-offs at the top of the
 Worklist. The setting is per organization and every change is audit-logged.
 
+## Overpayment refund window
+
+Settings → Overpayment refund window (administrators) sets the days from
+identifying an overpayment to its refund deadline, per organization. It
+defaults to 60, the Medicare rule; other payers and states differ, so confirm
+the value with compliance. The Overpayments page lists open items by due date,
+and the deadline digest (`POST /notifications/generate-digests`, run by
+`scripts/send_deadline_digests.sh`) notifies managers of overdue ones.
+
 ## Air-gapped hosts
 
 Build/pull images and package the Rust/frontend dependency caches on a
