@@ -372,6 +372,15 @@ unset, a known placeholder, or (for Fernet) not an exact 32-byte key.
   managers record `refunded` or `disputed` on the Overpayments page, and
   overdue ones reach them in the deadline digest.
   `scripts/test_overpayments.sh` covers it.
+- **Payers run several clocks.** Besides the appeal window
+  (`payer_appeal_policies`, which sets `denials.appeal_deadline`),
+  `payer_deadline_rules` holds per-organization days for timely filing (from
+  the date of service), corrected claims and reconsiderations (from the
+  remittance date) and second-level appeals (from the first appeal's
+  decision); payer `*` is the default. The denial detail lists every deadline
+  that has a rule and marks the one for the recommended resolution
+  (`routes/deadlines.rs`). Managers edit the rules in Settings.
+  `scripts/test_deadlines.sh` covers it.
 - **Bulk queueing resolves the whole batch in one query** instead of three per
   denial, and reports partial success rather than failing the batch.
 - **The connection pool** is created once at startup with a liveness check;

@@ -474,6 +474,88 @@ function OverpaymentRefundDays() {
   )
 }
 
+const DEADLINE_TYPES: Record<string, string> = {
+  timely_filing: 'Timely filing (from date of service)',
+  corrected_claim: 'Corrected claim (from remittance)',
+  reconsideration: 'Reconsideration (from remittance)',
+  appeal_level_2: 'Second-level appeal (from first appeal decision)',
+}
+type DeadlineRule = { id: string; payer_name: string; deadline_type: string; days: number; notes?: string | null }
+
+/** Payer clocks beyond the appeal window. '*' is the organization default. */
+function PayerDeadlineRules({ canEdit }: { canEdit: boolean }) {
+  const [rules, setRules] = useState<DeadlineRule[]>([])
+  const [draft, setDraft] = useState({ payer_name: '*', deadline_type: 'timely_filing', days: '' })
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(() => {
+    fetch(`${API_BASE}/denials/deadline-rules`)
+      .then(r => (r.ok ? r.json() : []))
+      .then(setRules)
+      .catch(() => setRules([]))
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  const save = async () => {
+    setError(null)
+    const resp = await fetch(`${API_BASE}/denials/deadline-rules`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...draft, days: Number(draft.days) }),
+    })
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}))
+      setError(typeof data.detail === 'string' ? data.detail : `Could not save (HTTP ${resp.status})`)
+      return
+    }
+    setDraft({ ...draft, days: '' })
+    load()
+  }
+  const remove = async (id: string) => {
+    await fetch(`${API_BASE}/denials/deadline-rules/${id}`, { method: 'DELETE' })
+    load()
+  }
+
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <h4 style={{ marginBottom: 8 }}>Payer deadlines</h4>
+      <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: 0 }}>
+        Clocks beyond the appeal window, from each payer's manual or contract. A denial shows every deadline
+        that has a rule here and marks the one for its recommended action. Payer <code>*</code> is the default.
+      </p>
+      <div className="table-container">
+        <table>
+          <thead><tr><th>Payer</th><th>Deadline</th><th>Days</th><th></th></tr></thead>
+          <tbody>
+            {rules.length === 0 && <tr><td colSpan={4} style={{ textAlign: 'center' }}>No rules yet</td></tr>}
+            {rules.map(r => (
+              <tr key={r.id}>
+                <td>{r.payer_name === '*' ? 'Default (*)' : r.payer_name}</td>
+                <td>{DEADLINE_TYPES[r.deadline_type] || r.deadline_type}</td>
+                <td>{r.days}</td>
+                <td>{canEdit && <button className="btn btn-sm" onClick={() => remove(r.id)}>Remove</button>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {canEdit && (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' }}>
+          <input className="form-input" style={{ maxWidth: 240 }} placeholder="Payer name or *" value={draft.payer_name}
+            onChange={e => setDraft({ ...draft, payer_name: e.target.value })} />
+          <select className="form-select" value={draft.deadline_type} onChange={e => setDraft({ ...draft, deadline_type: e.target.value })}>
+            {Object.entries(DEADLINE_TYPES).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+          </select>
+          <input className="form-input" style={{ maxWidth: 100 }} type="number" min={1} max={3650} placeholder="Days"
+            value={draft.days} onChange={e => setDraft({ ...draft, days: e.target.value })} />
+          <button className="btn btn-primary" disabled={!draft.payer_name.trim() || !draft.days} onClick={save}>Save rule</button>
+          {error && <span style={{ color: 'var(--danger)' }}>{error}</span>}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function Settings() {
   const { can } = useAuth()
   const canEdit = can.manageKnowledge()      // policy curation, same as documents
@@ -682,6 +764,8 @@ export default function Settings() {
               Filing windows are edited by managers and above.
             </p>
           )}
+
+          <PayerDeadlineRules canEdit={canEdit} />
 
           {can.manageUsers() && <WriteOffThreshold />}
           {can.manageUsers() && <OverpaymentRefundDays />}

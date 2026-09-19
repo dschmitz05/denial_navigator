@@ -364,8 +364,22 @@ add("/api/v1/denials/appeal-windows",
     put=op("Set a payer's appeal window (manager+)", "denials",
            body=jbody({"payer_name": S(), "appeal_window_days": I(),
                        "notes": S()}, ["payer_name", "appeal_window_days"])))
+add("/api/v1/denials/deadline-rules",
+    get=op("Payer deadline rules for the caller's organization", "denials",
+           description="timely_filing counts from the date of service; "
+                       "corrected_claim and reconsideration from the remittance "
+                       "date; appeal_level_2 from the first appeal's decision. "
+                       "payer_name '*' is the organization default."),
+    put=op("Create or replace a payer deadline rule (manager+)", "denials",
+           body=jbody({"payer_name": S(), "deadline_type": S(enum=[
+               "timely_filing", "corrected_claim", "reconsideration",
+               "appeal_level_2"]), "days": I(minimum=1, maximum=3650),
+               "notes": S()}, ["payer_name", "deadline_type", "days"])))
+add("/api/v1/denials/deadline-rules/{rule_id}",
+    delete=op("Delete a payer deadline rule (manager+)", "denials",
+              params=[path_param("rule_id")]))
 add("/api/v1/denials/{denial_id}",
-    get=op("One denial with codes, analysis and recommended resolution",
+    get=op("One denial with codes, analysis, recommended resolution and deadlines",
            "denials", params=[path_param("denial_id")]),
     patch=op("Update a denial", "denials",
              description="Setting status to written_off at or above the "

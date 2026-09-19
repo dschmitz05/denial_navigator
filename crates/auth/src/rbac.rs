@@ -395,6 +395,8 @@ fn path_permission(method: &str, norm: &str) -> Option<&'static [&'static str]> 
         ("POST", "/api/v1/users/{id}/totp") => ADMIN_ONLY,
         ("POST", "/api/v1/users/{id}/totp/reset") => ADMIN_ONLY,
         ("PUT", "/api/v1/denials/appeal-windows") => MANAGER_UP,
+        ("PUT", "/api/v1/denials/deadline-rules") => MANAGER_UP,
+        ("DELETE", "/api/v1/denials/deadline-rules/{id}") => MANAGER_UP,
         _ => return None,
     })
 }

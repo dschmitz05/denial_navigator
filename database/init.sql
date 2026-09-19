@@ -578,6 +578,22 @@ CREATE UNIQUE INDEX idx_payer_appeal_policies_name
 INSERT INTO payer_appeal_policies (payer_name, appeal_window_days, notes)
 VALUES ('*', 90, 'Default filing window for payers without a specific policy.');
 
+-- FB-10: other payer clocks (timely filing, corrected claim, reconsideration,
+-- second-level appeal), per organization; payer_name '*' is the default.
+CREATE TABLE payer_deadline_rules (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL REFERENCES organizations(id),
+    payer_name VARCHAR(255) NOT NULL,
+    deadline_type VARCHAR(30) NOT NULL
+        CHECK (deadline_type IN ('timely_filing', 'corrected_claim', 'reconsideration', 'appeal_level_2')),
+    days INTEGER NOT NULL CHECK (days BETWEEN 1 AND 3650),
+    notes TEXT,
+    updated_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX idx_payer_deadline_rules_unique
+    ON payer_deadline_rules (organization_id, lower(payer_name), deadline_type);
+
 CREATE OR REPLACE FUNCTION appeal_deadline_for(p_payer TEXT, p_base DATE)
 RETURNS DATE
 LANGUAGE sql

@@ -436,6 +436,33 @@ export default function Denials() {
                 </div>
               </div>
 
+              {/* Payer deadlines: the one for the recommended action first. */}
+              {Array.isArray(selectedDenial.deadlines) && selectedDenial.deadlines.length > 0 && (
+                <div style={{ marginBottom: 20 }}>
+                  <h4 style={{ marginBottom: 8 }}>⏰ Deadlines</h4>
+                  <div className="table-container">
+                    <table>
+                      <thead><tr><th>For</th><th>Due</th><th>Days left</th><th>Counted from</th></tr></thead>
+                      <tbody>
+                        {(selectedDenial.deadlines as Array<{ type: string; label: string; due_date: string; days_left: number; basis: string }>).map(d => {
+                          const isAction = selectedDenial.action_deadline?.type === d.type
+                          return (
+                            <tr key={d.type} style={isAction ? { fontWeight: 600 } : undefined}>
+                              <td>{d.label}{isAction ? ' (recommended action)' : ''}</td>
+                              <td>{formatDate(d.due_date)}</td>
+                              <td style={{ color: d.days_left < 0 ? 'var(--danger)' : d.days_left <= 14 ? 'var(--warning-text)' : undefined }}>
+                                {d.days_left < 0 ? `${-d.days_left} overdue` : d.days_left}
+                              </td>
+                              <td style={{ fontSize: '0.8rem' }}>{d.basis}</td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
               {/* AI Analysis */}
               {selectedDenial.explanation && (
                 <div style={{ marginBottom: 20 }}>

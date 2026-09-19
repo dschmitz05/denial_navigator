@@ -30,6 +30,7 @@ cleanup() {
   if [[ -n "$DEV_CLAIM_ID" ]]; then psql_exec "DELETE FROM claims WHERE id = '${DEV_CLAIM_ID}'::uuid" >/dev/null || true; fi
   if [[ -n "$OTHER_CLAIM_ID" ]]; then psql_exec "DELETE FROM claims WHERE id = '${OTHER_CLAIM_ID}'::uuid" >/dev/null || true; fi
   psql_exec "DELETE FROM provider_adjustments WHERE trace_number = 'ISO-${RUN_ID}'" >/dev/null || true
+  psql_exec "DELETE FROM payer_deadline_rules WHERE payer_name = 'ISO-${RUN_ID}'" >/dev/null || true
   if [[ -n "$DEV_PLAYBOOK_ID" ]]; then psql_exec "DELETE FROM institutional_playbooks WHERE id = '${DEV_PLAYBOOK_ID}'::uuid" >/dev/null || true; fi
   if [[ -n "$OTHER_ORG" ]]; then psql_exec "DELETE FROM audit_log WHERE organization_id = '${OTHER_ORG}'::uuid" >/dev/null || true; fi
   if [[ -n "$OTHER_USER_ID" ]]; then psql_exec "DELETE FROM users WHERE id = '${OTHER_USER_ID}'::uuid" >/dev/null || true; fi
@@ -107,6 +108,11 @@ STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bea
 DEV_PLB_ID="$(psql_exec "INSERT INTO provider_adjustments (organization_id, reason_code, amount, trace_number) VALUES ('${DEV_ORG}'::uuid, 'WO', 1.00, 'ISO-${RUN_ID}') RETURNING id")"
 curl -fsS -H "Authorization: Bearer ${OTHER_TOKEN}" "${API_BASE_URL}/api/v1/ingestion/provider-adjustments" \
   | jq -e --arg id "$DEV_PLB_ID" '[.[] | select(.id == $id)] | length == 0' >/dev/null
+DEV_RULE_ID="$(psql_exec "INSERT INTO payer_deadline_rules (organization_id, payer_name, deadline_type, days) VALUES ('${DEV_ORG}'::uuid, 'ISO-${RUN_ID}', 'reconsideration', 30) RETURNING id")"
+curl -fsS -H "Authorization: Bearer ${OTHER_TOKEN}" "${API_BASE_URL}/api/v1/denials/deadline-rules" \
+  | jq -e --arg id "$DEV_RULE_ID" '[.[] | select(.id == $id)] | length == 0' >/dev/null
+STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE -H "Authorization: Bearer ${OTHER_TOKEN}" "${API_BASE_URL}/api/v1/denials/deadline-rules/${DEV_RULE_ID}")"
+[[ "$STATUS" == '404' ]]
 
 # Retention status is tenant scoped. A second-organization audit row cannot
 # change the Development admin's count.

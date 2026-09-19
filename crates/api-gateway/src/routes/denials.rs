@@ -15,7 +15,7 @@ use sqlx::{QueryBuilder, Row};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-use crate::routes::write_offs;
+use crate::routes::{deadlines, write_offs};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -689,7 +689,7 @@ pub async fn get_denial(
           aa.explanation, aa.action_plan, aa.steps, aa.citations, aa.draft_appeal_letter, \
          aa.denial_category, aa.required_action, aa.needs_appeal, \
          aa.confidence_score, aa.fallback_reason, aa.provider_name AS analysis_provider, \
-         c.next_payer_name, c.next_payer_source, \
+         c.next_payer_name, c.next_payer_source, c.service_from, \
          aq.id AS appeal_id, aq.outcome_status AS appeal_status, \
          aq.resolution_type AS appeal_resolution_type \
          FROM denials d \
@@ -726,6 +726,31 @@ pub async fn get_denial(
         denial_category.as_deref(),
         next_payer_name.as_deref(),
     );
+    let payer_name: String = row.try_get("payer_name").ok().flatten().unwrap_or_default();
+    let first_appeal_decision: Option<NaiveDate> = sqlx::query_scalar(
+        "SELECT COALESCE(payer_response, updated_at::date) FROM appeals_queue \
+         WHERE denial_id = $1 AND resolution_type = 'appeal_letter' AND outcome_status = 'denied_again' \
+         ORDER BY updated_at LIMIT 1",
+    )
+    .bind(denial_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(AppError::Db)?
+    .flatten();
+    let rules = deadlines::rule_days(&state.pool, organization_id, &payer_name).await?;
+    let (all_deadlines, action_deadline) = deadlines::deadlines(
+        &rules,
+        &deadlines::Anchors {
+            date_of_service: row.try_get("service_from").ok().flatten(),
+            remittance_date: row.try_get("denial_date").ok().flatten(),
+            first_appeal_decision,
+            appeal_level_1_due: row.try_get("appeal_deadline").ok().flatten(),
+        },
+        recommendation.resolution.as_deref(),
+        chrono::Local::now().date_naive(),
+    );
+    denial["deadlines"] = serde_json::json!(all_deadlines);
+    denial["action_deadline"] = action_deadline.unwrap_or(serde_json::Value::Null);
     denial["recommended_resolution"] = serde_json::to_value(recommendation.resolution).unwrap();
     denial["recommendation_note"] = serde_json::to_value(recommendation.note).unwrap();
 
@@ -985,6 +1010,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/appeal-windows",
             get(list_appeal_windows).put(set_appeal_window),
+        )
+        .route(
+            "/deadline-rules",
+            get(deadlines::list_rules).put(deadlines::set_rule),
+        )
+        .route(
+            "/deadline-rules/{rule_id}",
+            axum::routing::delete(deadlines::delete_rule),
         )
         .route("/{denial_id}", get(get_denial).patch(update_denial))
 }

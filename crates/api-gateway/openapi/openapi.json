@@ -2281,6 +2281,150 @@
         }
       }
     },
+    "/api/v1/denials/deadline-rules": {
+      "get": {
+        "summary": "Payer deadline rules for the caller's organization",
+        "tags": [
+          "denials"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "timely_filing counts from the date of service; corrected_claim and reconsideration from the remittance date; appeal_level_2 from the first appeal's decision. payer_name '*' is the organization default.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "put": {
+        "summary": "Create or replace a payer deadline rule (manager+)",
+        "tags": [
+          "denials"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "payer_name": {
+                    "type": "string"
+                  },
+                  "deadline_type": {
+                    "type": "string",
+                    "enum": [
+                      "timely_filing",
+                      "corrected_claim",
+                      "reconsideration",
+                      "appeal_level_2"
+                    ]
+                  },
+                  "days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 3650
+                  },
+                  "notes": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "payer_name",
+                  "deadline_type",
+                  "days"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/denials/deadline-rules/{rule_id}": {
+      "delete": {
+        "summary": "Delete a payer deadline rule (manager+)",
+        "tags": [
+          "denials"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "rule_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Resource id."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/api/v1/denials/financial-summary": {
       "get": {
         "summary": "Denied vs recovered dollars across all denials",
@@ -2403,7 +2547,7 @@
     },
     "/api/v1/denials/{denial_id}": {
       "get": {
-        "summary": "One denial with codes, analysis and recommended resolution",
+        "summary": "One denial with codes, analysis, recommended resolution and deadlines",
         "tags": [
           "denials"
         ],

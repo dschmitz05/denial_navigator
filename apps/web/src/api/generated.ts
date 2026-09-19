@@ -41,6 +41,9 @@ export interface ApiOperations {
   "GET /api/v1/denials/by-payer": Record<string, never>;
   "GET /api/v1/denials/by-root-cause": Record<string, never>;
   "GET /api/v1/denials/carc-options": { query?: { "status"?: string } };
+  "GET /api/v1/denials/deadline-rules": Record<string, never>;
+  "PUT /api/v1/denials/deadline-rules": { body: { "payer_name": string; "deadline_type": "timely_filing" | "corrected_claim" | "reconsideration" | "appeal_level_2"; "days": number; "notes"?: string } };
+  "DELETE /api/v1/denials/deadline-rules/{rule_id}": { path: { "rule_id": string } };
   "GET /api/v1/denials/financial-summary": Record<string, never>;
   "GET /api/v1/denials/resolution-timing": Record<string, never>;
   "GET /api/v1/denials/{denial_id}": { path: { "denial_id": string } };
