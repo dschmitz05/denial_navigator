@@ -8,6 +8,21 @@ use serde_json::Value;
 
 use denial_common::error::AppError;
 
+/// An LLM server error carrying the server's own reason, e.g. vLLM's "The
+/// model `auto` does not exist.", instead of a bare status code.
+fn upstream_error(status: reqwest::StatusCode, data: &Value) -> AppError {
+    let detail = data
+        .pointer("/error/message")
+        .or_else(|| data.get("error"))
+        .or_else(|| data.get("detail"))
+        .and_then(Value::as_str)
+        .map(|d| d.chars().take(300).collect::<String>());
+    AppError::Upstream(match detail {
+        Some(detail) => format!("LLM server {status}: {detail}"),
+        None => format!("LLM server {status}"),
+    })
+}
+
 /// Client for the llama.cpp OpenAI-compatible API.
 #[derive(Clone)]
 pub struct LlamaClient {
@@ -47,8 +62,12 @@ impl LlamaClient {
         user: &str,
         temperature: f64,
     ) -> Result<String, AppError> {
+        // Send the served model's real name. `LLM_MODEL=auto` must be resolved
+        // first: llama-server ignores this field, but vLLM rejects an unknown
+        // name with 404.
+        let model = resolve_model(self, &self.model).await;
         let mut body = serde_json::json!({
-            "model": self.model,
+            "model": model,
             "messages": [
                 { "role": "system", "content": system },
                 { "role": "user", "content": user },
@@ -70,9 +89,9 @@ impl LlamaClient {
         }
         let resp = request.send().await?;
         let status = resp.status();
-        let data: Value = resp.json().await?;
+        let data: Value = resp.json().await.unwrap_or(Value::Null);
         if !status.is_success() {
-            return Err(AppError::Upstream(format!("llama.cpp {status}")));
+            return Err(upstream_error(status, &data));
         }
         let message = data
             .get("choices")
@@ -105,9 +124,9 @@ impl LlamaClient {
         }
         let resp = request.send().await?;
         let status = resp.status();
-        let data: Value = resp.json().await?;
+        let data: Value = resp.json().await.unwrap_or(Value::Null);
         if !status.is_success() {
-            return Err(AppError::Upstream(format!("llama.cpp {status}")));
+            return Err(upstream_error(status, &data));
         }
         let models = data
             .get("data")
@@ -189,4 +208,28 @@ pub async fn resolve_model(client: &LlamaClient, configured: &str) -> String {
 /// The cached model name, if any.
 pub fn cached_model() -> Option<String> {
     cache().lock().unwrap().name.clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::upstream_error;
+    use reqwest::StatusCode;
+    use serde_json::json;
+
+    #[test]
+    fn upstream_error_carries_the_servers_reason() {
+        let vllm = json!({"error": {"message": "The model `auto` does not exist.", "code": 404}});
+        assert_eq!(
+            upstream_error(StatusCode::NOT_FOUND, &vllm).to_string(),
+            "LLM server 404 Not Found: The model `auto` does not exist."
+        );
+    }
+
+    #[test]
+    fn upstream_error_without_a_reason_reports_the_status() {
+        assert_eq!(
+            upstream_error(StatusCode::BAD_GATEWAY, &serde_json::Value::Null).to_string(),
+            "LLM server 502 Bad Gateway"
+        );
+    }
 }
