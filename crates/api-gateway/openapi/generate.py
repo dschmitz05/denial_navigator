@@ -675,6 +675,19 @@ add("/api/v1/retention/ai/prune",
             body=jbody({"older_than_days": I(), "confirm": B()},
                        ["confirm"])))
 
+# ── provider-level adjustments (PLB) ─────────────────────────────────────
+add("/api/v1/ingestion/provider-adjustments",
+    get=op("PLB provider-level adjustments from 835s", "ingestion",
+           description="Recoupments (WO), forward balances (FB), interest (L6) "
+                       "and other payment changes that belong to no patient "
+                       "claim. Positive amounts reduced a payment.",
+           params=[{"name": "claim_number", "in": "query", "schema": S(),
+                    "description": "Only lines whose reference names this claim."},
+                   {"name": "reason_code", "in": "query", "schema": S()},
+                   P_LIMIT]))
+add("/api/v1/ingestion/provider-adjustments/summary",
+    get=op("PLB totals by month, payer and reason", "ingestion"))
+
 # ── write-off approval ───────────────────────────────────────────────────
 add("/api/v1/write-offs",
     get=op("Write-off requests awaiting or past a decision", "write-offs",

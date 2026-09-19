@@ -9,6 +9,7 @@ pub mod ingestion;
 pub mod knowledge;
 pub mod notifications;
 pub mod playbooks;
+pub mod provider_adjustments;
 pub mod reference;
 pub mod retention;
 pub mod settings;

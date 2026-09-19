@@ -2841,6 +2841,96 @@
         }
       }
     },
+    "/api/v1/ingestion/provider-adjustments": {
+      "get": {
+        "summary": "PLB provider-level adjustments from 835s",
+        "tags": [
+          "ingestion"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Recoupments (WO), forward balances (FB), interest (L6) and other payment changes that belong to no patient claim. Positive amounts reduced a payment.",
+        "parameters": [
+          {
+            "name": "claim_number",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Only lines whose reference names this claim."
+          },
+          {
+            "name": "reason_code",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Max rows to return."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/ingestion/provider-adjustments/summary": {
+      "get": {
+        "summary": "PLB totals by month, payer and reason",
+        "tags": [
+          "ingestion"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/api/v1/ingestion/store": {
       "post": {
         "summary": "Store an already-parsed result (called by the parser)",

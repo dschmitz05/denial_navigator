@@ -155,6 +155,10 @@ pub async fn get_claim(
     .await
     .map_err(AppError::Db)?;
     result["patient_paid"] = serde_json::json!(patient_paid.0.unwrap_or(0.0));
+    result["provider_adjustments"] = serde_json::json!(
+        crate::routes::provider_adjustments::for_claim(&state.pool, organization_id, claim_id)
+            .await?
+    );
 
     Ok(Json(result))
 }

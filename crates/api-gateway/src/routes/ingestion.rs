@@ -16,6 +16,7 @@ use sqlx::{Column, Row};
 use uuid::Uuid;
 
 use crate::reprocessing;
+use crate::routes::provider_adjustments;
 use crate::state::AppState;
 
 const MAX_FILE_SIZE: usize = 25 * 1024 * 1024;
@@ -35,6 +36,9 @@ pub struct StoreIngestion {
     pub denials: Vec<serde_json::Value>,
     #[serde(default)]
     pub transaction_type: Option<String>,
+    /// The 835's payment details, including its PLB provider adjustments.
+    #[serde(default)]
+    pub payment_info: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -668,6 +672,7 @@ struct Stored {
     denials: usize,
     denials_written: i64,
     claims_reversed: u64,
+    provider_adjustments: u64,
     settled: Vec<reprocessing::Settled>,
 }
 
@@ -680,7 +685,9 @@ struct Stored {
 async fn store_remittance(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     organization_id: Uuid,
+    ingestion_id: Uuid,
     transaction_type: Option<&str>,
+    payment_info: Option<&serde_json::Value>,
     claims: &[serde_json::Value],
     denials: &[serde_json::Value],
 ) -> Result<Stored, AppError> {
@@ -801,6 +808,9 @@ async fn store_remittance(
 
     let claims_reversed =
         reprocessing::mark_reversed(tx, organization_id, &reversed_numbers).await?;
+    // After the claims, so a PLB reference can link to one stored just now.
+    let provider_adjustments =
+        provider_adjustments::store(tx, organization_id, ingestion_id, payment_info).await?;
     let settled =
         reprocessing::settle_paid_denials(tx, organization_id, &reprocessing::payments(&claims))
             .await?;
@@ -810,6 +820,7 @@ async fn store_remittance(
         denials: cleaned_denials.len(),
         denials_written,
         claims_reversed,
+        provider_adjustments,
         settled,
     })
 }
@@ -1037,10 +1048,13 @@ pub async fn ingest_file(
 
     let ingestion_id: Uuid = ingestion_row.get("id");
 
+    let payment_info = result.get("payment_info").cloned();
     let stored = store_remittance(
         &mut tx,
         organization_id,
+        ingestion_id,
         transaction_type.as_deref(),
+        payment_info.as_ref(),
         &claims,
         &denials,
     )
@@ -1059,6 +1073,7 @@ pub async fn ingest_file(
             "denials_skipped_as_duplicates": stored.denials as i64 - stored.denials_written,
             "claims_reversed": stored.claims_reversed,
             "denials_settled": stored.settled.len(),
+            "provider_adjustments_stored": stored.provider_adjustments,
         })),
     ))
 }
@@ -1162,7 +1177,9 @@ pub async fn store_parsed_data(
     let stored = store_remittance(
         &mut tx,
         organization_id,
+        ingestion_id,
         body.transaction_type.as_deref(),
+        body.payment_info.as_ref(),
         &body.claims,
         &body.denials,
     )
@@ -1179,6 +1196,7 @@ pub async fn store_parsed_data(
         "denials_skipped_as_duplicates": stored.denials as i64 - stored.denials_written,
         "claims_reversed": stored.claims_reversed,
         "denials_settled": stored.settled.len(),
+        "provider_adjustments_stored": stored.provider_adjustments,
     })))
 }
 
@@ -1191,6 +1209,11 @@ pub fn router() -> Router<AppState> {
         .route("/log", post(list_ingestion_log))
         .route("/history", get(get_ingestion_history))
         .route("/store", post(store_parsed_data))
+        .route("/provider-adjustments", get(provider_adjustments::list))
+        .route(
+            "/provider-adjustments/summary",
+            get(provider_adjustments::summary),
+        )
 }
 
 #[cfg(test)]

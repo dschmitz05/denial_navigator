@@ -352,6 +352,15 @@ unset, a known placeholder, or (for Fernet) not an exact 32-byte key.
   whose prompt now names the other coverage. Parsing that loop no longer
   overwrites the next claim's payer name or filing indicator.
   `scripts/test_secondary_coverage.sh` covers both sources.
+- **PLB provider-level adjustments are kept.** The 835 parser always read PLB
+  segments, but neither ingestion path passed them on. They are now stored in
+  `provider_adjustments` with the payment's trace number and date: recoupments
+  of earlier overpayments (WO), forward balances (FB), interest (L6) and the
+  rest. A positive amount reduced the payment. A reference matching a claim
+  number links the line to that claim, whose detail lists it; the Upload page
+  totals them by month, payer and reason. A re-sent payment adds nothing
+  (unique key on trace, reason, reference, amount and period).
+  `scripts/test_provider_adjustments.sh` covers it.
 - **Bulk queueing resolves the whole batch in one query** instead of three per
   denial, and reports partial success rather than failing the batch.
 - **The connection pool** is created once at startup with a liveness check;
