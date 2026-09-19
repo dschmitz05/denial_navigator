@@ -171,12 +171,22 @@ fn default_top_k() -> u32 {
 pub struct ListDocumentsQuery {
     pub source_type: Option<String>,
     pub status: Option<String>,
+    /// "expiring_soon" (within `expiring_within_days`, not yet expired) or
+    /// "expired_active" (past expiration, not archived — still being used to
+    /// argue analyses, since nothing besides the date itself excludes it).
+    pub expiry: Option<String>,
+    #[serde(default = "default_expiring_within_days")]
+    pub expiring_within_days: i64,
     #[serde(default = "default_limit")]
     pub limit: i64,
 }
 
 fn default_limit() -> i64 {
     50
+}
+
+fn default_expiring_within_days() -> i64 {
+    30
 }
 
 #[derive(Deserialize)]
@@ -214,7 +224,9 @@ pub async fn list_documents(
     let mut qb = QueryBuilder::<sqlx::Postgres>::new(
         "SELECT kd.*, \
          (SELECT COUNT(*) FROM knowledge_chunks kc WHERE kc.knowledge_document_id = kd.id) \
-             AS chunk_count \
+             AS chunk_count, \
+         (SELECT s.title FROM knowledge_documents s WHERE s.id = kd.superseded_by) \
+             AS superseded_by_title \
          FROM knowledge_documents kd WHERE kd.organization_id = ",
     );
     qb.push_bind(organization_id);
@@ -223,6 +235,20 @@ pub async fn list_documents(
     }
     if let Some(ref v) = params.status {
         qb.push(" AND kd.status = ").push_bind(v);
+    }
+    match params.expiry.as_deref() {
+        Some("expiring_soon") => {
+            qb.push(" AND kd.status <> 'archived' AND kd.expiration_date IS NOT NULL \
+                      AND kd.expiration_date >= CURRENT_DATE AND kd.expiration_date <= CURRENT_DATE + ");
+            qb.push_bind(params.expiring_within_days.clamp(1, 3650) as i32);
+        }
+        Some("expired_active") => {
+            qb.push(
+                " AND kd.status <> 'archived' AND kd.expiration_date IS NOT NULL \
+                      AND kd.expiration_date < CURRENT_DATE",
+            );
+        }
+        _ => {}
     }
     qb.push(" ORDER BY kd.created_at DESC LIMIT ")
         .push_bind(params.limit.clamp(1, 500));
@@ -587,6 +613,99 @@ pub async fn reindex(
     Ok(Json(result))
 }
 
+fn default_expiry_summary_days() -> i64 {
+    30
+}
+
+#[derive(Deserialize)]
+pub struct ExpirySummaryQuery {
+    #[serde(default = "default_expiry_summary_days")]
+    pub within_days: i64,
+}
+
+/// Counts for the dashboard and Knowledge Base filter (FB-14): documents
+/// still governing retrieval that either expire soon or already have,
+/// excluding archived documents either way (an archived one is already out
+/// of scope, so its expiration date is not this page's problem).
+pub async fn expiry_summary(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Query(params): Query<ExpirySummaryQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let organization_id = organization_id(&principal)?;
+    let within_days = params.within_days.clamp(1, 3650) as i32;
+    let row = sqlx::query(
+        "SELECT \
+            count(*) FILTER (WHERE expiration_date >= CURRENT_DATE \
+                              AND expiration_date <= CURRENT_DATE + $2) AS expiring_soon, \
+            count(*) FILTER (WHERE expiration_date < CURRENT_DATE) AS expired_active \
+         FROM knowledge_documents \
+         WHERE organization_id = $1 AND status <> 'archived' AND expiration_date IS NOT NULL",
+    )
+    .bind(organization_id)
+    .bind(within_days)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(AppError::Db)?;
+    Ok(Json(serde_json::json!({
+        "expiring_soon": row.try_get::<i64, _>("expiring_soon").unwrap_or(0),
+        "expired_active": row.try_get::<i64, _>("expired_active").unwrap_or(0),
+        "within_days": params.within_days.clamp(1, 3650),
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct SupersedeRequest {
+    pub new_document_id: Uuid,
+}
+
+/// Links a replacement and ensures the old document expires (FB-14). Does
+/// not extend an expiration date the document already had — a document set
+/// to expire next month is not made to last longer by being superseded
+/// today.
+pub async fn supersede_document(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path(document_id): Path<Uuid>,
+    Json(request): Json<SupersedeRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if request.new_document_id == document_id {
+        return Err(AppError::BadRequest(
+            "a document cannot supersede itself".into(),
+        ));
+    }
+    let organization_id = organization_id(&principal)?;
+    let replacement_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM knowledge_documents WHERE id = $1 AND organization_id = $2)",
+    )
+    .bind(request.new_document_id)
+    .bind(organization_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(AppError::Db)?;
+    if !replacement_exists {
+        return Err(AppError::BadRequest(
+            "new_document_id is not a document in this organization".into(),
+        ));
+    }
+    let row = sqlx::query(
+        "UPDATE knowledge_documents \
+         SET superseded_by = $1, \
+             expiration_date = LEAST(COALESCE(expiration_date, CURRENT_DATE), CURRENT_DATE), \
+             updated_at = NOW() \
+         WHERE id = $2 AND organization_id = $3 \
+         RETURNING *",
+    )
+    .bind(request.new_document_id)
+    .bind(document_id)
+    .bind(organization_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(AppError::Db)?
+    .ok_or(AppError::NotFound)?;
+    Ok(Json(row_to_json(&row)))
+}
+
 pub async fn get_document(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -649,6 +768,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/documents", get(list_documents).post(create_document))
         .route("/documents/upload", post(upload_document))
+        .route("/documents/expiry-summary", get(expiry_summary))
         .route(
             "/documents/{document_id}",
             get(get_document).delete(delete_document),
@@ -656,6 +776,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/documents/{document_id}/content",
             post(add_document_content),
+        )
+        .route(
+            "/documents/{document_id}/supersede",
+            post(supersede_document),
         )
         .route("/search", post(search_knowledge))
         .route("/reindex", post(reindex))

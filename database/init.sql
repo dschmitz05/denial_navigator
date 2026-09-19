@@ -333,10 +333,18 @@ CREATE TABLE knowledge_documents (
         CHECK (status IN ('pending', 'processing', 'indexed', 'error', 'archived')),
     metadata JSONB,
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    -- FB-14: the document that replaced this one, once superseded. A raw
+    -- expiration_date already stops this document governing retrieval; this
+    -- adds where to point staff who find it.
+    superseded_by UUID REFERENCES knowledge_documents(id) ON DELETE SET NULL
 );
 CREATE INDEX idx_knowledge_documents_payer_name
     ON knowledge_documents (lower(payer_name)) WHERE payer_name IS NOT NULL;
+CREATE INDEX idx_knowledge_documents_superseded_by
+    ON knowledge_documents (superseded_by) WHERE superseded_by IS NOT NULL;
+CREATE INDEX idx_knowledge_documents_expiration_active
+    ON knowledge_documents (expiration_date) WHERE status <> 'archived' AND expiration_date IS NOT NULL;
 
 CREATE INDEX idx_knowledge_documents_source_type ON knowledge_documents(source_type);
 CREATE INDEX idx_knowledge_documents_status ON knowledge_documents(status);

@@ -13,6 +13,7 @@ type FinancialSummary = { denied_dollars?: number; recovered_dollars?: number; n
 type ResolutionTiming = { resolved_count?: number; average_resolution_days?: number | null; median_resolution_days?: number | null }
 type FeedbackRow = { required_action?: string; feedback_count?: number; avg_rating?: number | null; paid_count?: number; outcome_known?: number; success_rate?: number | null; carc_code?: string; carc_description?: string }
 type Feedback = { total_feedback?: number; total_analyses?: number; coverage_rate?: number | null; acceptance_rate?: number | null; success_rate?: number | null; success_count?: number; outcome_known_count?: number; avg_rating?: number | null; by_required_action?: FeedbackRow[]; by_carc?: FeedbackRow[] }
+type KnowledgeExpiry = { expiring_soon?: number; expired_active?: number; within_days?: number }
 
 function formatCurrency(value?: number) {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value || 0)
@@ -70,6 +71,7 @@ export default function Dashboard() {
   const [financialSummary, setFinancialSummary] = useState<FinancialSummary | null>(null)
   const [resolutionTiming, setResolutionTiming] = useState<ResolutionTiming | null>(null)
   const [feedback, setFeedback] = useState<Feedback | null>(null)
+  const [knowledgeExpiry, setKnowledgeExpiry] = useState<KnowledgeExpiry | null>(null)
   const [loading, setLoading] = useState(true)
   const exportClaims = async () => {
     const resp = await fetch(`${API_BASE}/claims/export.csv`, { headers: { Authorization: `Bearer ${localStorage.getItem('auth_token')}` } })
@@ -88,8 +90,9 @@ export default function Dashboard() {
       fetch(`${API_BASE}/denials/financial-summary`).then(r => r.json()),
       fetch(`${API_BASE}/denials/resolution-timing`).then(r => r.json()),
       fetch(`${API_BASE}/feedback/analytics`).then(r => r.json()),
+      fetch(`${API_BASE}/knowledge/documents/expiry-summary`).then(r => r.json()).catch(() => null),
     ])
-      .then(([statsData, priorityData, carcData, payerData, rootCauseData, agingData, financialData, timingData, feedbackData]: [unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown]) => {
+      .then(([statsData, priorityData, carcData, payerData, rootCauseData, agingData, financialData, timingData, feedbackData, knowledgeExpiryData]: [unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown, unknown]) => {
         setStats((statsData || {}) as DashboardStats)
         setPriorityDenials(Array.isArray(priorityData) ? priorityData as PriorityDenial[] : [])
         setCarcSummary(Array.isArray(carcData) ? carcData as CarcSummary[] : [])
@@ -99,6 +102,7 @@ export default function Dashboard() {
         setFinancialSummary((financialData || null) as FinancialSummary | null)
         setResolutionTiming((timingData || null) as ResolutionTiming | null)
         setFeedback((feedbackData || null) as Feedback | null)
+        setKnowledgeExpiry((knowledgeExpiryData || null) as KnowledgeExpiry | null)
         setLoading(false)
       })
       .catch(err => {
@@ -142,6 +146,22 @@ export default function Dashboard() {
           label="Total Denied"
           value={formatCurrency(stats?.total_denied || 0)}
           subtitle={`${formatCurrency(stats?.open_denied || 0)} still open`}
+        />
+        <StatCard
+          label="Policies Expiring Soon"
+          value={knowledgeExpiry?.expiring_soon ?? 0}
+          subtitle={`Within ${knowledgeExpiry?.within_days ?? 30} days`}
+          tone={(knowledgeExpiry?.expiring_soon ?? 0) > 0 ? 'warning' : undefined}
+          to="/knowledge?expiry=expiring_soon"
+          navigate={navigate}
+        />
+        <StatCard
+          label="Expired Policies Still Active"
+          value={knowledgeExpiry?.expired_active ?? 0}
+          subtitle="Not archived — check for a replacement"
+          tone={(knowledgeExpiry?.expired_active ?? 0) > 0 ? 'danger' : undefined}
+          to="/knowledge?expiry=expired_active"
+          navigate={navigate}
         />
       </div>
 

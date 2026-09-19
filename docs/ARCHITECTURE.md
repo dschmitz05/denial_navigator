@@ -233,6 +233,22 @@ re-selects whatever still mismatches on each call, so it is resumable from any
 point without tracked job state. `scripts/test_embedding_reindex.sh` covers
 detection, exclusion and repair end to end.
 
+**Expiry and supersession** (FB-14). A document past its `expiration_date`
+already stops governing retrieval for a denial dated today (the date-of-service
+filter above), but it stays fully in force for an older claim whose service
+date falls inside the window it *was* in effect for, and an ad hoc Knowledge
+Base search (no `effective_on`) does not check the date at all — so nothing
+told anyone a policy had quietly aged out, or which document should have
+replaced it. `GET /knowledge/documents/expiry-summary` counts documents (not
+archived, not counting ones that never had an expiration date) that expire
+within `within_days` (default 30) or already have; the Dashboard and the
+Knowledge Base's expiry filter both read it. `POST
+/knowledge/documents/{id}/supersede` links `superseded_by` to the replacement
+and brings `expiration_date` forward to today if it was later or unset — never
+pushing an already-earlier date back, so superseding a document does not
+un-expire it. `scripts/test_knowledge_expiry.sh` covers the summary, the
+filter and the non-extension rule.
+
 ### LLM Service (`crates/llm-service/`)
 
 Builds the denial prompt, calls llama.cpp through the shared OpenAI-compatible

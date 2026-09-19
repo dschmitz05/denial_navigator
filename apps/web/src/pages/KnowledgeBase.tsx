@@ -1,13 +1,28 @@
 import React, { useState, useEffect } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 
 const API_BASE = '/api/v1'
+const EXPIRING_SOON_DAYS = 30
 
-type KnowledgeDocument = Record<string, any> & { id: string; title: string; source_type: string; status: string; created_at: string; chunk_count?: number }
+type KnowledgeDocument = Record<string, any> & {
+  id: string; title: string; source_type: string; status: string; created_at: string; chunk_count?: number
+  expiration_date?: string | null; superseded_by?: string | null; superseded_by_title?: string | null
+}
 type NewDocument = { title: string; source_type: string; payer_name: string; effective_date: string; expiration_date: string; jurisdiction: string; version_label: string; content: string }
 type Notice = { error: boolean; text: string }
 type SearchResult = Record<string, any>
 type ViewingContent = { content?: string; chunk_count?: number; error?: string }
+
+// Client-side, so a document loaded under one filter still shows its own
+// correct badge if the org's clock and the filter's cutoff briefly disagree.
+function expiryStatus(d: KnowledgeDocument): 'expired' | 'expiring_soon' | null {
+  if (!d.expiration_date) return null
+  const days = (new Date(d.expiration_date).getTime() - Date.now()) / 86400000
+  if (days < 0) return 'expired'
+  if (days <= EXPIRING_SOON_DAYS) return 'expiring_soon'
+  return null
+}
 
 export default function KnowledgeBase() {
   const { can } = useAuth()
@@ -16,6 +31,10 @@ export default function KnowledgeBase() {
   const mayCurate = can.manageKnowledge()
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([])
   const [sourceFilter, setSourceFilter] = useState('')
+  // Deep-linked from the Dashboard's "Policies Expiring Soon" / "Expired
+  // Policies Still Active" cards (?expiry=expiring_soon|expired_active).
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [expiryFilter, setExpiryFilter] = useState(searchParams.get('expiry') || '')
   const [loading, setLoading] = useState(true)
   const [newDoc, setNewDoc] = useState<NewDocument>({ title: '', source_type: 'payer_policy', payer_name: '', effective_date: '', expiration_date: '', jurisdiction: '', version_label: '', content: '' })
   const [searchFilters, setSearchFilters] = useState({ payer: '', jurisdiction: '', effective_on: '' })
@@ -29,10 +48,16 @@ export default function KnowledgeBase() {
   const [viewingDoc, setViewingDoc] = useState<KnowledgeDocument | null>(null)
   const [viewingContent, setViewingContent] = useState<ViewingContent | null>(null)
   const [viewingLoading, setViewingLoading] = useState(false)
+  const [supersedeFor, setSupersedeFor] = useState<KnowledgeDocument | null>(null)
+  const [supersedeTarget, setSupersedeTarget] = useState('')
 
   const loadDocuments = () => {
     const params = new URLSearchParams({ limit: '50' })
     if (sourceFilter) params.set('source_type', sourceFilter)
+    if (expiryFilter) {
+      params.set('expiry', expiryFilter)
+      params.set('expiring_within_days', String(EXPIRING_SOON_DAYS))
+    }
 
     fetch(`${API_BASE}/knowledge/documents?${params}`)
       .then(r => r.json())
@@ -40,12 +65,12 @@ export default function KnowledgeBase() {
       .catch(err => { console.error(err); setLoading(false) })
   }
 
-  // Reload when the type filter changes. This page has no Filter button at
-  // all, so without this the select was entirely inert.
+  // Reload when a filter changes. This page has no Filter button at all, so
+  // without this the selects were entirely inert.
   useEffect(() => {
     setLoading(true)
     loadDocuments()
-  }, [sourceFilter])
+  }, [sourceFilter, expiryFilter])
 
   const handleCreateDoc = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
@@ -132,6 +157,27 @@ export default function KnowledgeBase() {
     setBusyId(null)
   }
 
+  const handleSupersede = async (doc: KnowledgeDocument, newDocumentId: string) => {
+    setBusyId(doc.id)
+    setNotice(null)
+    try {
+      const resp = await fetch(`${API_BASE}/knowledge/documents/${doc.id}/supersede`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ new_document_id: newDocumentId }),
+      })
+      const data = await resp.json()
+      setNotice(resp.ok
+        ? { error: false, text: `"${doc.title}" now points to its replacement and expires ${data.expiration_date ? new Date(data.expiration_date).toLocaleDateString() : 'today'}.` }
+        : { error: true, text: data?.detail || `Failed (HTTP ${resp.status})` })
+      if (resp.ok) setSupersedeFor(null)
+      loadDocuments()
+    } catch (err) {
+      setNotice({ error: true, text: err instanceof Error ? err.message : 'Supersede failed' })
+    }
+    setBusyId(null)
+  }
+
   const handleSearch = async () => {
     if (!searchQuery.trim()) return
     setSearching(true)
@@ -175,6 +221,18 @@ export default function KnowledgeBase() {
           <option value="contract">Contract</option>
           <option value="prior_auth_policy">Prior Auth Policy</option>
           <option value="medical_necessity_criteria">Medical Necessity</option>
+        </select>
+        <select
+          className="form-select"
+          value={expiryFilter}
+          onChange={e => {
+            setExpiryFilter(e.target.value)
+            setSearchParams(e.target.value ? { expiry: e.target.value } : {})
+          }}
+        >
+          <option value="">Any expiration</option>
+          <option value="expiring_soon">Expiring in {EXPIRING_SOON_DAYS} days</option>
+          <option value="expired_active">Expired but still active</option>
         </select>
         {mayCurate && (
           <>
@@ -296,46 +354,98 @@ export default function KnowledgeBase() {
                 <th>Type</th>
                 <th>Status</th>
                 <th>Chunks</th>
+                <th>Expiration</th>
                 <th>Created</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               {documents.length === 0 ? (
-                <tr><td colSpan={6} style={{ textAlign: 'center', padding: 20 }}>No knowledge documents</td></tr>
+                <tr><td colSpan={7} style={{ textAlign: 'center', padding: 20 }}>No knowledge documents</td></tr>
               ) : (
-                documents.map(d => (
-                  <tr key={d.id} style={d.status === 'archived' ? { opacity: 0.55 } : undefined}>
-                    <td>{d.title}</td>
-                    <td>{d.source_type.replace(/_/g, ' ')}</td>
-                    <td><span className={`badge badge-${d.status}`}>{d.status}</span></td>
-                    <td>{d.chunk_count ?? 0}</td>
-                    <td>{new Date(d.created_at).toLocaleDateString()}</td>
-                    <td style={{ whiteSpace: 'nowrap' }}>
-                      <button className="btn btn-sm"
-                              title="View document content"
-                              onClick={() => handleViewDoc(d)}>
-                        👁 View
-                      </button>
-                      {mayCurate && d.status !== 'archived' && (
-                        <button className="btn btn-sm" disabled={busyId === d.id}
-                                title="Remove from the index but keep the record"
-                                onClick={() => handleRetire(d, false)}
-                                style={{ marginLeft: 6 }}>
-                          {busyId === d.id ? '…' : '📦 Archive'}
-                        </button>
+                documents.map(d => {
+                  const expiration = expiryStatus(d)
+                  return (
+                    <React.Fragment key={d.id}>
+                      <tr style={d.status === 'archived' ? { opacity: 0.55 } : undefined}>
+                        <td>{d.title}</td>
+                        <td>{d.source_type.replace(/_/g, ' ')}</td>
+                        <td><span className={`badge badge-${d.status}`}>{d.status}</span></td>
+                        <td>{d.chunk_count ?? 0}</td>
+                        <td>
+                          {d.expiration_date ? new Date(d.expiration_date).toLocaleDateString() : '—'}
+                          {expiration && d.status !== 'archived' && (
+                            <span className="badge" style={{
+                              marginLeft: 6,
+                              background: expiration === 'expired' ? 'var(--danger)' : 'var(--warning)',
+                              color: '#fff',
+                            }}>
+                              {expiration === 'expired' ? 'expired' : `≤${EXPIRING_SOON_DAYS}d`}
+                            </span>
+                          )}
+                          {d.superseded_by && (
+                            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                              superseded by {d.superseded_by_title || d.superseded_by}
+                            </div>
+                          )}
+                        </td>
+                        <td>{new Date(d.created_at).toLocaleDateString()}</td>
+                        <td style={{ whiteSpace: 'nowrap' }}>
+                          <button className="btn btn-sm"
+                                  title="View document content"
+                                  onClick={() => handleViewDoc(d)}>
+                            👁 View
+                          </button>
+                          {mayCurate && d.status !== 'archived' && (
+                            <button className="btn btn-sm" disabled={busyId === d.id}
+                                    title="Remove from the index but keep the record"
+                                    onClick={() => handleRetire(d, false)}
+                                    style={{ marginLeft: 6 }}>
+                              {busyId === d.id ? '…' : '📦 Archive'}
+                            </button>
+                          )}
+                          {mayCurate && !d.superseded_by && (
+                            <button className="btn btn-sm" disabled={busyId === d.id}
+                                    title="Link the document that replaced this one, and expire this one"
+                                    onClick={() => { setSupersedeFor(supersedeFor?.id === d.id ? null : d); setSupersedeTarget('') }}
+                                    style={{ marginLeft: 6 }}>
+                              ↪ Supersede
+                            </button>
+                          )}
+                          {mayCurate && (
+                            <button className="btn btn-sm" disabled={busyId === d.id}
+                                    style={{ marginLeft: 6, color: 'var(--danger)' }}
+                                    title="Permanently delete this record"
+                                    onClick={() => handleRetire(d, true)}>
+                              {busyId === d.id ? '…' : '🗑 Delete'}
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                      {supersedeFor?.id === d.id && (
+                        <tr>
+                          <td colSpan={7} style={{ background: 'var(--gray-50)' }}>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '8px 0' }}>
+                              <span>Superseded by:</span>
+                              <select className="form-select" style={{ maxWidth: 320 }}
+                                      value={supersedeTarget} onChange={e => setSupersedeTarget(e.target.value)}>
+                                <option value="">Choose the replacement document…</option>
+                                {documents.filter(o => o.id !== d.id).map(o => (
+                                  <option key={o.id} value={o.id}>{o.title}</option>
+                                ))}
+                              </select>
+                              <button className="btn btn-sm btn-primary" disabled={!supersedeTarget || busyId === d.id}
+                                      onClick={() => handleSupersede(d, supersedeTarget)}>
+                                {busyId === d.id ? '…' : 'Confirm'}
+                              </button>
+                              <button className="btn btn-sm" onClick={() => setSupersedeFor(null)}>Cancel</button>
+                            </div>
+                          </td>
+                        </tr>
                       )}
-                      {mayCurate && (
-                        <button className="btn btn-sm" disabled={busyId === d.id}
-                                style={{ marginLeft: d.status !== 'archived' ? 6 : 0, color: 'var(--danger)' }}
-                                title="Permanently delete this record"
-                                onClick={() => handleRetire(d, true)}>
-                          {busyId === d.id ? '…' : '🗑 Delete'}
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))
+                    </React.Fragment>
+                  )
+                })
               )}
             </tbody>
           </table>

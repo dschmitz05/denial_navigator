@@ -515,8 +515,17 @@ add("/api/v1/ingestion/history",
 # ── knowledge base ───────────────────────────────────────────────────────
 add("/api/v1/knowledge/documents",
     get=op("List policy documents (with chunk counts)", "knowledge",
+           description="`expiry=expiring_soon` (within `expiring_within_days`, "
+                       "default 30) or `expiry=expired_active` (already past "
+                       "expiration but not archived) filters to documents "
+                       "flagged by /documents/expiry-summary.",
            params=[{"name": "source_type", "in": "query", "schema": S()},
-                   {"name": "status", "in": "query", "schema": S()}, P_LIMIT]),
+                   {"name": "status", "in": "query", "schema": S()},
+                   {"name": "expiry", "in": "query",
+                    "schema": S(enum=["expiring_soon", "expired_active"])},
+                   {"name": "expiring_within_days", "in": "query",
+                    "schema": I(default=30)},
+                   P_LIMIT]),
     post=op("Create a document, indexing it if content is supplied "
             "(manager+)", "knowledge",
             body=jbody({"title": S(), "source_type": S(), "payer_id": S(),
@@ -545,6 +554,18 @@ add("/api/v1/knowledge/documents/{document_id}/content",
     post=op("Attach text to a document and index it (manager+)", "knowledge",
             params=[path_param("document_id")],
             body=jbody({"content": S()}, ["content"])))
+add("/api/v1/knowledge/documents/expiry-summary",
+    get=op("Counts of documents expiring soon or already expired but active", "knowledge",
+           description="Excludes archived documents either way. Backs the "
+                       "Knowledge Base filter and a dashboard count.",
+           params=[{"name": "within_days", "in": "query", "schema": I(default=30)}]))
+add("/api/v1/knowledge/documents/{document_id}/supersede",
+    post=op("Link the document that replaced this one (manager+)", "knowledge",
+            description="Sets superseded_by and brings expiration_date forward "
+                        "to today if it was later or unset; never pushes an "
+                        "earlier expiration date back.",
+            params=[path_param("document_id")],
+            body=jbody({"new_document_id": S(format="uuid")}, ["new_document_id"])))
 add("/api/v1/knowledge/search",
     post=op("Semantic search over indexed policy chunks", "knowledge",
             description="Read-only. Rate limited (KNOWLEDGE_RATE_LIMIT/min).",

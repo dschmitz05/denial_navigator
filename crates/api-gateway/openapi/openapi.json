@@ -3315,6 +3315,7 @@
             "bearerAuth": []
           }
         ],
+        "description": "`expiry=expiring_soon` (within `expiring_within_days`, default 30) or `expiry=expired_active` (already past expiration but not archived) filters to documents flagged by /documents/expiry-summary.",
         "parameters": [
           {
             "name": "source_type",
@@ -3328,6 +3329,25 @@
             "in": "query",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "expiry",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "expiring_soon",
+                "expired_active"
+              ]
+            }
+          },
+          {
+            "name": "expiring_within_days",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 30
             }
           },
           {
@@ -3407,6 +3427,49 @@
         "responses": {
           "201": {
             "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/knowledge/documents/expiry-summary": {
+      "get": {
+        "summary": "Counts of documents expiring soon or already expired but active",
+        "tags": [
+          "knowledge"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Excludes archived documents either way. Backs the Knowledge Base filter and a dashboard count.",
+        "parameters": [
+          {
+            "name": "within_days",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 30
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
@@ -3630,6 +3693,70 @@
                 },
                 "required": [
                   "content"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/knowledge/documents/{document_id}/supersede": {
+      "post": {
+        "summary": "Link the document that replaced this one (manager+)",
+        "tags": [
+          "knowledge"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Sets superseded_by and brings expiration_date forward to today if it was later or unset; never pushes an earlier expiration date back.",
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Resource id."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "new_document_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                },
+                "required": [
+                  "new_document_id"
                 ]
               }
             }
