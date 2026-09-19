@@ -5,6 +5,48 @@ use serde_json::Value;
 
 use denial_common::error::AppError;
 
+/// What a text is embedded for. Asymmetric retrieval models are trained with
+/// a different task prefix on queries than on stored passages, and retrieve
+/// markedly worse when the prefix is missing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmbedKind {
+    Query,
+    Document,
+}
+
+/// Task prefixes prepended to every input before it is embedded.
+///
+/// Changing these changes the vector space: chunks stored under one pair do
+/// not match queries embedded under another, so re-embed after a change.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TaskPrefixes {
+    pub query: String,
+    pub document: String,
+}
+
+impl TaskPrefixes {
+    /// The prefixes `model` was trained with; none for a model not known to
+    /// use them, so a model switch never inherits another model's prefixes.
+    pub fn for_model(model: &str) -> Self {
+        if model.to_ascii_lowercase().contains("nomic-embed") {
+            Self {
+                query: "search_query: ".into(),
+                document: "search_document: ".into(),
+            }
+        } else {
+            Self::default()
+        }
+    }
+
+    fn apply(&self, kind: EmbedKind, texts: &[String]) -> Vec<String> {
+        let prefix = match kind {
+            EmbedKind::Query => &self.query,
+            EmbedKind::Document => &self.document,
+        };
+        texts.iter().map(|text| format!("{prefix}{text}")).collect()
+    }
+}
+
 /// Provider boundary for producing dense vectors from text.
 ///
 /// Implementations can target a local model server, a hosted API, or an
@@ -12,7 +54,7 @@ use denial_common::error::AppError;
 #[allow(async_fn_in_trait)]
 pub trait EmbeddingProvider: Send + Sync {
     fn provider_name(&self) -> &'static str;
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f64>>, AppError>;
+    async fn embed(&self, kind: EmbedKind, texts: &[String]) -> Result<Vec<Vec<f64>>, AppError>;
 }
 
 /// OpenAI-compatible `/v1/embeddings` provider used by llama.cpp and Ollama.
@@ -22,6 +64,7 @@ pub struct OpenAiCompatibleEmbeddingProvider {
     base_url: String,
     model: String,
     batch: usize,
+    prefixes: TaskPrefixes,
 }
 
 impl OpenAiCompatibleEmbeddingProvider {
@@ -30,12 +73,14 @@ impl OpenAiCompatibleEmbeddingProvider {
         base_url: impl Into<String>,
         model: impl Into<String>,
         batch: usize,
+        prefixes: TaskPrefixes,
     ) -> Self {
         Self {
             client,
             base_url: base_url.into(),
             model: model.into(),
             batch: batch.max(1),
+            prefixes,
         }
     }
 }
@@ -45,8 +90,16 @@ impl EmbeddingProvider for OpenAiCompatibleEmbeddingProvider {
         "openai_compatible"
     }
 
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f64>>, AppError> {
-        generate_embeddings(&self.client, &self.base_url, &self.model, texts, self.batch).await
+    async fn embed(&self, kind: EmbedKind, texts: &[String]) -> Result<Vec<Vec<f64>>, AppError> {
+        let inputs = self.prefixes.apply(kind, texts);
+        generate_embeddings(
+            &self.client,
+            &self.base_url,
+            &self.model,
+            &inputs,
+            self.batch,
+        )
+        .await
     }
 }
 
@@ -121,7 +174,7 @@ pub fn format_vector(vec: &[f64]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{EmbeddingProvider, OpenAiCompatibleEmbeddingProvider};
+    use super::{EmbedKind, EmbeddingProvider, OpenAiCompatibleEmbeddingProvider, TaskPrefixes};
 
     #[test]
     fn identifies_the_openai_compatible_provider() {
@@ -130,8 +183,37 @@ mod tests {
             "http://localhost:8081",
             "test-model",
             0,
+            TaskPrefixes::default(),
         );
 
         assert_eq!(provider.provider_name(), "openai_compatible");
+    }
+
+    #[test]
+    fn nomic_models_get_their_trained_task_prefixes() {
+        let prefixes = TaskPrefixes::for_model("nomic-embed-text");
+        let texts = vec!["timely filing".to_string()];
+
+        assert_eq!(
+            prefixes.apply(EmbedKind::Query, &texts),
+            ["search_query: timely filing"]
+        );
+        assert_eq!(
+            prefixes.apply(EmbedKind::Document, &texts),
+            ["search_document: timely filing"]
+        );
+        assert_eq!(
+            TaskPrefixes::for_model("Nomic-Embed-Text-v1.5.f16"),
+            prefixes
+        );
+    }
+
+    #[test]
+    fn unknown_models_are_sent_text_unchanged() {
+        let prefixes = TaskPrefixes::for_model("bge-small-en");
+        let texts = vec!["timely filing".to_string()];
+
+        assert_eq!(prefixes, TaskPrefixes::default());
+        assert_eq!(prefixes.apply(EmbedKind::Query, &texts), texts);
     }
 }

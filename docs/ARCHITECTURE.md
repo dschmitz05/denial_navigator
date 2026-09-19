@@ -161,6 +161,14 @@ llama.cpp's OpenAI-compatible endpoint, and ranks chunks by cosine distance in
 pgvector with an **HNSW** index. Embeddings are requested in batches — one
 request per chunk made a forty-chunk document forty sequential round trips.
 
+nomic-embed-text is an asymmetric retrieval model: it is trained with
+`search_document: ` on stored passages and `search_query: ` on queries, and
+retrieves noticeably worse without them. The provider adds the prefixes for any
+`nomic-embed*` model and none for other models; `EMBED_DOCUMENT_PREFIX` /
+`EMBED_QUERY_PREFIX` override them (`none` disables). The prefixes are part of
+the vector space — changing them, or the model, means re-embedding every stored
+chunk, or old chunks silently stop matching new queries.
+
 Retrieval is filtered by payer: a denial is argued from documents whose
 `payer_name` matches the claim's payer, plus documents with a NULL
 `payer_name`, which are payer-agnostic (a CMS LCD, a CPT guideline) and stay in

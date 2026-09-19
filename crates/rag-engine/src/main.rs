@@ -14,7 +14,9 @@ use sqlx::postgres::PgPool;
 use sqlx::{QueryBuilder, Row};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
-use denial_ai::embed::{format_vector, EmbeddingProvider, OpenAiCompatibleEmbeddingProvider};
+use denial_ai::embed::{
+    format_vector, EmbedKind, EmbeddingProvider, OpenAiCompatibleEmbeddingProvider, TaskPrefixes,
+};
 use denial_ai::prompt::{build_denial_prompt, DenialPromptInput, PhiDisclosureLevel};
 use denial_common::config::{env_bool, env_f64, env_or, env_required_secret, env_usize};
 use denial_common::error::AppError;
@@ -26,6 +28,7 @@ use denial_knowledge::chunk_text;
 struct Config {
     llama_base_url: String,
     embedding_model: String,
+    embed_prefixes: TaskPrefixes,
     embed_base_url: String,
     chunk_chars: usize,
     chunk_overlap: usize,
@@ -39,9 +42,23 @@ struct Config {
 
 impl Config {
     fn from_env() -> Self {
+        let embedding_model = env_or("EMBEDDING_MODEL", "nomic-embed-text");
+        // Unset or empty falls back to the model's trained prefixes, so
+        // compose can pass `${VAR:-}` through; "none" switches a prefix off.
+        let defaults = TaskPrefixes::for_model(&embedding_model);
+        let prefix = |key: &str, default: String| match env_or(key, "").as_str() {
+            "" => default,
+            "none" => String::new(),
+            value => value.to_string(),
+        };
+        let embed_prefixes = TaskPrefixes {
+            query: prefix("EMBED_QUERY_PREFIX", defaults.query),
+            document: prefix("EMBED_DOCUMENT_PREFIX", defaults.document),
+        };
         Self {
             llama_base_url: env_or("LLAMA_BASE_URL", "http://localhost:8080"),
-            embedding_model: env_or("EMBEDDING_MODEL", "nomic-embed-text"),
+            embedding_model,
+            embed_prefixes,
             // Embeddings do NOT come from LLAMA_BASE_URL. That server runs the
             // chat model and answers /v1/embeddings with 501. This is the
             // dedicated llama.cpp embedding server (768 dims, matching the
@@ -87,7 +104,10 @@ async fn search_similar(
     effective_on: Option<&str>,
     organization_id: uuid::Uuid,
 ) -> Result<Vec<Value>, AppError> {
-    let embeddings = state.embeddings.embed(&[query.to_string()]).await?;
+    let embeddings = state
+        .embeddings
+        .embed(EmbedKind::Query, &[query.to_string()])
+        .await?;
     if embeddings.is_empty() {
         tracing::warn!("No embedding produced for query; returning no results");
         return Ok(vec![]);
@@ -296,6 +316,10 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     Json(json!({
         "status": "healthy",
         "embedding_model": state.cfg.embedding_model,
+        "embedding_prefixes": {
+            "query": state.cfg.embed_prefixes.query,
+            "document": state.cfg.embed_prefixes.document,
+        },
         "vector_search_enabled": state.cfg.vector_search_enabled,
         "llama_url": state.cfg.llama_base_url,
         "embed_url": state.cfg.embed_base_url,
@@ -398,6 +422,7 @@ async fn ingest_document(
         let vectors = state
             .embeddings
             .embed(
+                EmbedKind::Document,
                 &chunks
                     .iter()
                     .map(|(content, _, _)| content.clone())
@@ -536,6 +561,7 @@ async fn main() {
         &cfg.embed_base_url,
         &cfg.embedding_model,
         cfg.embed_batch,
+        cfg.embed_prefixes.clone(),
     );
     let state = AppState {
         cfg,
