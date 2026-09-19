@@ -172,8 +172,147 @@ pub async fn prune_audit_log(
     })))
 }
 
+/// AI-record retention status, scoped to the caller's organization via the
+/// claim it belongs to (`ai_analyses` has no `organization_id` of its own).
+pub async fn ai_analyses_retention_status(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_admin(&principal)?;
+    let organization_id = organization_id(&principal)?;
+
+    let retention_days = state.default_retention_days as i64;
+    let sql = format!(
+        "SELECT COUNT(*) AS total, \
+                MIN(aa.created_at) AS oldest, \
+                MAX(aa.created_at) AS newest, \
+                COUNT(*) FILTER (WHERE aa.created_at < NOW() - INTERVAL '{retention_days} days') \
+                    AS beyond_retention \
+         FROM ai_analyses aa \
+         JOIN claims c ON c.id = aa.claim_id \
+         WHERE c.organization_id = $1"
+    );
+    let row = sqlx::query(&sql)
+        .bind(organization_id)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(AppError::Db)?;
+
+    let total: i64 = row.try_get("total").unwrap_or(0);
+    let oldest: Option<DateTime<Utc>> = row.try_get("oldest").ok().flatten();
+    let newest: Option<DateTime<Utc>> = row.try_get("newest").ok().flatten();
+    let beyond_retention: i64 = row.try_get("beyond_retention").unwrap_or(0);
+
+    Ok(Json(serde_json::json!({
+        "retention_days": retention_days,
+        "minimum_allowed_days": state.min_retention_days,
+        "total_entries": total,
+        "oldest_entry": oldest.map(|t| t.to_rfc3339()),
+        "newest_entry": newest.map(|t| t.to_rfc3339()),
+        "entries_beyond_retention": beyond_retention,
+        "note": "Raw prompt/response text is stored only when AI_STORE_RAW_ARTIFACTS=true. \
+                 Prune deliberately; nothing is deleted automatically.",
+    })))
+}
+
+/// Deliberate, admin-only, org-scoped prune of AI analysis history. Mirrors
+/// the audit-log prune: refuses a window under the floor, requires
+/// `confirm=true`, and records what it removed as its own audit entry.
+pub async fn prune_ai_analyses(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Json(body): Json<PruneRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_admin(&principal)?;
+    let organization_id = organization_id(&principal)?;
+
+    let older_than_days = body
+        .older_than_days
+        .unwrap_or(state.default_retention_days as i64);
+    if older_than_days < state.min_retention_days as i64 {
+        return Err(AppError::Unprocessable(format!(
+            "older_than_days must be at least {}",
+            state.min_retention_days
+        )));
+    }
+    if !body.confirm {
+        return Err(AppError::BadRequest(
+            "Send confirm=true. This permanently deletes AI analysis history.".into(),
+        ));
+    }
+
+    let preview = sqlx::query(&format!(
+        "SELECT COUNT(*) AS n, MIN(aa.created_at) AS from_date, MAX(aa.created_at) AS to_date \
+         FROM ai_analyses aa \
+         JOIN claims c ON c.id = aa.claim_id \
+         WHERE c.organization_id = $1 AND aa.created_at < NOW() - INTERVAL '{older_than_days} days'"
+    ))
+    .bind(organization_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(AppError::Db)?;
+
+    let n: i64 = preview.try_get("n").unwrap_or(0);
+    if n == 0 {
+        return Ok(Json(serde_json::json!({
+            "status": "nothing_to_prune",
+            "older_than_days": older_than_days,
+            "deleted": 0,
+        })));
+    }
+
+    let from_date: Option<DateTime<Utc>> = preview.try_get("from_date").ok().flatten();
+    let to_date: Option<DateTime<Utc>> = preview.try_get("to_date").ok().flatten();
+
+    sqlx::query(&format!(
+        "DELETE FROM ai_analyses aa \
+         USING claims c \
+         WHERE c.id = aa.claim_id AND c.organization_id = $1 \
+           AND aa.created_at < NOW() - INTERVAL '{older_than_days} days'"
+    ))
+    .bind(organization_id)
+    .execute(&state.pool)
+    .await
+    .map_err(AppError::Db)?;
+
+    // Written after the delete so it cannot itself be removed by the same
+    // statement.
+    denial_audit::record(
+        &state.pool,
+        "ai_analyses_pruned",
+        "analysis",
+        None,
+        principal.user_id.as_deref(),
+        &serde_json::json!({
+            "username": principal.username,
+            "older_than_days": older_than_days,
+            "deleted": n,
+            "covered_from": from_date.map(|t| t.to_rfc3339()),
+            "covered_to": to_date.map(|t| t.to_rfc3339()),
+        }),
+        principal.ip.as_deref(),
+        None,
+    )
+    .await;
+
+    tracing::warn!(
+        "ai_analyses pruned by {}: {n} entries removed",
+        principal.username
+    );
+
+    Ok(Json(serde_json::json!({
+        "status": "pruned",
+        "older_than_days": older_than_days,
+        "deleted": n,
+        "covered_from": from_date.map(|t| t.to_rfc3339()),
+        "covered_to": to_date.map(|t| t.to_rfc3339()),
+    })))
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/audit", get(audit_retention_status))
         .route("/audit/prune", post(prune_audit_log))
+        .route("/ai", get(ai_analyses_retention_status))
+        .route("/ai/prune", post(prune_ai_analyses))
 }

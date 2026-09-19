@@ -162,6 +162,10 @@ pub struct GatewayConfig {
     pub totp_issuer: String,
     pub jwt_expire_minutes: i64,
     pub audit_enabled: bool,
+    /// When false (the default) the raw AI prompt/response text is never written
+    /// to `ai_analyses`; only the structured, redacted result is kept. Enable
+    /// only for debugging, and pair it with a short `ai_analyses` retention.
+    pub store_raw_ai_artifacts: bool,
     pub trusted_proxies: Vec<IpNet>,
     pub public_base_url: String,
     pub rate_limit: RateLimitConfig,
@@ -208,6 +212,7 @@ impl GatewayConfig {
             totp_issuer: env_or("TOTP_ISSUER", "Denial Navigator"),
             jwt_expire_minutes: env_usize("JWT_EXPIRE_MINUTES", 30) as i64,
             audit_enabled: env_or("AUDIT_LOG_ENABLED", "true").eq("true"),
+            store_raw_ai_artifacts: env_bool("AI_STORE_RAW_ARTIFACTS", false),
             trusted_proxies: trusted,
             public_base_url: env_or("PUBLIC_BASE_URL", "http://localhost:3000"),
             rate_limit: RateLimitConfig {

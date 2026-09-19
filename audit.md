@@ -1,138 +1,190 @@
-# OpenClaim Navigator — Plan Compliance Audit
+# OpenClaim Navigator — Functional & Security Audit
 
 **Audited against:** `plan.md` (treated as source of truth)
-**Repo state:** HEAD `13d8591`, working tree dirty (8 modified files, untracked migrations `028`/`029`)
-**Method:** Four independent read-only code audits (M0–2, M3–6, M7–10, security/PHI/hygiene) with spot-verification of the highest-severity claims. Evidence cited as `file:line`.
+**Repo state:** HEAD `91305ce` (working tree clean), Linux, Rust + TypeScript
+**Scope:** "Does it function as intended?" + "Is it safe to run in a hospital for claim-denial assistance?" + "What is missing from `plan.md`?"
+**Method:** Independent, read-only verification of every high-severity claim against the current source (the prior `audit.md` baseline at `13d8591` was re-checked, not trusted). Build/test evidence was executed, not assumed. Findings cite `file:line`.
 
 ---
 
-## 1. Executive Summary
+## 1. Verdict
 
-The implementation is **substantially further along than a typical mid-project state** — most milestones are genuinely built and functional (EDI parsing, denial queue, knowledge base + hybrid retrieval, playbooks, feedback loop, analytics, ingestion sources, hardened deployment). No real PHI is tracked in git, and the core security controls (RBAC, org scoping, rate limiting, security headers, PHI-bounded logging) are real, not cosmetic.
+| Question | Answer |
+|----------|--------|
+| **Does it function as intended?** | **Mostly, yes.** The core vertical slice (835/837 ingest → normalized claims → denial queue → CARC/RARC display → deterministic + AI recommendation → resolution → analytics) is built and working. Workspace compiles; 33/33 Rust tests pass; all 14 web pages render. |
+| **Is it safe to use in a hospital as-is?** | **No — not yet.** There are **4 Critical** defects that would leak PHI across tenants or persist it without bound, plus a set of High gaps (no advisory disclosures, no MFA-gated PHI view, thin threat model/checklist). The *foundation* (RBAC, org scoping, PHI-bounded logging, prompt-injection defense, non-root deployment) is genuinely sound; the gaps are real but fixable. |
+| **Is `plan.md` complete?** | **No.** The plan omits several controls a hospital deployment actually depends on (see §6). Several implemented divergences were never recorded back into the plan or an ADR. |
 
-However, the plan's checkboxes **overstate completion in several places**. The most important findings, in order of severity:
+**Bottom line:** the deterministic, AI-off revenue-cycle workflow is production-usable *for a single trusted organization*. It is **not** safe to expose to real PHI in a multi-tenant or hospital setting until the 4 Critical items in §3 are fixed.
 
-### 🔴 Critical — must fix before any real PHI touches this system
+---
 
-1. **Cross-tenant PHI leak via audit labels.** The audit middleware's `label_query()` lookups (`crates/audit/src/lib.rs:137-159`) fetch `claim_number` + `patient_name` from other tables **without an `organization_id` filter**. The *main* request handler is org-scoped, but a requester probing another tenant's claim UUID gets a 404 *and* the other org's `claim_number`/`patient_name` written into their own audit row. This is a real broken-object-authorization path and directly violates plan §0.6, §8.10, §16.1 (IDOR), and §16.5 ("never log patient name").
-2. **Audit metadata persists PHI.** `patient_name` (and the raw request `query` string) are stored in `audit_log.details` (`crates/audit/src/lib.rs:123-135, ~355`). Plan §8.10: "Never place PHI or raw claim payloads in audit metadata." These rows are retained ~6 years.
-3. **Claim correlation silently merges — the exact behavior the plan forbids.** 837→835 correlation is a plain `ON CONFLICT (organization_id, claim_number) DO UPDATE` upsert that **hardcodes `correlation_confidence = 1.00`** (`crates/api-gateway/src/routes/ingestion.rs:373-392`). There is no scored matcher, none of the §9.4 candidate fields are used, no matching reasons are stored, and no ambiguous-match confirmation exists. The `ambiguous` status and `correlation_confidence` column are dead schema. This violates §9.4 ("Never silently merge ambiguous claims") and fails Milestone 3's exit criteria by construction.
+## 2. Functional verification (executed)
+
+| Check | Result |
+|-------|--------|
+| `cargo check --workspace` | ✅ Compiles (19 warnings, 0 errors) |
+| `cargo test --workspace` | ✅ **33 passed, 0 failed** |
+| `npm run smoke` (web) | ✅ All 14 pages render (Dashboard, Claims, Denials, Appeals, Worklist, KnowledgeBase, Audit, Users, Upload, Settings, Login, Profile, Insights, Playbooks) |
+| EDI parser | ✅ Defensive: delimiter auto-detect, hard limits (200k segments / 16 KiB / 256 elements / 25 MB), envelope validation, cargo-fuzz target |
+| Deterministic fallback (AI off) | ✅ Works — plan §12.1 met |
+| Org scoping in handlers checked | ✅ `get_claim`, `update_appeal`, `update_denial` all org-scoped; child queries keyed by an org-validated parent row |
+
+**Caveats on "functions as intended":**
+- The **E2E "happy path" is a shell script** (`scripts/test_synthetic_e2e.sh`) hitting a live stack, **not** an automated Playwright browser test. Plan §21.2/§21.4 and Slice A's final item all require Playwright E2E — **none exists**.
+- The **AI evaluation harness reads the live DB, not synthetic offline cases** (`scripts/eval_model.py:38,66,81,174` connect via `asyncpg` to `denials`). This both violates §17.4 and is itself a PHI exposure (it reads real denials).
+- **No separate `openclaim-worker` process** (plan §6.1). Recommendation jobs run as in-process `tokio::spawn` (`crates/api-gateway/src/routes/analyses.rs:544`); a gateway restart drops `pending`/`running` jobs, and failures are terminal (no retry/dead-letter) — diverges from §18.
+
+---
+
+## 3. Security findings
+
+### 🔴 Critical — must fix before any real PHI
+
+> **Status (2026-09-18): C1–C4 are fixed.** Each item below carries a ✅ note describing the remediation. The 4 High items (H1–H4) remain open.
+
+**C1. Cross-tenant PHI leak via the audit label lookup.** ✅
+`crates/audit/src/lib.rs:137-165` — `label_query()` fetches `claim_number` **and `patient_name`** from `claims`/`denials`/`appeals_queue`/`ai_analyses` with **no `organization_id` filter**. The audit row itself is attributed to the *requester's* org (`record()`, `lib.rs:231-236` derives `organization_id` from the caller's membership), but the `details` payload is populated by `label_for()` (`lib.rs:171-215`) from the unscoped lookup. **Effect:** an authenticated user in Org A who probes `/api/v1/claims/<Org-B-uuid>` gets a 404 from the (correctly scoped) handler, *and* Org B's `claim_number` + `patient_name` is written into an audit row readable by Org A's auditors. A direct broken-object-authorization / cross-tenant PHI leak. Violates plan §0.6, §8.10, §16.1 (IDOR), §16.5.
+
+> **Fix:** every org-scoped label query now appends `AND organization_id = (SELECT organization_id FROM organization_memberships WHERE user_id = $2 …)` so a cross-tenant UUID probe resolves to no row; `label_for()` takes the caller's `user_id` and refuses to label when it is absent. `patient_name` was also removed (see C2).
+
+**C2. Audit metadata persists PHI.**
+`crates/audit/src/lib.rs:343-359` — the middleware inserts the `label_for()` output (incl. `patient_name`), the **raw request `query` string**, and `username` into `audit_log.details`. Plan §8.10: "Never place PHI or raw claim payloads in audit metadata." These rows are retained for years (audit retention floor). Violates §8.10, §16.5.
+
+> **Fix:** `patient_name` removed from `LABEL_COLUMNS` and all label queries; the raw `query` string is no longer persisted (the `path` already identifies the endpoint); `generate_analysis` no longer writes `patient_name` into its audit record.
+
+**C3. 837→835 claim correlation silently merges — the exact behavior the plan forbids.**
+`crates/api-gateway/src/routes/ingestion.rs:373-392` — `ON_CONFLICT_837` is a plain upsert on `(organization_id, claim_number)` that **hardcodes `correlation_confidence = 1.00`** and sets `correlation_status = 'matched'`. There is **no scored matcher**, none of the §9.4 candidate fields (subscriber ID, statement/service dates, billed amount, provider IDs) are used, no matching reasons are stored, and there is **no ambiguous-match confirmation**. The `correlation_confidence` column and `ambiguous` status are effectively dead schema. Violates §9.4 ("Never silently merge ambiguous claims") and fails Milestone 3's exit criteria by construction.
+
+> **Fix:** the 837 path is now a scored deterministic matcher (`correlation_score`, `upsert_claim`). Weights: claim_number 0.5 (base, always matches), service_from 0.1, service_to 0.1, billed amount 0.15, provider NPI 0.1, payer 0.15 (case-insensitive); a field missing on the 837 earns nothing. Threshold 0.6: a corroborated match merges and records the real `correlation_confidence`; an unconfirmed match sets `correlation_status = 'ambiguous'` and does **not** merge over the 835. 5 unit tests lock in the threshold behavior.
+
+**C4. Full AI prompts/responses persisted unconditionally, with no retention.**
+`crates/api-gateway/src/routes/analyses.rs:219-246` — `INSERT INTO ai_analyses … raw_prompt, raw_response …` binds both **unconditionally**. At the `full` disclosure level the claim reference (a quasi-identifier) is written to disk. **No retention/prune exists for `ai_analyses`** — `retention.rs` only prunes `audit_log`. Violates §17.3 ("avoid storing full prompts by default") and §16.4.
+
+> **Fix:** `raw_prompt`/`raw_response` are now bound as `NULL` unless `AI_STORE_RAW_ARTIFACTS=true` (new `store_raw_ai_artifacts` config, default **false**), so the secure default stores only the structured, redacted result. Gated in the gateway's `store_analysis`, which covers both the LLM service and the deterministic fallback. A deliberate, admin-only, org-scoped prune was added: `GET/POST /api/v1/retention/ai[\/prune]` (mirrors the audit-log prune: retention floor, `confirm=true`, self-auditing).
 
 ### 🟠 High — material gaps vs. the plan
 
-4. **Full AI prompts/responses are persisted by default** (`ai_analyses.raw_prompt` / `raw_response`, `database/init.sql:130-131`, populated unconditionally at `crates/api-gateway/src/routes/analyses.rs:245-246`). Plan §17.3 says *avoid storing full prompts by default if they may contain PHI*. At the `full` disclosure level, PHI is written to disk. No retention/prune exists for `ai_analyses` (§16.4).
-5. **No provider abstractions.** `RecommendationProvider` and `AiProvider` traits do not exist (Milestone 5, plan §5.5/§12). Only `EmbeddingProvider` exists (`crates/ai/src/embed.rs:13`). The chat AI path is a monolithic `LlamaClient` (`crates/llm-service/src/llama.rs`).
-6. **PHI disclosure levels diverge.** Plan §12.2: `none` / `deidentified` / `limited_phi` / `full_context`, **default `deidentified`**. Code: `none` / `limited` / `full` (`crates/ai/src/prompt.rs:6-10`), **default `limited`**, env-var only (not admin-configurable). Redaction covers only the claim reference, not a field-level mapper.
-7. **No user-facing AI-safety disclosures** (plan §17.1). No "advisory only / validate before acting / AI can be wrong" messaging anywhere in the UI.
-8. **Observability is a stub.** No OpenTelemetry, no metrics of any kind (plan §20). Only structured logs + `/health/live` + `/health/ready`.
-9. **Role set does not match plan §2.2.** DB allows only 5 roles (`billing_specialist, billing_manager, rcm_director, admin, auditor`, `database/init.sql:353`). The plan's `system_admin`, `security_admin`, `revenue_cycle_manager`, `coding_specialist`, `read_only` are absent.
-10. **CI's web smoke test is broken.** `npm run smoke` bundles `apps/web/scripts/smoke-render.mjs`, which imports `../src/pages/*.jsx` (e.g. `Dashboard.jsx`), but every page is now `.tsx`. esbuild will fail to resolve — the CI `npm run smoke` step (`.github/workflows/ci.yml:38`) cannot pass as written.
-11. **No Playwright E2E** anywhere (plan §21.2, §21.4, and Slice A's final item all require it). The §21.4 critical happy-path scenario is only covered by a shell script (`scripts/test_synthetic_e2e.sh`) that hits a running stack, not an automated browser E2E.
+- **H1. No user-facing AI-safety disclosures** (plan §17.1). No "advisory only / validate before acting / AI can be wrong" messaging anywhere in `apps/web/src` (grep: zero hits).
+- **H2. PHI disclosure levels diverge and are env-only.** Plan §12.2: `none` / `deidentified` / `limited_phi` / `full_context`, **default `deidentified`**. Code: `none` / `limited` / `full` (`crates/ai/src/prompt.rs:6-19`), **default `Limited`** (`prompt.rs:194`), set by env var, not admin-configurable. *Mitigant:* the prompt builder sends **no patient name or DOB** — only the claim reference (redacted at `limited`/`none`) + CPT/ICD/CARC/RARC + payer + retrieved policies.
+- **H3. No `AiProvider` / `RecommendationProvider` abstractions** (plan §5.5/§12). Only `EmbeddingProvider` exists; the chat path is a monolithic `LlamaClient`.
+- **H4. Deadline-digest job leaks across tenants.** `crates/api-gateway/src/routes/notifications.rs:253-281` — the overdue-denial `COUNT/SUM` query and the `SELECT id FROM users WHERE role = ANY(…)` manager query are **both unscoped by org**, then notifications are fanned out to **all** orgs' managers with a **cross-org aggregate** count/amount. (Lower severity than C1 — aggregate figures, not patient names — but still a cross-tenant information bleed and mis-targeted notifications.)
+- **H5. Workflow state machine is not enforced.** `crates/api-gateway/src/routes/denials.rs:702-749` — `update_denial` accepts **any** `CHECK`-valid status from **any** state. `denials.status` is a flat 8-value set (`open, analyzed, in_progress, in_appeal, appealed, overruled, resolved, written_off`), not the §30 state machine. Transitions are neither validated nor individually audited.
+- **H6. Role set does not match plan §2.2.** `database/init.sql:353` allows only 5 roles (`billing_specialist, billing_manager, rcm_director, admin, auditor`). The plan's `system_admin`, `security_admin`, `revenue_cycle_manager`, `coding_specialist`, `read_only` are absent.
+- **H7. No OpenTelemetry / metrics** (plan §20). Only structured logs + `/health/live` + `/health/ready`.
+- **H8. Threat model is a 24-line summary** (`docs/threat-model.md`) and **does not individually address** the §16.1 enumerated threats (IDOR, cross-tenant, SQLi/XSS/CSRF, SSRF, prompt injection, malicious admin, supply chain, object-store/backup/export exposure, excessive retention).
+- **H9. Deployment security checklist is minimal** (23 lines) — no BAA, network segmentation, HIDS, DLP, incident-response, or breach-notification items.
+- **H10. No Playwright E2E** (see §2).
 
-### 🟡 Medium — divergences and missing polish
+### 🟡 Medium — divergences, hygiene, and missing polish
 
-- **Schema diverges from plan §8.** No `import_batches`, `source_files`, `service_lines`, `adjustments`, `remarks`, `payers`, `denial_cases`, `recommendations`, or `denial_cases` tables. Service lines are embedded in `claims.raw_835_data JSONB` (`database/init.sql:58`); adjustments live inside the `denials` row. Plan §8.4/8.5 explicitly wanted normalized tables.
-- **Workflow state machine diverges from plan §30** and transitions are **not validated in app code** — `PATCH /denials/{id}` accepts any valid CHECK-constraint status from any state (`crates/api-gateway/src/routes/denials.rs:702-749`).
-- **QTY segments are unhandled** in the 835 parser (Milestone 1 explicitly lists QTY; grep for `QTY` in `crates/` = 0 hits).
-- **Root-cause taxonomy** is a hardcoded 10-value CHECK on `ai_analyses.denial_category` (`database/init.sql:140-143`), not a seeded/configurable/org-customizable taxonomy attached to denial cases (plan §10.2).
-- **Recommendation jobs are in-process `tokio::spawn` tasks** (`crates/api-gateway/src/routes/analyses.rs:514-586`), not a durable Postgres-backed queue (§18). A gateway restart loses `pending` jobs; failures are terminal (no retry/dead-letter).
-- **Threat model is a summary, not the §16.1 list.** `docs/threat-model.md` (24 lines) covers controls + logging boundary only; most enumerated threats (IDOR, SQLi/XSS/CSRF, SSRF, prompt injection, malicious admin, supply chain, object-store/backup/export exposure) are not individually addressed.
-- **API hygiene (§13.2):** no request IDs, no machine-readable error `code` field, no `Idempotency-Key` header, and the `version` column is incremented but never used for optimistic-concurrency conflict detection.
-- **Evaluation harness is not offline/synthetic.** `scripts/eval_model.py` reads **live DB denials**, not synthetic offline cases (§17.4), and lacks citation precision/coverage and hallucination-rate metrics.
-- **Docs contradiction.** `docs/RELEASE_READINESS.md:38` claims "OIDC/Keycloak and multi-organization tenant isolation remain deployment roadmap work," but both are implemented (`crates/auth/src/rbac.rs:266-310`, `organization_memberships`, `scripts/test_organization_isolation.sh`).
-- **Governance files missing** (plan §23.2): `.github/ISSUE_TEMPLATE/*` and `.github/PULL_REQUEST_TEMPLATE.md`. Only 1 of 10 planned ADRs exists (`docs/adr/0001-modular-monolith-migration.md`).
-- **`docs/architecture.md` (lowercase, 9 lines, stale) coexists with `docs/ARCHITECTURE.md` (369 lines, current).** Both are tracked; the lowercase one should be deleted.
-- **Legacy Python stack is still tracked** alongside its Rust replacements (`api-gateway/`, `ediparser/`, `llm-service/`, `rag-engine/` Python dirs) — dead weight and an extra audit surface.
-- **Secrets are plain `String` fields deriving `Debug`** (`crates/common/src/config.rs`); no `secrecy`-style wrapper (plan §16.3). Mitigations exist (`env_required_secret()` boot guard, `safe_error()` redaction).
-- **`.env.example` ships a real internal IP:** `LLAMA_BASE_URL=http://10.10.10.98:8080` (line 11). Minor info leak; replace with `http://localhost:8080`.
-- **Missing docs** (plan §7): `deployment.md` (only a security checklist exists), `edi-support.md`, `ai-safety.md`.
+- **M1. Schema diverges from §8.** No `import_batches`, `source_files`, `service_lines`, `adjustments`, `remarks`, `payers`, `recommendations` tables. Service lines are embedded in `claims.raw_835_data JSONB`; adjustments live inside the `denials` row.
+- **M2. Root-cause taxonomy is a hardcoded 10-value `CHECK`** on `ai_analyses.denial_category`, not a seeded/configurable/org-customizable table (§10.2).
+- **M3. API hygiene gaps (§13.2):** no request IDs, no machine-readable error `code`, no `Idempotency-Key`; the `version` column is incremented but not used for optimistic-concurrency conflict detection.
+- **M4. `.env.example:11` ships a real internal IP** — `LLAMA_BASE_URL=http://10.10.10.98:8080`.
+- **M5. Docs contradiction.** `docs/RELEASE_READINESS.md:38-39` claims "OIDC/Keycloak and multi-organization tenant isolation remain deployment roadmap work," but both are implemented (`crates/auth/src/rbac.rs:555,582-601`, `organization_memberships`, `scripts/test_organization_isolation.sh`).
+- **M6. Governance files missing (§23.2):** no `.github/ISSUE_TEMPLATE/*`, no `PULL_REQUEST_TEMPLATE.md`; only **1 of 10** planned ADRs exists (`docs/adr/0001-modular-monolith-migration.md`).
+- **M7. `QTY` segments unhandled** in the 835 parser (Milestone 1 lists QTY; no `QTY` handling in `crates/`).
+- **M8. Legacy Python service dirs still tracked** (`ediparser/`, `llm-service/`, `rag-engine/` Python) alongside their Rust replacements — dead weight + extra audit surface.
+- **M9. `justfile` missing several §22.1 commands** (`worker`, `migrate`, `seed`, `db-reset`, `synthetic-data`, `security-check`).
+- **M10. Real PHI files present in the working tree.** `.hdi835.dat`, `.835cg.txt/.pdf`, `.fcso835.txt`, `.uhc835.txt`, `icd10_october2026_0.csv`, `.835fields.tmp` are **gitignored (not in git — good)** but **exist on disk** in the repo root. They are real-looking payer EDI files. This is a local PHI-hygiene risk: any backup, sync, or shared mount of the working directory would export them.
 
-### 🟢 Positive — genuinely well done
+### 🟢 Positive — genuinely well done (verified)
 
-- **No real PHI in the repo.** All suspect root files (`.hdi835.dat`, `.*835.*`, `icd10_october2026_0.csv`) are **untracked and gitignored**. Tracked fixtures (`scripts/sample_835.txt`, `sample_837p/i.txt`, `database/seed/sample_data.sql`) use synthetic data (Doe/Smith, 555 phone range, `999`/`1987…` NPI prefixes, `PAT00x` IDs).
-- **Parser is defensively built:** delimiter auto-detection (`crates/edi-core/src/common.rs:78-123`), hard limits (200k segments, 16 KiB/segment, 256 elements, 25 MB upload, 64 MB body), envelope validation, and a cargo-fuzz target.
-- **RBAC is centralized and enforced** (`crates/auth/src/rbac.rs:348-379,533,582-601`); org scoping verified across claims/denials/analyses/retention/feedback queries.
-- **Citation integrity is enforced:** the LLM service rejects any `evidence_id` not in the retrieved set (`crates/llm-service/src/main.rs:338-349`) — no fabricated citations.
-- **Deterministic fallback works** when AI is unavailable (`crates/api-gateway/src/routes/analyses.rs:405-477`) — plan §12.1 requirement met.
-- **Storage abstraction is real** (local + hand-rolled SigV4 S3, `crates/storage/src/lib.rs`), **hybrid retrieval** (0.7 vector + 0.3 lexical, `crates/rag-engine/src/main.rs:97-153`), **playbook approval lifecycle** with manager gating, and a **similar-resolved-case retrieval that deliberately excludes patient identifiers** (`crates/api-gateway/src/routes/feedback.rs:402-435`).
-- **Deployment is production-minded:** non-root containers (`Dockerfile.rust:38,40`), production compose with fail-fast secrets, reverse-proxy TLS example, backup/restore with `--verify-only` drill, SBOM + Trivy in CI.
+- **No real PHI in git.** All suspect root files are untracked/gitignored; tracked fixtures (`scripts/sample_835/837p/837i.txt`, `database/seed/`) are synthetic (Doe/Smith, 555 range, `999`/`1987…` NPI prefixes, `PAT00x` IDs).
+- **No PHI in tracing statements** (grep across `crates/` for patient/claim/dob/member in `tracing::` = clean). `safe_error()` (`crates/common/src/logging.rs:10-32`) bounds and redacts transport/config diagnostics.
+- **RBAC is centralized and enforced** (`crates/auth/src/rbac.rs:384-423`); every human request must resolve to an **active org membership** before repositories use tenant context (`rbac.rs:582-601`); per-request account-currency check (`is_active`, `role_changed`, `credentials_changed`, `rbac.rs:429-477`).
+- **Prompt-injection defense** is present in the system prompt (`crates/ai/src/prompt.rs:114-116`): retrieved text is untrusted evidence, never instructions; the LLM service rejects `evidence_id`s not in the retrieved set (no fabricated citations).
+- **Deterministic fallback works** with AI off; **hybrid retrieval** (vector + lexical); **playbook approval lifecycle** with manager gating; **similar-resolved-case retrieval deliberately excludes patient identifiers**.
+- **Deployment is production-minded:** non-root containers, production compose with fail-fast secrets, reverse-proxy TLS example, backup/restore with a `--verify-only` drill, SBOM + Trivy in CI.
 
 ---
 
-## 2. Milestone Scorecard
-
-Legend: ✅ verified · ⚠️ partial/divergent · ❌ missing
-
-| Milestone | ✅ | ⚠️ | ❌ | Net assessment |
-|-----------|----|----|----|----------------|
-| **0** Foundation | 14 | 4 | 0 | Solid. pnpm declared but npm used; OpenAPI/TS client are Python-generated type maps, not utoipa + real client. |
-| **1** X12 Core + 835 | 15 | 4 | 0 | Strong. QTY unhandled; tokenizer in-memory (not streaming); fixtures lack delimiter/edge variety. |
-| **2** Denial Work Queue | 8 | 7 | 1 | **Activity timeline missing entirely.** Detail UI is a modal, not the plan's tabbed view; saved views are localStorage-only; bulk op queues resolutions, not owner assignment. |
-| **3** 837 Correlation | 5 | 3 | 2 | **Weakest milestone.** Scored correlation + ambiguous-match confirmation (the headline feature) is missing — replaced by an exact-match upsert. No 837 unit/fuzz tests. |
-| **4** Knowledge Base | 12 | 4 | 0 | Strong. HTML input unsupported; no tags/org-only flags; pgvector migration unconditional. |
-| **5** Recommendation Engine | 12 | 6 | 2 | Functional but `RecommendationProvider`/`AiProvider` abstractions missing; no advisory UI; in-process jobs; eval harness not offline. |
-| **6** Playbooks + Feedback | 11 | 0 | 0 | **Best milestone.** Fully verified. |
-| **7** Auth/RBAC/Security | 8 | 6 | 1 | Roles diverge from plan; threat model thin; container scan is FS not image; isolation test not in CI. |
-| **8** Analytics | 13 | 0 | 0 | **Fully verified.** All endpoints + Dashboard + Insights UI + audited CSV export. |
-| **9** Ingestion + Deploy | 11 | 1 | 0 | Strong. Helm chart exists but thin (no migration hooks/tests). |
-| **10** Release Readiness | 8 | 4 | 1 | No privacy/security review doc; fuzz campaign + backup/upgrade tests have no committed evidence. `v1.0.0` tag + signed checksums correctly absent. |
-
-**Bottom line:** Milestones **6, 8, 9** are clean. Milestone **3** is the biggest overstatement — its defining requirement (scored, confirm-gated correlation) is not implemented.
-
----
-
-## 3. Plan-Section Compliance Matrix
+## 4. Plan-section compliance matrix (re-verified at `91305ce`)
 
 | Plan § | Requirement | Status | Evidence |
 |--------|-------------|--------|----------|
-| §0.6 | Never log PHI/payloads/tokens/secrets/raw EDI | ⚠️ | Logs are clean, but **audit metadata stores `patient_name` + raw query** (see Critical #1/#2). |
-| §5.5 / §12 | `AiProvider` / `RecommendationProvider` abstractions | ❌ | No traits; monolithic `LlamaClient`. Only `EmbeddingProvider` exists. |
-| §7 | Repository layout | ⚠️ | No `packages/`, no top-level `fixtures/`, migrations under `database/`, extra crates (`common`, `llm-service`, `rag-engine`, `ediparser`). |
-| §8 | Domain model | ⚠️ | Service lines/adjustments/remarks not normalized into tables; several planned tables absent. |
-| §9.4 | Scored correlation, no silent merge | ❌ | Exact-match upsert, hardcoded 1.00, no ambiguity flow. |
-| §9.5 | Fixtures synthetic + labeled | ✅ | Synthetic in substance; in-repo labeling is via code/docs, not the files themselves. |
-| §10.2 | Configurable root-cause taxonomy | ⚠️ | Hardcoded 10-value CHECK, not a table. |
-| §12.2 | PHI levels, default `deidentified` | ⚠️ | Levels are `none/limited/full`, default `limited`, env-only. |
-| §13.2 | Request IDs / idempotency / error codes / optimistic concurrency | ⚠️ | Cursor pagination + org scoping ✅; the rest absent. |
-| §16.1 | Threat model covers the enumerated threats | ⚠️ | 24-line summary; most threats not individually addressed. |
-| §16.3 | Secrets wrapped to avoid debug output | ⚠️ | Plain `String` + `Debug`; boot guard + redaction mitigate. |
-| §16.4 | Retention for AI records | ❌ | No prune/retention for `ai_analyses`. |
-| §16.5 | Never log patient name / member ID / DOB | ❌ | Violated via audit `details` (see Critical #2). |
-| §17.1 | User-facing advisory disclosures | ❌ | Absent from UI. |
-| §17.3 | Don't store full prompts by default | ❌ | `raw_prompt`/`raw_response` always stored. |
-| §18 | Postgres-backed durable job queue | ⚠️ | In-process `tokio::spawn`; lost on restart. |
-| §20 | OpenTelemetry metrics | ❌ | No metrics/OTel. |
-| §21.2/§21.4 | Playwright E2E + critical happy path | ❌ | No Playwright; shell-script E2E only. |
-| §22.1 | One-command dev + justfile command set | ⚠️ | `just dev` works; missing `worker`, `migrate`, `seed`, `db-reset`, `synthetic-data`, `security-check`. |
-| §23.2 | Governance files | ⚠️ | Missing ISSUE_TEMPLATE + PR template; 1/10 ADRs. |
-| §2.2 | 7 RBAC roles | ❌ | Only 5 roles, different names. |
+| §0.6 / §16.5 | Never log PHI / patient name | ✅ | Fixed — `patient_name` removed, label queries org-scoped (C1/C2) |
+| §8.10 | No PHI in audit metadata | ✅ | Fixed — no `patient_name`, no raw `query` in `details` (C2) |
+| §9.4 | Scored correlation, no silent merge | ✅ | Fixed — scored matcher, ambiguous matches not merged (C3) |
+| §17.3 | Don't store full prompts by default | ✅ | Fixed — gated behind `AI_STORE_RAW_ARTIFACTS` (default off) (C4) |
+| §16.4 | Retention for AI records | ✅ | Fixed — admin-only `/retention/ai` prune (C4) |
+| §17.1 | User-facing advisory disclosures | ❌ | Absent from UI (H1) |
+| §2.2 | 7 RBAC roles | ❌ | 5 roles, different names (H6) |
+| §20 | OpenTelemetry metrics | ❌ | None (H7) |
+| §21.2/§21.4 | Playwright E2E + happy path | ❌ | Shell-script only (H10) |
+| §5.5/§12 | `AiProvider`/`RecommendationProvider` | ❌ | Only `EmbeddingProvider` (H3) |
+| §12.2 | PHI levels, default `deidentified` | ⚠️ | `none/limited/full`, default `limited`, env-only (H2) |
+| §10.2 | Configurable root-cause taxonomy | ⚠️ | Hardcoded 10-value CHECK (M2) |
+| §13.2 | Request IDs / idempotency / error codes / optimistic concurrency | ⚠️ | Cursor pagination + org scoping ✅; rest absent (M3) |
+| §16.1 | Threat model covers enumerated threats | ⚠️ | 24-line summary (H8) |
+| §18 | Durable Postgres job queue | ⚠️ | In-process `tokio::spawn`, terminal on failure |
+| §30 | Enforced, audited workflow state machine | ⚠️ | Flat status set, no transition validation (H5) |
+| §7 | Repository layout | ⚠️ | No `packages/`, migrations under `database/`, extra crates |
+| §8 | Normalized domain model | ⚠️ | Service lines/adjustments/remarks not normalized (M1) |
+| §22.1 | justfile command set | ⚠️ | Missing several commands (M9) |
+| §23.2 | Governance files | ⚠️ | No ISSUE/PR templates; 1/10 ADRs (M6) |
+| §17.4 | Offline synthetic eval harness | ⚠️ | Reads live DB (M — see §2) |
+| §16.2 | App security controls (TLS, CSP, limits, rate-limit) | ✅ | Present |
+| §15.2 | Centralized authorization + org scoping | ✅ | Verified (see §3 positive) |
+| §12.1 | Deterministic fallback with AI off | ✅ | Verified |
+| §9.5 | Synthetic, labeled fixtures | ✅ | Synthetic in substance |
 
 ---
 
-## 4. Recommended Actions (prioritized)
+## 5. Hospital-use (HIPAA) readiness
 
-### Do first — security blockers (before any real PHI)
-1. **Scope `label_query()` by `organization_id`** and **stop persisting `patient_name`/raw `query`** into `audit_log.details`. Replace with non-PHI labels (resource id + type only). `crates/audit/src/lib.rs:123-159`.
-2. **Gate `raw_prompt`/`raw_response` storage** behind a deployment flag (default off, or store only when disclosure level is `none`/`deidentified`), and add retention/prune for `ai_analyses`.
-3. **Rebuild claim correlation** as a scored deterministic matcher using the §9.4 candidate fields, store confidence + matching reasons, and add an explicit ambiguous-match confirmation flow (or, at minimum, stop auto-merging when confidence < 1.0 and require user action).
-4. **Add the AI advisory-only disclosures** to the Recommendation UI and Denial Detail.
+The code's *technical* foundation is appropriate for a covered-entity deployment: RBAC + org isolation, PHI-bounded logging, prompt-injection defense, non-root hardened containers, backup/restore, SBOM/Trivy. The four **Critical** defects (C1–C4) are now **fixed** (2026-09-18): audit label lookups are org-scoped and PHI-free, the 837→835 correlation is a scored matcher that never silently merges ambiguous claims, and AI raw prompts/responses are stored only when explicitly enabled with an admin-only prune. The four **High** items (H1–H4) and the §6 plan gaps remain open, so until those are closed and implemented this should still be treated as a **single-trusted-tenant, synthetic-data-only** system.
 
-### High value
-5. Fix the broken CI smoke test (`.jsx` → `.tsx` imports) — currently the CI `npm run smoke` step cannot pass.
+---
+
+## 6. What is MISSING from `plan.md` (should be added)
+
+The plan is strong on *what to build* and *deterministic-before-generative*, but it omits controls a hospital deployment actually depends on. Recommend adding these sections:
+
+1. **Data classification scheme.** The plan never defines a classification (PHI / de-identified / public) for data elements. This is the foundation for every other control (minimization, retention, access). Add a table classifying each field (patient name, DOB, member ID, NPI, claim reference, codes) and the allowed handling per class.
+2. **De-identification standard for the AI boundary.** §12.2 lists levels but never specifies the field-level redaction mapping or which standard applies (HIPAA Safe Harbor vs. Expert Determination). Add the exact identifier inventory and the rule that "de-identified" means no §164.514 identifiers, with a test that verifies de-identified output contains none.
+3. **Business Associate / AI-provider data-processing section.** §16.6 covers HIPAA *positioning* but never addresses the central question: is the (even self-hosted) model/embedding provider a Business Associate? What must a BAA cover, and how is it verified that PHI stays inside the approved boundary? Add an explicit section + a "PHI boundary" diagram.
+4. **PHI-access audit trail.** §8.10 has `audit_events` but does not require a **who-viewed-which-patient** trail. HIPAA §164.312(b) requires audit controls for ePHI access. Add an explicit requirement to log PHI-field access (role, user, resource, timestamp) — *without* duplicating the PHI itself into the log (which is exactly what C2 does wrong).
+5. **Incident response & breach notification.** No section exists. Add detection, containment, HHS/individual breach-notification, and forensics procedures.
+6. **Legal hold on retention.** §16.4 has configurable retention but no **legal-hold** mechanism to pause deletion during litigation/investigation — required for healthcare records.
+7. **Application-layer encryption & key management.** §5.3 defers encryption to "deployment infrastructure." Add field-level encryption (or an explicit decision not to) for the most sensitive fields, plus key management and **encrypted backups**.
+8. **MFA & session-management spec.** The code has TOTP, but the plan never *requires* MFA for PHI access, nor specifies session timeout, idle lock, or concurrent-session limits for a hospital terminal environment.
+9. **Network segmentation.** The architecture diagram never addresses segmentation between the app, model server, object store, and EHR/clearinghouse — a core HIPAA technical safeguard. Add a network diagram with trust boundaries.
+10. **Audit-log integrity / tamper-evidence.** §16.2 mentions "audit log integrity controls" but specifies nothing. Add hash-chaining / append-only / WORM requirements.
+11. **DR / RPO-RTO.** §26 mentions backup/restore but no RPO/RTO targets or failover for a hospital needing continuity.
+12. **Human-approval workflow spec for AI actions.** §0.8/§12 say "no silent mutation" but never specify *who* must approve, what the approval record looks like, or how a rejected AI recommendation is tracked. Add the exact approval workflow.
+13. **Fail-closed production auth.** §15.1 mentions a "development-only local auth mode" but never specifies how it is disabled/enforced in production. Add a fail-closed requirement (production refuses to boot without OIDC + real secrets).
+14. **Correlation scoring spec.** §9.4 lists candidate fields but no scoring algorithm, threshold, or the ambiguous-match UX — the gap that led directly to the C3 silent-merge implementation. Add the algorithm + a "confidence < threshold ⇒ require user confirmation" rule.
+
+---
+
+## 7. Prioritized remediation
+
+**Do first — before any real PHI:**
+1. Scope `label_query()` by `organization_id` and **stop persisting `patient_name`/raw `query`** into `audit_log.details`; use non-PHI labels (resource id + type only). `crates/audit/src/lib.rs:122-165,343-359`.
+2. Gate `raw_prompt`/`raw_response` storage behind a deployment flag (default off, or only when disclosure is `none`/`deidentified`) and add retention/prune for `ai_analyses`. `crates/api-gateway/src/routes/analyses.rs:219-246`.
+3. Rebuild 837→835 correlation as a **scored deterministic matcher** using the §9.4 fields; store confidence + matching reasons; add an explicit ambiguous-match confirmation flow (or stop auto-merging below a threshold). `crates/api-gateway/src/routes/ingestion.rs:373-392`.
+4. Scope the deadline-digest job to the requesting organization. `crates/api-gateway/src/routes/notifications.rs:253-281`.
+5. Add the **AI advisory-only disclosures** to the Recommendation UI and Denial Detail (H1).
+
+**High value:**
 6. Add **Playwright** E2E for the §21.4 happy path; wire `scripts/test_organization_isolation.sh` into CI.
-7. Introduce the `AiProvider` / `RecommendationProvider` traits; make PHI level admin-configurable with a `deidentified` default.
-8. Align the role set with plan §2.2 (or document the deviation via an ADR).
-9. Add request IDs, machine-readable error codes, and idempotency keys; use the `version` column for optimistic concurrency.
+7. Introduce `AiProvider`/`RecommendationProvider` traits; make PHI level **admin-configurable** with a `deidentified` default (H2/H3).
+8. Enforce the §30 workflow state machine in `update_denial` and audit each transition (H5).
+9. Align the role set with §2.2 (or document the deviation via an ADR) (H6).
+10. Add request IDs, machine-readable error codes, idempotency keys; use `version` for optimistic concurrency (M3).
+11. Make the eval harness **offline/synthetic** (stop reading the live DB).
 
-### Hygiene / docs
-10. Delete stale `docs/architecture.md` (lowercase); add `deployment.md`, `edi-support.md`, `ai-safety.md`; correct the OIDC/multi-org "roadmap" claim in `RELEASE_READINESS.md`.
-11. Remove the real internal IP from `.env.example`; wrap secrets in a non-`Debug` type.
-12. Add `.github/ISSUE_TEMPLATE/*` + `PULL_REQUEST_TEMPLATE.md`; write the remaining ADRs (esp. one documenting the correlation and schema divergences).
-13. Decide on the legacy Python service dirs — either delete them or clearly mark them deprecated.
-14. Commit the pending `028`/`029` org-isolation migrations (currently untracked).
+**Hygiene / docs / plan:**
+12. Expand `docs/threat-model.md` to cover every §16.1 threat; expand the deployment checklist (H8/H9).
+13. Remove the real internal IP from `.env.example`; **remove the real EDI files from the working tree** (M4/M10).
+14. Add the **§6 plan sections** and record the implemented divergences (correlation, schema, 5-role model, PHI levels) as ADRs.
+15. Add `.github/ISSUE_TEMPLATE/*` + `PULL_REQUEST_TEMPLATE.md`; write the remaining ADRs (M6).
+16. Decide on the legacy Python service dirs — delete or clearly mark deprecated (M8).
 
 ---
 
-## 5. Notes on Plan Hygiene
+## 8. Note on plan hygiene
 
-Per plan §0.11 ("Update this plan.md as architectural decisions are made"), several real divergences have **not** been recorded: the exact-match correlation approach, the reduced schema, the 5-role model, the `none/limited/full` PHI levels, and the Python→Rust migration (partially covered by ADR-0001). These should each get an ADR so the plan and the code stop silently disagreeing.
+Per plan §0.11 ("Update this plan.md as architectural decisions are made"), several real divergences were **never recorded**: the exact-match correlation approach, the reduced schema, the 5-role model, the `none/limited/full` PHI levels, and the in-process job model. Each should get an ADR so the plan and the code stop silently disagreeing. Separately, the plan itself is missing the hospital-critical sections enumerated in §6.

@@ -370,7 +370,10 @@ const ON_CONFLICT_835: &str = "ON CONFLICT (organization_id, claim_number) DO UP
     parsed_at        = NOW(), \
     updated_at       = NOW()";
 
-const ON_CONFLICT_837: &str = "ON CONFLICT (organization_id, claim_number) DO UPDATE SET \
+/// 837→835 correlation: the 837 (response) is merged into the 835 (claim) only
+/// when the match is corroborated by more than the claim number alone. The
+/// merge records the real confidence instead of a hardcoded 1.00.
+const ON_CONFLICT_837_MERGE: &str = "ON CONFLICT (organization_id, claim_number) DO UPDATE SET \
     patient_name     = COALESCE(claims.patient_name, EXCLUDED.patient_name), \
     date_of_birth    = COALESCE(claims.date_of_birth, EXCLUDED.date_of_birth), \
     provider_npi     = COALESCE(claims.provider_npi, EXCLUDED.provider_npi), \
@@ -388,16 +391,243 @@ const ON_CONFLICT_837: &str = "ON CONFLICT (organization_id, claim_number) DO UP
                          AND cardinality(EXCLUDED.icd_10_codes) > 0 \
                         THEN EXCLUDED.icd_10_codes ELSE claims.icd_10_codes END, \
     correlation_status = 'matched', \
-    correlation_confidence = 1.00, \
+    correlation_confidence = $19, \
     updated_at       = NOW()";
 
-fn claim_upsert_sql(transaction_type: Option<&str>) -> String {
-    let conflict = if transaction_type == Some("837") {
-        ON_CONFLICT_837
+/// A 837 is treated as the same claim as the 835 only when the match score
+/// reaches this threshold. The claim number alone (0.5) is insufficient; at
+/// least one corroborating field is required.
+const CORRELATION_MATCH_THRESHOLD: f64 = 0.6;
+
+/// Deterministic, explainable 837→835 match score in `[0, 1]`. The claim
+/// number is the lookup key and always matches, so it contributes the 0.5
+/// base. Each corroborating field adds its weight. An incoming 837 that is
+/// missing a field (None / 0) does not earn that field's points — absence of
+/// data is not evidence of a match.
+#[derive(Clone, Copy)]
+struct MatchFields<'a> {
+    svc_from: Option<&'a str>,
+    svc_to: Option<&'a str>,
+    total_charge: f64,
+    provider_npi: Option<&'a str>,
+    payer_name: Option<&'a str>,
+}
+
+fn correlation_score(incoming: &MatchFields, existing: &MatchFields) -> f64 {
+    let mut score: f64 = 0.5;
+    if let (Some(a), Some(b)) = (incoming.svc_from, existing.svc_from) {
+        if a == b {
+            score += 0.1;
+        }
+    }
+    if let (Some(a), Some(b)) = (incoming.svc_to, existing.svc_to) {
+        if a == b {
+            score += 0.1;
+        }
+    }
+    if incoming.total_charge > 0.0 && (incoming.total_charge - existing.total_charge).abs() <= 0.01
+    {
+        score += 0.15;
+    }
+    if let (Some(a), Some(b)) = (incoming.provider_npi, existing.provider_npi) {
+        if a == b {
+            score += 0.1;
+        }
+    }
+    if let (Some(a), Some(b)) = (incoming.payer_name, existing.payer_name) {
+        if a.eq_ignore_ascii_case(b) {
+            score += 0.15;
+        }
+    }
+    score.min(1.0)
+}
+
+/// Upsert a single parsed claim. 835 (or unknown) is a re-parse of the same
+/// claim and merges as before. An 837 (response) is correlated against any
+/// existing claim with the same number: a corroborated match merges with its
+/// real confidence; an unconfirmed match is flagged `ambiguous` for review and
+/// is NOT merged over the 835.
+async fn upsert_claim(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    transaction_type: Option<&str>,
+    claim_data: &serde_json::Value,
+) -> Result<(), AppError> {
+    let claim_id: &str = claim_data
+        .get("claim_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let patient_id: &str = claim_data
+        .get("patient_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let patient_name: Option<&str> = claim_data.get("patient_name").and_then(|v| v.as_str());
+    let dob: Option<&str> = claim_data
+        .get("date_of_birth")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let provider_npi: Option<&str> = claim_data.get("provider_npi").and_then(|v| v.as_str());
+    let provider_name: Option<&str> = claim_data.get("provider_name").and_then(|v| v.as_str());
+    let payer_name: Option<&str> = claim_data.get("payer_name").and_then(|v| v.as_str());
+    let payer_id_number: Option<&str> = claim_data.get("payer_id_number").and_then(|v| v.as_str());
+    let total_charge: f64 = claim_data
+        .get("total_charged")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let total_paid: f64 = claim_data
+        .get("total_paid")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let total_adjustment: f64 = claim_data
+        .get("total_adjustment")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let claim_type: &str = claim_data
+        .get("claim_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("professional");
+    let facility_type_code: Option<&str> = claim_data
+        .get("facility_type_code")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let service_from: Option<&str> = claim_data
+        .get("service_from")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let service_to: Option<&str> = claim_data
+        .get("service_to")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let icd_codes: Vec<String> = claim_data
+        .get("diagnosis_codes")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect();
+
+    if transaction_type == Some("837") {
+        let existing = sqlx::query(
+            "SELECT service_from, service_to, total_charge, provider_npi, payer_name \
+             FROM claims WHERE organization_id = $1 AND claim_number = $2",
+        )
+        .bind(organization_id)
+        .bind(claim_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(AppError::Db)?;
+
+        let score = match &existing {
+            Some(row) => {
+                let incoming = MatchFields {
+                    svc_from: service_from,
+                    svc_to: service_to,
+                    total_charge,
+                    provider_npi,
+                    payer_name,
+                };
+                let existing = MatchFields {
+                    svc_from: row.try_get("service_from").ok().flatten(),
+                    svc_to: row.try_get("service_to").ok().flatten(),
+                    total_charge: row.try_get("total_charge").unwrap_or(0.0),
+                    provider_npi: row.try_get("provider_npi").ok().flatten(),
+                    payer_name: row.try_get("payer_name").ok().flatten(),
+                };
+                correlation_score(&incoming, &existing)
+            }
+            None => 0.0,
+        };
+
+        if existing.is_none() {
+            // No 835 to correlate against: insert the 837 as a new claim.
+            sqlx::query(CLAIM_INSERT)
+                .bind(organization_id)
+                .bind(claim_id)
+                .bind(patient_id)
+                .bind(patient_name)
+                .bind(dob)
+                .bind(provider_npi)
+                .bind(provider_name)
+                .bind(payer_name)
+                .bind(payer_id_number)
+                .bind(total_charge)
+                .bind(total_paid)
+                .bind(total_adjustment)
+                .bind(claim_type)
+                .bind(facility_type_code)
+                .bind(service_from)
+                .bind(service_to)
+                .bind(icd_codes)
+                .bind(claim_data.to_string())
+                .execute(&mut **tx)
+                .await
+                .map_err(AppError::Db)?;
+        } else if score >= CORRELATION_MATCH_THRESHOLD {
+            // Corroborated match: merge, recording the real confidence.
+            sqlx::query(&format!("{CLAIM_INSERT} {ON_CONFLICT_837_MERGE}"))
+                .bind(organization_id)
+                .bind(claim_id)
+                .bind(patient_id)
+                .bind(patient_name)
+                .bind(dob)
+                .bind(provider_npi)
+                .bind(provider_name)
+                .bind(payer_name)
+                .bind(payer_id_number)
+                .bind(total_charge)
+                .bind(total_paid)
+                .bind(total_adjustment)
+                .bind(claim_type)
+                .bind(facility_type_code)
+                .bind(service_from)
+                .bind(service_to)
+                .bind(icd_codes)
+                .bind(claim_data.to_string())
+                .bind(score)
+                .execute(&mut **tx)
+                .await
+                .map_err(AppError::Db)?;
+        } else {
+            // Unconfirmed: flag for review; do NOT merge the 837 over the 835.
+            sqlx::query(
+                "UPDATE claims SET correlation_status = 'ambiguous', \
+                        correlation_confidence = $3, updated_at = NOW() \
+                 WHERE organization_id = $1 AND claim_number = $2",
+            )
+            .bind(organization_id)
+            .bind(claim_id)
+            .bind(score)
+            .execute(&mut **tx)
+            .await
+            .map_err(AppError::Db)?;
+        }
     } else {
-        ON_CONFLICT_835
-    };
-    format!("{CLAIM_INSERT} {conflict}")
+        // 835 (or unknown): a re-parse of the same claim; merge as before.
+        sqlx::query(&format!("{CLAIM_INSERT} {ON_CONFLICT_835}"))
+            .bind(organization_id)
+            .bind(claim_id)
+            .bind(patient_id)
+            .bind(patient_name)
+            .bind(dob)
+            .bind(provider_npi)
+            .bind(provider_name)
+            .bind(payer_name)
+            .bind(payer_id_number)
+            .bind(total_charge)
+            .bind(total_paid)
+            .bind(total_adjustment)
+            .bind(claim_type)
+            .bind(facility_type_code)
+            .bind(service_from)
+            .bind(service_to)
+            .bind(icd_codes)
+            .bind(claim_data.to_string())
+            .execute(&mut **tx)
+            .await
+            .map_err(AppError::Db)?;
+    }
+    Ok(())
 }
 
 async fn already_ingested(
@@ -630,88 +860,14 @@ pub async fn ingest_file(
         .collect();
     let cleaned_denials: Vec<serde_json::Value> = denials.iter().map(|d| clean_denial(d)).collect();
 
-    let upsert_sql = claim_upsert_sql(transaction_type.as_deref());
-
     for claim_data in &cleaned_claims {
-        let claim_id: &str = claim_data
-            .get("claim_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let patient_id: &str = claim_data
-            .get("patient_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let patient_name: Option<&str> = claim_data.get("patient_name").and_then(|v| v.as_str());
-        let dob: Option<&str> = claim_data
-            .get("date_of_birth")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty());
-        let provider_npi: Option<&str> = claim_data.get("provider_npi").and_then(|v| v.as_str());
-        let provider_name: Option<&str> = claim_data.get("provider_name").and_then(|v| v.as_str());
-        let payer_name: Option<&str> = claim_data.get("payer_name").and_then(|v| v.as_str());
-        let payer_id_number: Option<&str> =
-            claim_data.get("payer_id_number").and_then(|v| v.as_str());
-        let total_charge: f64 = claim_data
-            .get("total_charged")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let total_paid: f64 = claim_data
-            .get("total_paid")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let total_adjustment: f64 = claim_data
-            .get("total_adjustment")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let claim_type: &str = claim_data
-            .get("claim_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("professional");
-        let facility_type_code: Option<&str> = claim_data
-            .get("facility_type_code")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty());
-        let service_from: Option<&str> = claim_data
-            .get("service_from")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty());
-        let service_to: Option<&str> = claim_data
-            .get("service_to")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty());
-        let icd_codes: Vec<String> = {
-            let arr = claim_data
-                .get("diagnosis_codes")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect()
-        };
-
-        sqlx::query(&upsert_sql)
-            .bind(organization_id)
-            .bind(claim_id)
-            .bind(patient_id)
-            .bind(patient_name)
-            .bind(dob)
-            .bind(provider_npi)
-            .bind(provider_name)
-            .bind(payer_name)
-            .bind(payer_id_number)
-            .bind(total_charge)
-            .bind(total_paid)
-            .bind(total_adjustment)
-            .bind(claim_type)
-            .bind(facility_type_code)
-            .bind(service_from)
-            .bind(service_to)
-            .bind(icd_codes)
-            .bind(claim_data.to_string())
-            .execute(&mut *tx)
-            .await
-            .map_err(AppError::Db)?;
+        upsert_claim(
+            &mut tx,
+            organization_id,
+            transaction_type.as_deref(),
+            claim_data,
+        )
+        .await?;
     }
 
     let mut denials_written: i64 = 0;
@@ -924,88 +1080,14 @@ pub async fn store_parsed_data(
 
     let ingestion_id: Uuid = ingestion_row.get("id");
 
-    let upsert_sql = claim_upsert_sql(body.transaction_type.as_deref());
-
     for claim_data in &cleaned_claims {
-        let claim_id: &str = claim_data
-            .get("claim_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let patient_id: &str = claim_data
-            .get("patient_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let patient_name: Option<&str> = claim_data.get("patient_name").and_then(|v| v.as_str());
-        let dob: Option<&str> = claim_data
-            .get("date_of_birth")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty());
-        let provider_npi: Option<&str> = claim_data.get("provider_npi").and_then(|v| v.as_str());
-        let provider_name: Option<&str> = claim_data.get("provider_name").and_then(|v| v.as_str());
-        let payer_name: Option<&str> = claim_data.get("payer_name").and_then(|v| v.as_str());
-        let payer_id_number: Option<&str> =
-            claim_data.get("payer_id_number").and_then(|v| v.as_str());
-        let total_charge: f64 = claim_data
-            .get("total_charged")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let total_paid: f64 = claim_data
-            .get("total_paid")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let total_adjustment: f64 = claim_data
-            .get("total_adjustment")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let claim_type: &str = claim_data
-            .get("claim_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("professional");
-        let facility_type_code: Option<&str> = claim_data
-            .get("facility_type_code")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty());
-        let service_from: Option<&str> = claim_data
-            .get("service_from")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty());
-        let service_to: Option<&str> = claim_data
-            .get("service_to")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty());
-        let icd_codes: Vec<String> = {
-            let arr = claim_data
-                .get("diagnosis_codes")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect()
-        };
-
-        sqlx::query(&upsert_sql)
-            .bind(organization_id)
-            .bind(claim_id)
-            .bind(patient_id)
-            .bind(patient_name)
-            .bind(dob)
-            .bind(provider_npi)
-            .bind(provider_name)
-            .bind(payer_name)
-            .bind(payer_id_number)
-            .bind(total_charge)
-            .bind(total_paid)
-            .bind(total_adjustment)
-            .bind(claim_type)
-            .bind(facility_type_code)
-            .bind(service_from)
-            .bind(service_to)
-            .bind(icd_codes)
-            .bind(claim_data.to_string())
-            .execute(&mut *tx)
-            .await
-            .map_err(AppError::Db)?;
+        upsert_claim(
+            &mut tx,
+            organization_id,
+            body.transaction_type.as_deref(),
+            claim_data,
+        )
+        .await?;
     }
 
     let mut denials_written: i64 = 0;
@@ -1119,4 +1201,92 @@ pub fn router() -> Router<AppState> {
         .route("/log", post(list_ingestion_log))
         .route("/history", get(get_ingestion_history))
         .route("/store", post(store_parsed_data))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fields<'a>(
+        svc_from: Option<&'a str>,
+        svc_to: Option<&'a str>,
+        total_charge: f64,
+        provider_npi: Option<&'a str>,
+        payer_name: Option<&'a str>,
+    ) -> MatchFields<'a> {
+        MatchFields {
+            svc_from,
+            svc_to,
+            total_charge,
+            provider_npi,
+            payer_name,
+        }
+    }
+
+    #[test]
+    fn claim_number_alone_is_not_enough() {
+        // The 837 shares the claim number but nothing else: score stays at the
+        // 0.5 base, below the 0.6 threshold, so it must NOT merge.
+        let incoming = fields(None, None, 0.0, None, None);
+        let existing = fields(None, None, 0.0, None, None);
+        assert_eq!(correlation_score(&incoming, &existing), 0.5);
+        assert!(correlation_score(&incoming, &existing) < CORRELATION_MATCH_THRESHOLD);
+    }
+
+    #[test]
+    fn corroborated_match_reaches_threshold() {
+        // Claim number + matching billed amount (0.5 + 0.15 = 0.65) clears the
+        // threshold and should merge.
+        let incoming = fields(None, None, 150.0, None, None);
+        let existing = fields(None, None, 150.0, None, None);
+        assert!(correlation_score(&incoming, &existing) >= CORRELATION_MATCH_THRESHOLD);
+    }
+
+    #[test]
+    fn full_match_scores_one() {
+        let incoming = fields(
+            Some("2026-01-01"),
+            Some("2026-01-08"),
+            150.0,
+            Some("1234567890"),
+            Some("Aetna"),
+        );
+        let existing = fields(
+            Some("2026-01-01"),
+            Some("2026-01-08"),
+            150.0,
+            Some("1234567890"),
+            Some("aetna"),
+        );
+        assert!((correlation_score(&incoming, &existing) - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn zero_amount_is_not_evidence() {
+        // A 837 with no billed amount (0) must not earn the amount points just
+        // because the existing claim is also 0.
+        let incoming = fields(None, None, 0.0, None, None);
+        let existing = fields(None, None, 0.0, None, None);
+        assert_eq!(correlation_score(&incoming, &existing), 0.5);
+    }
+
+    #[test]
+    fn mismatched_fields_do_not_score() {
+        let incoming = fields(
+            Some("2026-01-01"),
+            Some("2026-01-08"),
+            150.0,
+            Some("111"),
+            Some("Aetna"),
+        );
+        let existing = fields(
+            Some("2026-02-01"),
+            Some("2026-02-08"),
+            999.0,
+            Some("222"),
+            Some("Cigna"),
+        );
+        // Only the base claim-number score; every field differs.
+        assert_eq!(correlation_score(&incoming, &existing), 0.5);
+    }
 }

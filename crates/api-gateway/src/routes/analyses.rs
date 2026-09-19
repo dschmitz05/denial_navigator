@@ -215,6 +215,10 @@ pub async fn store_analysis(
         }
     }
 
+    // Raw prompt/response text can carry PHI (a claim reference, payer policy
+    // excerpts). Persist it only when explicitly enabled; otherwise store NULL
+    // and keep just the structured, redacted result (plan §17.3, §16.4).
+    let store_raw = state.config.store_raw_ai_artifacts;
     let row = sqlx::query(
         "INSERT INTO ai_analyses \
             (denial_id, claim_id, playbook_id, model_name, provider_name, provider_version, prompt_template_version, \
@@ -222,14 +226,14 @@ pub async fn store_analysis(
              system_prompt_template, raw_prompt, raw_response, \
              explanation, denial_category, required_action, root_cause_summary, action_plan, steps, \
              needs_appeal, draft_appeal_letter, confidence_score) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::jsonb, $19::jsonb, \
-                 $20, $21, $22) \
-         RETURNING id, denial_id, claim_id, model_name, provider_name, provider_version, prompt_template_version, \
-             prompt_tokens, completion_tokens, \
-             total_tokens, system_prompt_template, raw_prompt, raw_response, explanation, \
-             denial_category, root_cause_summary, required_action, action_plan, steps, \
-             needs_appeal, draft_appeal_letter, confidence_score::float8 AS confidence_score, \
-             created_at, updated_at",
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::jsonb, $19::jsonb, \
+                  $20, $21, $22) \
+          RETURNING id, denial_id, claim_id, model_name, provider_name, provider_version, prompt_template_version, \
+              prompt_tokens, completion_tokens, \
+              total_tokens, system_prompt_template, raw_prompt, raw_response, explanation, \
+              denial_category, root_cause_summary, required_action, action_plan, steps, \
+              needs_appeal, draft_appeal_letter, confidence_score::float8 AS confidence_score, \
+              created_at, updated_at",
     )
     .bind(denial_id)
     .bind(claim_id)
@@ -242,8 +246,8 @@ pub async fn store_analysis(
     .bind(a.completion_tokens)
     .bind(a.total_tokens)
     .bind(&a.prompt_template_version)
-    .bind(&a.raw_prompt)
-    .bind(&a.raw_response)
+    .bind(if store_raw { Some(&a.raw_prompt) } else { None })
+    .bind(if store_raw { Some(&a.raw_response) } else { None })
     .bind(get_str("explanation"))
     .bind(get_str("denial_category"))
     .bind(get_str("required_action"))
@@ -312,7 +316,6 @@ async fn generate_analysis_for_request(
         .try_get("claim_id")
         .map_err(|e| AppError::Internal(e.to_string()))?;
     let claim_number: String = denial.try_get("claim_number").unwrap_or_default();
-    let patient_name: Option<String> = denial.try_get("patient_name").ok().flatten();
     let payer_name: String = denial.try_get("payer_name").unwrap_or_default();
     let cpt_code: Option<String> = denial.try_get("cpt_code").ok().flatten();
     let carc_code: Option<String> = denial.try_get("carc_code").ok().flatten();
@@ -485,10 +488,11 @@ async fn generate_analysis_for_request(
             "denial",
             Some(&request.denial_id),
             principal.user_id.as_deref(),
+            // No patient name: an analysis audit entry records *which* claim
+            // was analyzed without re-storing PHI (plan §8.10, §16.5).
             &serde_json::json!({
                 "username": principal.username,
                 "claim_number": claim_number,
-                "patient_name": patient_name,
                 "carc_code": carc_code,
                 "cpt_code": cpt_code,
                 "policies_retrieved": policy_texts.len(),

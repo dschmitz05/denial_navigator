@@ -119,48 +119,56 @@ pub fn classify(method: &str, path: &str) -> (String, String, Option<String>) {
     )
 }
 
+/// Human-readable, non-PHI identifiers for the record being touched. Patient
+/// names are deliberately excluded: an audit trail must say *which* record was
+/// touched without re-storing PHI (plan §8.10, §16.5).
 const LABEL_COLUMNS: &[(&str, &[&str])] = &[
-    ("claim", &["claim_number", "patient_name"]),
-    (
-        "denial",
-        &["claim_number", "patient_name", "cpt_code", "carc_code"],
-    ),
-    (
-        "appeal",
-        &["claim_number", "patient_name", "resolution_type"],
-    ),
-    ("analysis", &["claim_number", "patient_name"]),
+    ("claim", &["claim_number"]),
+    ("denial", &["claim_number", "cpt_code", "carc_code"]),
+    ("appeal", &["claim_number", "resolution_type"]),
+    ("analysis", &["claim_number"]),
     ("user", &["target_username"]),
     ("knowledge_doc", &["document_title"]),
 ];
 
+/// The caller's active organization, used to scope every PHI-adjacent label
+/// lookup. A cross-tenant UUID probe must not surface another organization's
+/// record, so the label is only resolved within the caller's own org.
+const CALLER_ORG: &str = "(SELECT organization_id FROM organization_memberships \
+     WHERE user_id = $2::uuid ORDER BY created_at ASC LIMIT 1)";
+
+/// Label queries are scoped to the caller's organization (via `$2`) so a
+/// cross-tenant UUID probe resolves to no row rather than another tenant's
+/// record. `user` is the only unscoped label: a username is not PHI and user
+/// management is already admin-gated.
 fn label_query(resource_type: &str) -> Option<&'static str> {
     match resource_type {
         "claim" => Some(
-            "SELECT claim_number AS claim_number, patient_name \
-             FROM claims WHERE id = $1::uuid",
+            "SELECT claim_number FROM claims \
+             WHERE id = $1::uuid AND organization_id = ",
         ),
         "denial" => Some(
-            "SELECT c.claim_number, c.patient_name, d.cpt_code, d.carc_code \
+            "SELECT c.claim_number, d.cpt_code, d.carc_code \
              FROM denials d JOIN claims c ON c.id = d.claim_id \
-             WHERE d.id = $1::uuid",
+             WHERE d.id = $1::uuid AND c.organization_id = ",
         ),
         "appeal" => Some(
-            "SELECT c.claim_number, c.patient_name, aq.resolution_type \
+            "SELECT c.claim_number, aq.resolution_type \
              FROM appeals_queue aq \
              JOIN denials d ON d.id = aq.denial_id \
              JOIN claims c ON c.id = d.claim_id \
-             WHERE aq.id = $1::uuid",
+             WHERE aq.id = $1::uuid AND c.organization_id = ",
         ),
         "analysis" => Some(
-            "SELECT c.claim_number, c.patient_name \
+            "SELECT c.claim_number \
              FROM ai_analyses aa JOIN claims c ON c.id = aa.claim_id \
-             WHERE aa.id = $1::uuid",
+             WHERE aa.id = $1::uuid AND c.organization_id = ",
         ),
         "user" => Some("SELECT username AS target_username FROM users WHERE id = $1::uuid"),
-        "knowledge_doc" => {
-            Some("SELECT title AS document_title FROM knowledge_documents WHERE id = $1::uuid")
-        }
+        "knowledge_doc" => Some(
+            "SELECT title AS document_title FROM knowledge_documents \
+             WHERE id = $1::uuid AND organization_id = ",
+        ),
         _ => None,
     }
 }
@@ -172,15 +180,35 @@ async fn label_for(
     pool: &PgPool,
     resource_type: &str,
     resource_id: Option<&str>,
+    user_id: Option<&str>,
 ) -> serde_json::Value {
     let Some(id) = resource_id else {
         return serde_json::json!({});
     };
-    let Some(query) = label_query(resource_type) else {
+    let Some(base) = label_query(resource_type) else {
         return serde_json::json!({});
     };
 
-    let row = match sqlx::query(query).bind(id).fetch_optional(pool).await {
+    // Only `user` is unscoped; every other label must be resolved within the
+    // caller's own organization. Without a caller we cannot scope it, so we
+    // refuse to label rather than risk surfacing another tenant's record.
+    let org_scoped = resource_type != "user";
+    if org_scoped && user_id.is_none() {
+        return serde_json::json!({});
+    }
+
+    let query = if org_scoped {
+        format!("{base}{CALLER_ORG}")
+    } else {
+        base.to_string()
+    };
+
+    let mut q = sqlx::query(&query).bind(id);
+    if org_scoped {
+        q = q.bind(user_id);
+    }
+
+    let row = match q.fetch_optional(pool).await {
         Ok(Some(row)) => row,
         Ok(None) => return serde_json::json!({"record": "no longer exists"}),
         Err(e) => {
@@ -271,7 +299,6 @@ pub async fn audit(State(state): State<AuditState>, req: Request, next: Next) ->
     {
         let method = req.method().to_string();
         let path = req.uri().path().to_string();
-        let query = req.uri().query().map(|s| s.to_string());
         let user_agent = req
             .headers()
             .get(header::USER_AGENT)
@@ -341,17 +368,22 @@ pub async fn audit(State(state): State<AuditState>, req: Request, next: Next) ->
         );
 
         if resource_id.is_some() {
-            if let serde_json::Value::Object(m) =
-                label_for(&pool, &resource_type, resource_id.as_deref()).await
+            if let serde_json::Value::Object(m) = label_for(
+                &pool,
+                &resource_type,
+                resource_id.as_deref(),
+                user_id.as_deref(),
+            )
+            .await
             {
                 for (k, v) in m {
                     details.insert(k, v);
                 }
             }
         }
-        if let Some(q) = query {
-            details.insert("query".into(), serde_json::json!(q));
-        }
+        // The raw query string is intentionally NOT persisted: a filter or
+        // search query can carry PHI (e.g. a patient name), and the `path`
+        // above already identifies the endpoint.
         if username != "anonymous" {
             details.insert("username".into(), serde_json::json!(username));
         } else if user_id.is_none() {
