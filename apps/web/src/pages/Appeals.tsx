@@ -287,6 +287,10 @@ export default function Appeals() {
               {letterData && (
                 <div>
                   <h4 style={{ marginBottom: 8 }}>📝 Appeal Letter Preview</h4>
+                  <p style={{ color: 'var(--gray-500)', fontSize: '0.8rem', margin: '0 0 10px' }}>
+                    AI-generated and <strong>advisory only</strong> — the AI can be wrong.
+                    Review the letter against the claim and payer rules before sending.
+                  </p>
                   {!letterData.draft_appeal_letter && !letterData.needs_appeal && letterData.explanation ? (
                     <div className="callout callout-info">
                       <p style={{ fontWeight: 600, marginBottom: 8 }}>⚠️ This denial does not require an appeal.</p>

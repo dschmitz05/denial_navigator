@@ -12,7 +12,7 @@
 | Question | Answer |
 |----------|--------|
 | **Does it function as intended?** | **Mostly, yes.** The core vertical slice (835/837 ingest → normalized claims → denial queue → CARC/RARC display → deterministic + AI recommendation → resolution → analytics) is built and working. Workspace compiles; 33/33 Rust tests pass; all 14 web pages render. |
-| **Is it safe to use in a hospital as-is?** | **No — not yet.** There are **4 Critical** defects that would leak PHI across tenants or persist it without bound, plus a set of High gaps (no advisory disclosures, no MFA-gated PHI view, thin threat model/checklist). The *foundation* (RBAC, org scoping, PHI-bounded logging, prompt-injection defense, non-root deployment) is genuinely sound; the gaps are real but fixable. |
+| **Is it safe to use in a hospital as-is?** | **No — not yet.** The **4 Critical** defects (cross-tenant PHI in audit, PHI in audit metadata, silent claim merge, unbounded AI prompt storage) and 4 High items (advisory disclosures, PHI disclosure levels, cross-tenant digest, workflow state machine) are now **fixed** (2026-09-18). Remaining High gaps (no `AiProvider` abstraction, role-set mismatch, no metrics, thin threat model/checklist, no E2E) and the §6 plan gaps are still open. The *foundation* (RBAC, org scoping, PHI-bounded logging, prompt-injection defense, non-root deployment) is genuinely sound; the gaps are real but fixable. |
 | **Is `plan.md` complete?** | **No.** The plan omits several controls a hospital deployment actually depends on (see §6). Several implemented divergences were never recorded back into the plan or an ADR. |
 
 **Bottom line:** the deterministic, AI-off revenue-cycle workflow is production-usable *for a single trusted organization*. It is **not** safe to expose to real PHI in a multi-tenant or hospital setting until the 4 Critical items in §3 are fixed.
@@ -41,7 +41,7 @@
 
 ### 🔴 Critical — must fix before any real PHI
 
-> **Status (2026-09-18): C1–C4 are fixed.** Each item below carries a ✅ note describing the remediation. The 4 High items (H1–H4) remain open.
+> **Status (2026-09-18): C1–C4 are fixed, and High items H1, H2, H4, H5 are fixed.** Each item below carries a ✅ note describing the remediation. The remaining High items (H3, H6–H10) are still open.
 
 **C1. Cross-tenant PHI leak via the audit label lookup.** ✅
 `crates/audit/src/lib.rs:137-165` — `label_query()` fetches `claim_number` **and `patient_name`** from `claims`/`denials`/`appeals_queue`/`ai_analyses` with **no `organization_id` filter**. The audit row itself is attributed to the *requester's* org (`record()`, `lib.rs:231-236` derives `organization_id` from the caller's membership), but the `details` payload is populated by `label_for()` (`lib.rs:171-215`) from the unscoped lookup. **Effect:** an authenticated user in Org A who probes `/api/v1/claims/<Org-B-uuid>` gets a 404 from the (correctly scoped) handler, *and* Org B's `claim_number` + `patient_name` is written into an audit row readable by Org A's auditors. A direct broken-object-authorization / cross-tenant PHI leak. Violates plan §0.6, §8.10, §16.1 (IDOR), §16.5.
@@ -63,13 +63,15 @@
 
 > **Fix:** `raw_prompt`/`raw_response` are now bound as `NULL` unless `AI_STORE_RAW_ARTIFACTS=true` (new `store_raw_ai_artifacts` config, default **false**), so the secure default stores only the structured, redacted result. Gated in the gateway's `store_analysis`, which covers both the LLM service and the deterministic fallback. A deliberate, admin-only, org-scoped prune was added: `GET/POST /api/v1/retention/ai[\/prune]` (mirrors the audit-log prune: retention floor, `confirm=true`, self-auditing).
 
-### 🟠 High — material gaps vs. the plan
+ ### 🟠 High — material gaps vs. the plan
 
-- **H1. No user-facing AI-safety disclosures** (plan §17.1). No "advisory only / validate before acting / AI can be wrong" messaging anywhere in `apps/web/src` (grep: zero hits).
-- **H2. PHI disclosure levels diverge and are env-only.** Plan §12.2: `none` / `deidentified` / `limited_phi` / `full_context`, **default `deidentified`**. Code: `none` / `limited` / `full` (`crates/ai/src/prompt.rs:6-19`), **default `Limited`** (`prompt.rs:194`), set by env var, not admin-configurable. *Mitigant:* the prompt builder sends **no patient name or DOB** — only the claim reference (redacted at `limited`/`none`) + CPT/ICD/CARC/RARC + payer + retrieved policies.
+> **Status (2026-09-18): H1, H2, H4, H5 are fixed** (✅ notes below). H3, H6–H10 remain open.
+
+- **H1. No user-facing AI-safety disclosures** (plan §17.1). No "advisory only / validate before acting / AI can be wrong" messaging anywhere in `apps/web/src` (grep: zero hits). ✅ **Fixed:** an advisory-only disclosure ("AI-generated and **advisory only** — the AI can be wrong. Verify against the claim and payer rules before acting.") is now shown on the four AI-surface pages: `Denials`, `Worklist`, `Claims`, `Appeals`.
+- **H2. PHI disclosure levels diverge and are env-only.** Plan §12.2: `none` / `deidentified` / `limited_phi` / `full_context`, **default `deidentified`**. Code: `none` / `limited` / `full` (`crates/ai/src/prompt.rs:6-19`), **default `Limited`** (`prompt.rs:194`), set by env var, not admin-configurable. *Mitigant:* the prompt builder sends **no patient name or DOB** — only the claim reference (redacted at `limited`/`none`) + CPT/ICD/CARC/RARC + payer + retrieved policies. ✅ **Fixed:** the enum is now the four plan levels (`none`/`deidentified`/`limited_phi`/`full_context`, legacy names still parse), the default is `deidentified`, and the level is **admin-configurable** — stored in a new `system_settings` table (migration 030), set via admin-only `GET/PUT /api/v1/settings/phi-disclosure`, and passed per-request to the RAG engine which applies it (falling back to its configured default).
 - **H3. No `AiProvider` / `RecommendationProvider` abstractions** (plan §5.5/§12). Only `EmbeddingProvider` exists; the chat path is a monolithic `LlamaClient`.
-- **H4. Deadline-digest job leaks across tenants.** `crates/api-gateway/src/routes/notifications.rs:253-281` — the overdue-denial `COUNT/SUM` query and the `SELECT id FROM users WHERE role = ANY(…)` manager query are **both unscoped by org**, then notifications are fanned out to **all** orgs' managers with a **cross-org aggregate** count/amount. (Lower severity than C1 — aggregate figures, not patient names — but still a cross-tenant information bleed and mis-targeted notifications.)
-- **H5. Workflow state machine is not enforced.** `crates/api-gateway/src/routes/denials.rs:702-749` — `update_denial` accepts **any** `CHECK`-valid status from **any** state. `denials.status` is a flat 8-value set (`open, analyzed, in_progress, in_appeal, appealed, overruled, resolved, written_off`), not the §30 state machine. Transitions are neither validated nor individually audited.
+- **H4. Deadline-digest job leaks across tenants.** `crates/api-gateway/src/routes/notifications.rs:253-281` — the overdue-denial `COUNT/SUM` query and the `SELECT id FROM users WHERE role = ANY(…)` manager query are **both unscoped by org**, then notifications are fanned out to **all** orgs' managers with a **cross-org aggregate** count/amount. (Lower severity than C1 — aggregate figures, not patient names — but still a cross-tenant information bleed and mis-targeted notifications.) ✅ **Fixed:** `generate_digests` now iterates per-organization; the orphan-denial aggregate joins `claims` and is scoped by `c.organization_id`, and the manager fan-out is scoped via `organization_memberships` to the same org's manager-role members.
+- **H5. Workflow state machine is not enforced.** `crates/api-gateway/src/routes/denials.rs:702-749` — `update_denial` accepts **any** `CHECK`-valid status from **any** state. `denials.status` is a flat 8-value set (`open, analyzed, in_progress, in_appeal, appealed, overruled, resolved, written_off`), not the §30 state machine. Transitions are neither validated nor individually audited. ✅ **Fixed:** `update_denial` now fetches the current status (org-scoped), validates the transition against an `allowed_transitions` map, rejects invalid moves with `409 Conflict`, and records each transition in the denial audit log.
 - **H6. Role set does not match plan §2.2.** `database/init.sql:353` allows only 5 roles (`billing_specialist, billing_manager, rcm_director, admin, auditor`). The plan's `system_admin`, `security_admin`, `revenue_cycle_manager`, `coding_specialist`, `read_only` are absent.
 - **H7. No OpenTelemetry / metrics** (plan §20). Only structured logs + `/health/live` + `/health/ready`.
 - **H8. Threat model is a 24-line summary** (`docs/threat-model.md`) and **does not individually address** the §16.1 enumerated threats (IDOR, cross-tenant, SQLi/XSS/CSRF, SSRF, prompt injection, malicious admin, supply chain, object-store/backup/export exposure, excessive retention).
@@ -109,17 +111,17 @@
 | §9.4 | Scored correlation, no silent merge | ✅ | Fixed — scored matcher, ambiguous matches not merged (C3) |
 | §17.3 | Don't store full prompts by default | ✅ | Fixed — gated behind `AI_STORE_RAW_ARTIFACTS` (default off) (C4) |
 | §16.4 | Retention for AI records | ✅ | Fixed — admin-only `/retention/ai` prune (C4) |
-| §17.1 | User-facing advisory disclosures | ❌ | Absent from UI (H1) |
+| §17.1 | User-facing advisory disclosures | ✅ | Fixed — advisory-only disclosure on the 4 AI-surface pages (H1) |
 | §2.2 | 7 RBAC roles | ❌ | 5 roles, different names (H6) |
 | §20 | OpenTelemetry metrics | ❌ | None (H7) |
 | §21.2/§21.4 | Playwright E2E + happy path | ❌ | Shell-script only (H10) |
 | §5.5/§12 | `AiProvider`/`RecommendationProvider` | ❌ | Only `EmbeddingProvider` (H3) |
-| §12.2 | PHI levels, default `deidentified` | ⚠️ | `none/limited/full`, default `limited`, env-only (H2) |
+| §12.2 | PHI levels, default `deidentified` | ✅ | Fixed — 4 plan levels, default `deidentified`, admin-configurable (H2) |
 | §10.2 | Configurable root-cause taxonomy | ⚠️ | Hardcoded 10-value CHECK (M2) |
 | §13.2 | Request IDs / idempotency / error codes / optimistic concurrency | ⚠️ | Cursor pagination + org scoping ✅; rest absent (M3) |
 | §16.1 | Threat model covers enumerated threats | ⚠️ | 24-line summary (H8) |
 | §18 | Durable Postgres job queue | ⚠️ | In-process `tokio::spawn`, terminal on failure |
-| §30 | Enforced, audited workflow state machine | ⚠️ | Flat status set, no transition validation (H5) |
+| §30 | Enforced, audited workflow state machine | ✅ | Fixed — `allowed_transitions` validation + per-transition audit (H5) |
 | §7 | Repository layout | ⚠️ | No `packages/`, migrations under `database/`, extra crates |
 | §8 | Normalized domain model | ⚠️ | Service lines/adjustments/remarks not normalized (M1) |
 | §22.1 | justfile command set | ⚠️ | Missing several commands (M9) |
@@ -134,7 +136,7 @@
 
 ## 5. Hospital-use (HIPAA) readiness
 
-The code's *technical* foundation is appropriate for a covered-entity deployment: RBAC + org isolation, PHI-bounded logging, prompt-injection defense, non-root hardened containers, backup/restore, SBOM/Trivy. The four **Critical** defects (C1–C4) are now **fixed** (2026-09-18): audit label lookups are org-scoped and PHI-free, the 837→835 correlation is a scored matcher that never silently merges ambiguous claims, and AI raw prompts/responses are stored only when explicitly enabled with an admin-only prune. The four **High** items (H1–H4) and the §6 plan gaps remain open, so until those are closed and implemented this should still be treated as a **single-trusted-tenant, synthetic-data-only** system.
+The code's *technical* foundation is appropriate for a covered-entity deployment: RBAC + org isolation, PHI-bounded logging, prompt-injection defense, non-root hardened containers, backup/restore, SBOM/Trivy. The four **Critical** defects (C1–C4) are now **fixed** (2026-09-18): audit label lookups are org-scoped and PHI-free, the 837→835 correlation is a scored matcher that never silently merges ambiguous claims, and AI raw prompts/responses are stored only when explicitly enabled with an admin-only prune. Four of the **High** items are also now **fixed** (2026-09-18): AI-safety advisory disclosures are shown on the AI surfaces (H1), the PHI disclosure level uses the four plan levels with a `deidentified` default and is admin-configurable (H2), the deadline-digest job is org-scoped (H4), and the workflow state machine is validated and audited (H5). The remaining High items (H3, H6–H10) and the §6 plan gaps are still open, so until those are closed and implemented this should still be treated as a **single-trusted-tenant, synthetic-data-only** system.
 
 ---
 
@@ -162,16 +164,16 @@ The plan is strong on *what to build* and *deterministic-before-generative*, but
 ## 7. Prioritized remediation
 
 **Do first — before any real PHI:**
-1. Scope `label_query()` by `organization_id` and **stop persisting `patient_name`/raw `query`** into `audit_log.details`; use non-PHI labels (resource id + type only). `crates/audit/src/lib.rs:122-165,343-359`.
-2. Gate `raw_prompt`/`raw_response` storage behind a deployment flag (default off, or only when disclosure is `none`/`deidentified`) and add retention/prune for `ai_analyses`. `crates/api-gateway/src/routes/analyses.rs:219-246`.
-3. Rebuild 837→835 correlation as a **scored deterministic matcher** using the §9.4 fields; store confidence + matching reasons; add an explicit ambiguous-match confirmation flow (or stop auto-merging below a threshold). `crates/api-gateway/src/routes/ingestion.rs:373-392`.
-4. Scope the deadline-digest job to the requesting organization. `crates/api-gateway/src/routes/notifications.rs:253-281`.
-5. Add the **AI advisory-only disclosures** to the Recommendation UI and Denial Detail (H1).
+1. ✅ Scope `label_query()` by `organization_id` and **stop persisting `patient_name`/raw `query`** into `audit_log.details`; use non-PHI labels (resource id + type only). `crates/audit/src/lib.rs:122-165,343-359`.
+2. ✅ Gate `raw_prompt`/`raw_response` storage behind a deployment flag (default off, or only when disclosure is `none`/`deidentified`) and add retention/prune for `ai_analyses`. `crates/api-gateway/src/routes/analyses.rs:219-246`.
+3. ✅ Rebuild 837→835 correlation as a **scored deterministic matcher** using the §9.4 fields; store confidence + matching reasons; add an explicit ambiguous-match confirmation flow (or stop auto-merging below a threshold). `crates/api-gateway/src/routes/ingestion.rs:373-392`.
+4. ✅ Scope the deadline-digest job to the requesting organization. `crates/api-gateway/src/routes/notifications.rs:253-281`.
+5. ✅ Add the **AI advisory-only disclosures** to the Recommendation UI and Denial Detail (H1).
 
 **High value:**
 6. Add **Playwright** E2E for the §21.4 happy path; wire `scripts/test_organization_isolation.sh` into CI.
-7. Introduce `AiProvider`/`RecommendationProvider` traits; make PHI level **admin-configurable** with a `deidentified` default (H2/H3).
-8. Enforce the §30 workflow state machine in `update_denial` and audit each transition (H5).
+7. ✅ (PHI part) Make PHI level **admin-configurable** with a `deidentified` default (H2). ⬜ (traits) Introduce `AiProvider`/`RecommendationProvider` traits (H3).
+8. ✅ Enforce the §30 workflow state machine in `update_denial` and audit each transition (H5).
 9. Align the role set with §2.2 (or document the deviation via an ADR) (H6).
 10. Add request IDs, machine-readable error codes, idempotency keys; use `version` for optimistic concurrency (M3).
 11. Make the eval harness **offline/synthetic** (stop reading the live DB).

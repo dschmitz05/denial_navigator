@@ -383,6 +383,7 @@ async fn generate_analysis_for_request(
             "rarc_code": rarc_code.as_deref().unwrap_or(""),
             "rarc_definition": rarc_description.as_deref().unwrap_or("Unknown"),
             "retrieved_policies": policy_texts,
+            "phi_disclosure_level": crate::routes::settings::current_level(&state.pool).await,
         }))
         .await?;
     let allowed_evidence_ids: Vec<String> = policy_texts

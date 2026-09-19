@@ -362,6 +362,7 @@ fn permissions(resource: &str) -> Option<(&'static [&'static str], &'static [&'s
         "system" => (ALL_ROLES, NOBODY),
         "retention" => (ADMIN_ONLY, ADMIN_ONLY),
         "notifications" => (ALL_ROLES, ALL_ROLES),
+        "settings" => (ADMIN_ONLY, ADMIN_ONLY),
         _ => return None,
     })
 }

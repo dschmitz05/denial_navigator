@@ -71,9 +71,9 @@ impl Config {
             vector_search_enabled: env_bool("VECTOR_SEARCH_ENABLED", true),
             phi_disclosure_level: PhiDisclosureLevel::parse(&env_or(
                 "AI_PHI_DISCLOSURE_LEVEL",
-                "limited",
+                "deidentified",
             ))
-            .unwrap_or(PhiDisclosureLevel::Limited),
+            .unwrap_or(PhiDisclosureLevel::DEFAULT),
             internal_service_api_key: env_required_secret("RAG_INTERNAL_API_KEY"),
             cors_origins: env_or("CORS_ORIGINS", "")
                 .split(',')
@@ -308,6 +308,11 @@ struct PromptRequest {
     rarc_code: String,
     rarc_definition: String,
     retrieved_policies: Vec<String>,
+    /// Optional per-request override of the configured disclosure level, set by
+    /// the gateway from the admin-configured value. Falls back to the
+    /// service's configured level when absent or unparseable.
+    #[serde(default)]
+    phi_disclosure_level: Option<String>,
 }
 
 // ── Handlers ──
@@ -502,7 +507,11 @@ async fn build_prompt(
         rarc_code: req.rarc_code,
         rarc_definition: req.rarc_definition,
         retrieved_policies: req.retrieved_policies,
-        phi_disclosure_level: state.cfg.phi_disclosure_level,
+        phi_disclosure_level: req
+            .phi_disclosure_level
+            .as_deref()
+            .and_then(PhiDisclosureLevel::parse)
+            .unwrap_or(state.cfg.phi_disclosure_level),
     };
     let (system, user) = build_denial_prompt(&input);
     Json(json!({ "system": system, "user": user }))

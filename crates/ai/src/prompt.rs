@@ -2,30 +2,60 @@
 //! Ported from `rag-engine/prompts/denial_analysis.py`.
 
 /// Controls the claim identifier included in externally sent prompts.
+///
+/// The four levels match plan §12.2. `Deidentified` is the default: it withholds
+/// the claim reference (a quasi-identifier) entirely. `LimitedPhi` exposes a
+/// masked reference; `FullContext` exposes the full reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhiDisclosureLevel {
-    Full,
-    Limited,
+    FullContext,
+    LimitedPhi,
+    Deidentified,
     None,
 }
 
 impl PhiDisclosureLevel {
+    /// The plan §12.2 default: withhold the claim reference.
+    pub const DEFAULT: Self = Self::Deidentified;
+
+    /// Parse a level name, accepting both the plan names
+    /// (`none`/`deidentified`/`limited_phi`/`full_context`) and the legacy names
+    /// (`none`/`limited`/`full`) so existing env values keep working.
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "full" => Some(Self::Full),
-            "limited" => Some(Self::Limited),
             "none" => Some(Self::None),
+            "deidentified" | "limited" => Some(Self::Deidentified),
+            "limited_phi" => Some(Self::LimitedPhi),
+            "full_context" | "full" => Some(Self::FullContext),
             _ => None,
         }
     }
 
+    /// The set of accepted names, for validation of admin-configured values.
+    pub fn names() -> &'static [&'static str] {
+        &["none", "deidentified", "limited_phi", "full_context"]
+    }
+
     fn claim_reference(self, claim_id: &str) -> String {
         match self {
-            Self::Full => claim_id.to_string(),
-            Self::Limited => "[claim reference withheld]".to_string(),
+            Self::FullContext => claim_id.to_string(),
+            Self::LimitedPhi => mask_reference(claim_id),
+            Self::Deidentified => "[claim reference withheld]".to_string(),
             Self::None => "[not disclosed]".to_string(),
         }
     }
+}
+
+/// Mask a claim reference for `LimitedPhi`: keep a short prefix and suffix so the
+/// value is correlable by the model without being a fully usable identifier.
+fn mask_reference(claim_id: &str) -> String {
+    let bytes = claim_id.as_bytes();
+    if bytes.len() <= 6 {
+        return "[masked]".to_string();
+    }
+    let head = String::from_utf8_lossy(&bytes[..4]);
+    let tail = String::from_utf8_lossy(&bytes[bytes.len() - 2..]);
+    format!("{head}…{tail}")
 }
 
 /// The fields needed to build a denial analysis prompt. Grouped into a struct
@@ -191,8 +221,14 @@ mod tests {
             rarc_code: "".into(),
             rarc_definition: "".into(),
             retrieved_policies: vec![policy.into()],
-            phi_disclosure_level: PhiDisclosureLevel::Limited,
+            phi_disclosure_level: PhiDisclosureLevel::Deidentified,
         }
+    }
+
+    fn input_with(level: PhiDisclosureLevel) -> DenialPromptInput {
+        let mut i = input("policy");
+        i.phi_disclosure_level = level;
+        i
     }
 
     #[test]
@@ -213,10 +249,63 @@ mod tests {
     }
 
     #[test]
-    fn limited_disclosure_omits_the_claim_reference() {
+    fn deidentified_disclosure_omits_the_claim_reference() {
         let (_, user) = build_denial_prompt(&input("policy"));
 
         assert!(!user.contains("C-1"));
         assert!(user.contains("[claim reference withheld]"));
+    }
+
+    #[test]
+    fn full_context_disclosure_includes_the_claim_reference() {
+        let (_, user) = build_denial_prompt(&input_with(PhiDisclosureLevel::FullContext));
+        assert!(user.contains("C-1"));
+    }
+
+    #[test]
+    fn none_disclosure_withholds_the_claim_reference() {
+        let (_, user) = build_denial_prompt(&input_with(PhiDisclosureLevel::None));
+        assert!(!user.contains("C-1"));
+        assert!(user.contains("[not disclosed]"));
+    }
+
+    #[test]
+    fn limited_phi_masks_the_claim_reference() {
+        let mut i = input_with(PhiDisclosureLevel::LimitedPhi);
+        i.claim_id = "CLM-1234-5678".into();
+        let (_, user) = build_denial_prompt(&i);
+        // The full reference must not appear; a masked form must.
+        assert!(!user.contains("CLM-1234-5678"));
+        assert!(user.contains("CLM-…78"));
+    }
+
+    #[test]
+    fn parse_accepts_plan_and_legacy_names() {
+        assert_eq!(
+            PhiDisclosureLevel::parse("deidentified"),
+            Some(PhiDisclosureLevel::Deidentified)
+        );
+        assert_eq!(
+            PhiDisclosureLevel::parse("limited_phi"),
+            Some(PhiDisclosureLevel::LimitedPhi)
+        );
+        assert_eq!(
+            PhiDisclosureLevel::parse("full_context"),
+            Some(PhiDisclosureLevel::FullContext)
+        );
+        assert_eq!(
+            PhiDisclosureLevel::parse("none"),
+            Some(PhiDisclosureLevel::None)
+        );
+        // Legacy names keep working.
+        assert_eq!(
+            PhiDisclosureLevel::parse("limited"),
+            Some(PhiDisclosureLevel::Deidentified)
+        );
+        assert_eq!(
+            PhiDisclosureLevel::parse("full"),
+            Some(PhiDisclosureLevel::FullContext)
+        );
+        assert_eq!(PhiDisclosureLevel::parse("bogus"), None);
     }
 }

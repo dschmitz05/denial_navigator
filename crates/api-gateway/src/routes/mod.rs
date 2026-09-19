@@ -11,6 +11,7 @@ pub mod notifications;
 pub mod playbooks;
 pub mod reference;
 pub mod retention;
+pub mod settings;
 pub mod system;
 pub mod users;
 
@@ -34,6 +35,7 @@ pub fn api_router() -> Router<AppState> {
         .nest("/playbooks", playbooks::router())
         .nest("/system", system::router())
         .nest("/retention", retention::router())
+        .nest("/settings", settings::router())
 }
 
 #[cfg(test)]

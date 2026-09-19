@@ -699,6 +699,72 @@ pub async fn get_denial(
     Ok(Json(denial))
 }
 
+/// The denial workflow state machine. `denials.status` is a flat set; this
+/// table is the set of statuses each state may move to. A no-op (same status)
+/// is always allowed. Terminal states can be reopened into active work but not
+/// reset back to the start, and `overruled` is only reachable once an appeal
+/// has been underway (you cannot be overruled from a bare `open` denial).
+fn allowed_transitions(current: &str) -> &'static [&'static str] {
+    match current {
+        "open" => &[
+            "analyzed",
+            "in_progress",
+            "in_appeal",
+            "appealed",
+            "resolved",
+            "written_off",
+        ],
+        "analyzed" => &[
+            "open",
+            "in_progress",
+            "in_appeal",
+            "appealed",
+            "overruled",
+            "resolved",
+            "written_off",
+        ],
+        "in_progress" => &[
+            "open",
+            "analyzed",
+            "in_appeal",
+            "appealed",
+            "overruled",
+            "resolved",
+            "written_off",
+        ],
+        "in_appeal" => &[
+            "open",
+            "analyzed",
+            "in_progress",
+            "appealed",
+            "overruled",
+            "resolved",
+            "written_off",
+        ],
+        "appealed" => &[
+            "open",
+            "analyzed",
+            "in_progress",
+            "in_appeal",
+            "overruled",
+            "resolved",
+            "written_off",
+        ],
+        "overruled" => &[
+            "open",
+            "analyzed",
+            "in_progress",
+            "in_appeal",
+            "appealed",
+            "resolved",
+            "written_off",
+        ],
+        "resolved" => &["in_progress", "in_appeal", "appealed", "overruled"],
+        "written_off" => &["in_progress", "in_appeal", "appealed", "overruled"],
+        _ => &[],
+    }
+}
+
 pub async fn update_denial(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -708,9 +774,33 @@ pub async fn update_denial(
     let organization_id = organization_id(&principal)?;
     let mut sets = Vec::new();
 
-    if let Some(ref status) = body.status {
+    // Enforce the workflow state machine before writing: read the current
+    // status (org-scoped) and reject a transition the machine does not allow,
+    // so a denial cannot be teleported to an arbitrary state.
+    let (status_changed, status_from) = if let Some(ref status) = body.status {
+        let current: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM denials WHERE id = $1 \
+             AND claim_id IN (SELECT id FROM claims WHERE organization_id = $2)",
+        )
+        .bind(denial_id)
+        .bind(organization_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(AppError::Db)?;
+
+        let current = current.ok_or(AppError::NotFound)?;
+        let changed = current != *status;
+        if changed && !allowed_transitions(&current).contains(&status.as_str()) {
+            return Err(AppError::Conflict(format!(
+                "Invalid denial status transition: {current} -> {status}"
+            )));
+        }
         sets.push(format!("status = ${}", sets.len() + 1));
-    }
+        (changed, if changed { Some(current) } else { None })
+    } else {
+        (false, None)
+    };
+
     if body.appeal_deadline.is_some() {
         sets.push(format!("appeal_deadline = ${}", sets.len() + 1));
     }
@@ -745,6 +835,23 @@ pub async fn update_denial(
         .map_err(AppError::Db)?
         .ok_or(AppError::NotFound)?;
 
+    // Individually audit each status transition (who, from -> to, when).
+    if status_changed {
+        let to = body.status.clone().unwrap_or_default();
+        let from = status_from.unwrap_or_default();
+        denial_audit::record(
+            &state.pool,
+            "denial_status_changed",
+            "denial",
+            Some(&denial_id.to_string()),
+            principal.user_id.as_deref(),
+            &serde_json::json!({ "from": from, "to": to }),
+            None,
+            None,
+        )
+        .await;
+    }
+
     Ok(Json(row_to_json(&row)))
 }
 
@@ -763,4 +870,77 @@ pub fn router() -> Router<AppState> {
             get(list_appeal_windows).put(set_appeal_window),
         )
         .route("/{denial_id}", get(get_denial).patch(update_denial))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::allowed_transitions;
+
+    #[test]
+    fn open_cannot_jump_to_overruled() {
+        // You cannot be overruled before an appeal has been underway.
+        assert!(!allowed_transitions("open").contains(&"overruled"));
+    }
+
+    #[test]
+    fn open_reaches_normal_forward_states() {
+        for next in [
+            "analyzed",
+            "in_progress",
+            "in_appeal",
+            "appealed",
+            "resolved",
+            "written_off",
+        ] {
+            assert!(
+                allowed_transitions("open").contains(&next),
+                "open -> {next}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_states_cannot_reset_to_start() {
+        for terminal in ["resolved", "written_off"] {
+            assert!(
+                !allowed_transitions(terminal).contains(&"open"),
+                "{terminal} -> open"
+            );
+            assert!(
+                !allowed_transitions(terminal).contains(&"analyzed"),
+                "{terminal} -> analyzed"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_states_can_reopen_into_active_work() {
+        for terminal in ["resolved", "written_off"] {
+            for next in ["in_progress", "in_appeal", "appealed", "overruled"] {
+                assert!(
+                    allowed_transitions(terminal).contains(&next),
+                    "{terminal} -> {next}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn appeal_states_reach_overruled_and_resolved() {
+        for s in ["in_appeal", "appealed"] {
+            assert!(
+                allowed_transitions(s).contains(&"overruled"),
+                "{s} -> overruled"
+            );
+            assert!(
+                allowed_transitions(s).contains(&"resolved"),
+                "{s} -> resolved"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_status_allows_nothing() {
+        assert!(allowed_transitions("bogus").is_empty());
+    }
 }

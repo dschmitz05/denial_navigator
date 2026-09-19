@@ -173,7 +173,11 @@ function ClaimDetails({ claim, onRefresh, refreshing }: { claim: ClaimDetail; on
 
       {analyses.length > 0 && (
         <>
-          <h4 style={{ margin: '16px 0 8px' }}>🤖 AI analyses ({analyses.length})</h4>
+          <h4 style={{ margin: '16px 0 4px' }}>🤖 AI analyses ({analyses.length})</h4>
+          <p style={{ color: 'var(--gray-500)', fontSize: '0.8rem', margin: '0 0 10px' }}>
+            AI-generated and <strong>advisory only</strong> — the AI can be wrong.
+            Verify against the claim and payer rules before acting.
+          </p>
           {analyses.map(a => (
             <div key={a.id} className="card" style={{ marginBottom: 10 }}>
               <div className="card-body">

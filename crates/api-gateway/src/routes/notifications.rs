@@ -249,65 +249,87 @@ pub async fn generate_digests(
         created += result.rows_affected() as i64;
     }
 
-    // ── unowned overdue work goes to managers ──
-    let orphan = sqlx::query(
-        "SELECT COUNT(*) AS n, SUM(d.charge_amount)::float8 AS amount, MIN(d.appeal_deadline) AS oldest \
-           FROM denials d \
-           LEFT JOIN appeals_queue aq ON aq.denial_id = d.id \
-                AND (aq.outcome_status IS NULL \
-                     OR aq.outcome_status NOT IN ('approved','overruled','resolved','denied_again','cancelled')) \
-          WHERE d.appeal_deadline IS NOT NULL \
-            AND d.appeal_deadline < CURRENT_DATE \
-            AND d.status IN ('open', 'analyzed') \
-            AND (aq.id IS NULL OR aq.assigned_user_id IS NULL)",
-    )
-    .fetch_one(&state.pool)
-    .await
-    .map_err(AppError::Db)?;
+    // ── unowned overdue work goes to that org's managers ──
+    // Scoping the aggregate and the fan-out per organization keeps a manager's
+    // escalation from mixing another tenant's overdue counts and amounts.
+    let orgs = sqlx::query("SELECT id FROM organizations WHERE is_active")
+        .fetch_all(&state.pool)
+        .await
+        .map_err(AppError::Db)?;
 
-    let orphan_n: i64 = orphan.try_get("n").unwrap_or(0);
-    if orphan_n > 0 {
-        let oldest: Option<NaiveDate> = orphan.try_get("oldest").ok().flatten();
-        let amount: f64 = orphan
-            .try_get::<Option<f64>, _>("amount")
-            .ok()
-            .flatten()
-            .unwrap_or(0.0);
-        let managers =
-            sqlx::query("SELECT id FROM users WHERE is_active AND role = ANY($1::text[])")
-                .bind(MANAGER_UP.iter().map(|s| s.to_string()).collect::<Vec<_>>())
-                .fetch_all(&state.pool)
-                .await
-                .map_err(AppError::Db)?;
+    for org in &orgs {
+        let org_id: Uuid = org
+            .try_get("id")
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        let title = format!("{orphan_n} overdue denial(s) with nobody assigned");
-        let body = format!(
-            "Oldest deadline {}. {} in denied charges is unowned.",
-            oldest.map(|d| d.to_string()).unwrap_or_default(),
-            money(amount),
-        );
-        let payload = serde_json::json!({
-            "count": orphan_n,
-            "oldest": oldest.map(|d| d.to_string()),
-        });
+        let orphan = sqlx::query(
+            "SELECT COUNT(*) AS n, SUM(d.charge_amount)::float8 AS amount, MIN(d.appeal_deadline) AS oldest \
+               FROM denials d \
+               JOIN claims c ON c.id = d.claim_id \
+               LEFT JOIN appeals_queue aq ON aq.denial_id = d.id \
+                    AND (aq.outcome_status IS NULL \
+                         OR aq.outcome_status NOT IN ('approved','overruled','resolved','denied_again','cancelled')) \
+              WHERE c.organization_id = $1 \
+                AND d.appeal_deadline IS NOT NULL \
+                AND d.appeal_deadline < CURRENT_DATE \
+                AND d.status IN ('open', 'analyzed') \
+                AND (aq.id IS NULL OR aq.assigned_user_id IS NULL)",
+        )
+        .bind(org_id)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(AppError::Db)?;
 
-        for m in &managers {
-            let mid: Uuid = m
-                .try_get("id")
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-            let result = sqlx::query(
-                "INSERT INTO notifications (user_id, kind, title, body, payload) \
-                 VALUES ($1, 'overdue_escalation', $2, $3, $4::jsonb) \
-                 ON CONFLICT (user_id, kind, for_date) DO NOTHING",
+        let orphan_n: i64 = orphan.try_get("n").unwrap_or(0);
+        if orphan_n > 0 {
+            let oldest: Option<NaiveDate> = orphan.try_get("oldest").ok().flatten();
+            let amount: f64 = orphan
+                .try_get::<Option<f64>, _>("amount")
+                .ok()
+                .flatten()
+                .unwrap_or(0.0);
+            let managers = sqlx::query(
+                "SELECT om.user_id AS id \
+                       FROM organization_memberships om \
+                      WHERE om.organization_id = $1 \
+                        AND om.role = ANY($2::text[]) \
+                        AND om.user_id IN (SELECT id FROM users WHERE is_active)",
             )
-            .bind(mid)
-            .bind(&title)
-            .bind(&body)
-            .bind(payload.to_string())
-            .execute(&state.pool)
+            .bind(org_id)
+            .bind(MANAGER_UP.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+            .fetch_all(&state.pool)
             .await
             .map_err(AppError::Db)?;
-            escalated += result.rows_affected() as i64;
+
+            let title = format!("{orphan_n} overdue denial(s) with nobody assigned");
+            let body = format!(
+                "Oldest deadline {}. {} in denied charges is unowned.",
+                oldest.map(|d| d.to_string()).unwrap_or_default(),
+                money(amount),
+            );
+            let payload = serde_json::json!({
+                "count": orphan_n,
+                "oldest": oldest.map(|d| d.to_string()),
+            });
+
+            for m in &managers {
+                let mid: Uuid = m
+                    .try_get("id")
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                let result = sqlx::query(
+                    "INSERT INTO notifications (user_id, kind, title, body, payload) \
+                     VALUES ($1, 'overdue_escalation', $2, $3, $4::jsonb) \
+                     ON CONFLICT (user_id, kind, for_date) DO NOTHING",
+                )
+                .bind(mid)
+                .bind(&title)
+                .bind(&body)
+                .bind(payload.to_string())
+                .execute(&state.pool)
+                .await
+                .map_err(AppError::Db)?;
+                escalated += result.rows_affected() as i64;
+            }
         }
     }
 
