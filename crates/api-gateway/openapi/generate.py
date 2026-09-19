@@ -634,6 +634,19 @@ add("/api/v1/retention/audit/prune",
                         "year; logs an 'audit_pruned' entry after deleting.",
             body=jbody({"older_than_days": I(), "confirm": B()},
                        ["confirm"])))
+add("/api/v1/retention/ai",
+    get=op("AI-analysis history size, age and what a prune would remove "
+           "(admin)", "retention",
+           description="Scoped to the caller's organization through each "
+                       "analysis's claim."))
+add("/api/v1/retention/ai/prune",
+    post=op("Delete AI analyses past the retention window (admin)",
+            "retention",
+            description="Organization-scoped. Requires confirm=true; refuses "
+                        "a window under the retention floor; logs an "
+                        "'ai_analyses_pruned' entry after deleting.",
+            body=jbody({"older_than_days": I(), "confirm": B()},
+                       ["confirm"])))
 
 # ── playbooks ────────────────────────────────────────────────────────────
 PLAYBOOK_INPUT = {
@@ -692,7 +705,7 @@ doc = {
             ("notifications", "Deadline digests and escalations"),
             ("playbooks", "Manager-curated deterministic resolution rules"),
             ("system", "Health"),
-            ("retention", "Audit-log retention (admin)"),
+            ("retention", "Audit-log and AI-analysis retention (admin)"),
         ]
     ],
     "components": {

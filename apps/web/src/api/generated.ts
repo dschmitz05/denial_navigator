@@ -75,6 +75,8 @@ export interface ApiOperations {
   "POST /api/v1/reference/{kind}/delete": { path: { "kind": "carc" | "rarc" | "icd10" | "cpt" | "hcpcs" | "modifier" }; body: { "code": string } };
   "POST /api/v1/reference/{kind}/import": { path: { "kind": "carc" | "rarc" | "icd10" | "cpt" | "hcpcs" | "modifier" }; body: FormData };
   "GET /api/v1/reference/{kind}/search": { path: { "kind": "carc" | "rarc" | "icd10" | "cpt" | "hcpcs" | "modifier" }; query?: { "q"?: string; "limit"?: number; "offset"?: number } };
+  "GET /api/v1/retention/ai": Record<string, never>;
+  "POST /api/v1/retention/ai/prune": { body: { "older_than_days"?: number; "confirm": boolean } };
   "GET /api/v1/retention/audit": Record<string, never>;
   "POST /api/v1/retention/audit/prune": { body: { "older_than_days"?: number; "confirm": boolean } };
   "GET /api/v1/system/health": Record<string, never>;

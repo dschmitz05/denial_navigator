@@ -70,7 +70,7 @@
     },
     {
       "name": "retention",
-      "description": "Audit-log retention (admin)"
+      "description": "Audit-log and AI-analysis retention (admin)"
     }
   ],
   "components": {
@@ -4065,6 +4065,93 @@
             }
           }
         ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/retention/ai": {
+      "get": {
+        "summary": "AI-analysis history size, age and what a prune would remove (admin)",
+        "tags": [
+          "retention"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Scoped to the caller's organization through each analysis's claim.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/retention/ai/prune": {
+      "post": {
+        "summary": "Delete AI analyses past the retention window (admin)",
+        "tags": [
+          "retention"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Organization-scoped. Requires confirm=true; refuses a window under the retention floor; logs an 'ai_analyses_pruned' entry after deleting.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "older_than_days": {
+                    "type": "integer"
+                  },
+                  "confirm": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "confirm"
+                ]
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "OK",
