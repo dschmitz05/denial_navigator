@@ -443,7 +443,17 @@ async fn generate_analysis_for_request(
 
     let policy_texts: Vec<String> = match state
         .rag
-        .search(&search_query, 5, serde_json::json!({ "payer": payer_name }))
+        // The RAG service refuses unscoped searches. Forward the organization
+        // established by this route's authorization check so retrieval remains
+        // tenant-isolated and can return the knowledge evidence for this claim.
+        .search(
+            &search_query,
+            5,
+            serde_json::json!({
+                "payer": payer_name,
+                "organization_id": organization_id,
+            }),
+        )
         .await
     {
         Ok(v) => v
