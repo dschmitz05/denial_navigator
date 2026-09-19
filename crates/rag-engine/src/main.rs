@@ -242,6 +242,7 @@ async fn search_similar(
         "WITH scope AS (\
            SELECT kc.id, kc.knowledge_document_id, kc.chunk_index, kc.content, \
                   kc.token_count, kc.metadata, kc.embedding, \
+                  kc.embedding_model, kc.embedding_prefix_scheme, kc.embedding_dimensions, \
                   kd.title AS document_title, kd.source_type \
            FROM knowledge_chunks kc \
            JOIN knowledge_documents kd ON kd.id = kc.knowledge_document_id \
@@ -258,11 +259,22 @@ async fn search_similar(
     qb.push_bind(state.cfg.anchor_max_share);
     qb.push(
         " * (SELECT count(*) FROM scope))), kept AS (\
-         SELECT s.*, 1 - (s.embedding <=> ",
+         SELECT s.*, \
+                -- FB-13: a chunk embedded under a different model or document
+                -- prefix sits in an incomparable vector space; a raw cosine
+                -- distance against it is meaningless, not just weaker, so it
+                -- is forced below any real threshold rather than scored.
+                CASE WHEN s.embedding_model IS NOT DISTINCT FROM ",
     );
+    qb.push_bind(state.cfg.embedding_model.clone());
+    qb.push(" AND s.embedding_prefix_scheme IS NOT DISTINCT FROM ");
+    qb.push_bind(state.cfg.embed_prefixes.document.clone());
+    qb.push(" AND s.embedding_dimensions IS NOT DISTINCT FROM ");
+    qb.push_bind(embeddings[0].len() as i32);
+    qb.push(" THEN 1 - (s.embedding <=> ");
     qb.push_bind(vec.clone());
     qb.push(
-        "::vector) AS similarity_score, \
+        "::vector) ELSE -1.0 END AS similarity_score, \
          LEAST(ts_rank_cd(to_tsvector('english', s.content), websearch_to_tsquery('english', ",
     );
     qb.push_bind(query.to_string());
@@ -275,15 +287,13 @@ async fn search_similar(
     qb.push(WORD_MATCH);
     qb.push("a.t");
     qb.push(WORD_MATCH_END);
-    qb.push(")) AND 1 - (s.embedding <=> ");
-    qb.push_bind(vec.clone());
-    qb.push("::vector) >= ");
-    qb.push_bind(state.cfg.min_similarity);
     qb.push(
-        ") SELECT id, knowledge_document_id, chunk_index, content, token_count, metadata, \
+        "))) SELECT id, knowledge_document_id, chunk_index, content, token_count, metadata, \
                  document_title, source_type, similarity_score, keyword_score \
-          FROM kept WHERE similarity_score >= (SELECT max(similarity_score) FROM kept) - ",
+          FROM kept WHERE similarity_score >= ",
     );
+    qb.push_bind(state.cfg.min_similarity);
+    qb.push(" AND similarity_score >= (SELECT max(similarity_score) FROM kept) - ");
     qb.push_bind(state.cfg.relative_cut);
     qb.push(" ORDER BY (0.7 * similarity_score + 0.3 * keyword_score) DESC LIMIT ");
     qb.push_bind(top_k);
@@ -465,8 +475,41 @@ async fn embedding_status(state: &AppState) -> Value {
     value
 }
 
+/// Chunks (across all organizations, excluding archived documents) whose
+/// recorded provenance no longer matches the running config, and so are
+/// excluded from vector search until re-embedded (FB-13).
+async fn provenance_mismatch(state: &AppState) -> Result<Value, AppError> {
+    let row = sqlx::query(
+        "SELECT count(*) FILTER (WHERE kc.embedding IS NOT NULL) AS total, \
+                count(*) FILTER (WHERE kc.embedding IS NOT NULL AND ( \
+                    kc.embedding_model IS DISTINCT FROM $1 \
+                    OR kc.embedding_prefix_scheme IS DISTINCT FROM $2 \
+                    OR kc.embedding_dimensions IS DISTINCT FROM $3)) AS mismatched \
+         FROM knowledge_chunks kc \
+         JOIN knowledge_documents kd ON kd.id = kc.knowledge_document_id \
+         WHERE kd.status <> 'archived'",
+    )
+    .bind(&state.cfg.embedding_model)
+    .bind(&state.cfg.embed_prefixes.document)
+    .bind(EMBEDDING_DIMENSIONS as i32)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(AppError::from)?;
+    let total: i64 = row.try_get("total").unwrap_or(0);
+    let mismatched: i64 = row.try_get("mismatched").unwrap_or(0);
+    Ok(json!({ "total_chunks": total, "mismatched_chunks": mismatched }))
+}
+
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let embedding = embedding_status(&state).await;
+    let provenance = if state.cfg.vector_search_enabled {
+        match provenance_mismatch(&state).await {
+            Ok(v) => v,
+            Err(e) => json!({"error": e.to_string()}),
+        }
+    } else {
+        json!({"total_chunks": 0, "mismatched_chunks": 0})
+    };
     Json(json!({
         "status": "healthy",
         "embedding": embedding,
@@ -475,6 +518,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
             "query": state.cfg.embed_prefixes.query,
             "document": state.cfg.embed_prefixes.document,
         },
+        "embedding_provenance": provenance,
         "vector_search_enabled": state.cfg.vector_search_enabled,
         "llama_url": state.cfg.llama_base_url,
         "embed_url": state.cfg.embed_base_url,
@@ -594,14 +638,26 @@ async fn ingest_document(
         .bind(doc_id)
         .execute(&mut *tx)
         .await?;
+    // FB-13: recorded only when this chunk actually got a vector, so a chunk
+    // indexed while VECTOR_SEARCH_ENABLED=false has no provenance to compare
+    // later, exactly like its NULL embedding.
+    let (embedding_model, embedding_prefix_scheme, embedding_dimensions) = match &vectors {
+        Some(items) => (
+            Some(state.cfg.embedding_model.clone()),
+            Some(state.cfg.embed_prefixes.document.clone()),
+            items.first().map(|v| v.len() as i32),
+        ),
+        None => (None, None, None),
+    };
     for (i, (chunk, page, section)) in chunks.iter().enumerate() {
         let metadata =
             json!({ "chars": chunk.chars().count(), "page": page, "section": section }).to_string();
         let token_count = chunk.split_whitespace().count() as i32;
         sqlx::query(
             "INSERT INTO knowledge_chunks \
-             (knowledge_document_id, chunk_index, content, embedding, metadata, token_count) \
-             VALUES ($1, $2, $3, $4::vector, $5::jsonb, $6)",
+             (knowledge_document_id, chunk_index, content, embedding, metadata, token_count, \
+              embedding_model, embedding_prefix_scheme, embedding_dimensions) \
+             VALUES ($1, $2, $3, $4::vector, $5::jsonb, $6, $7, $8, $9)",
         )
         .bind(doc_id)
         .bind(i as i32)
@@ -609,6 +665,9 @@ async fn ingest_document(
         .bind(vectors.as_ref().map(|items| format_vector(&items[i])))
         .bind(metadata)
         .bind(token_count)
+        .bind(&embedding_model)
+        .bind(&embedding_prefix_scheme)
+        .bind(embedding_dimensions)
         .execute(&mut *tx)
         .await?;
     }
@@ -656,6 +715,115 @@ async fn build_prompt(
     Json(json!({ "system": system, "user": user }))
 }
 
+fn default_reindex_limit() -> i64 {
+    25
+}
+
+#[derive(Deserialize)]
+struct ReindexRequest {
+    organization_id: uuid::Uuid,
+    #[serde(default = "default_reindex_limit")]
+    limit: i64,
+}
+
+/// Re-embeds one batch of an organization's chunks whose provenance no
+/// longer matches the running config (FB-13).
+///
+/// Resumable by construction rather than by tracked state: it always selects
+/// whatever still mismatches, so calling it repeatedly — from a cron script,
+/// from Settings, after a crash mid-run — converges on zero regardless of
+/// where a previous call stopped. `scripts/reindex_knowledge.sh` drives it in
+/// a loop.
+async fn reindex_batch(
+    State(state): State<AppState>,
+    Json(req): Json<ReindexRequest>,
+) -> Result<Json<Value>, AppError> {
+    if !state.cfg.vector_search_enabled {
+        return Err(AppError::BadRequest(
+            "VECTOR_SEARCH_ENABLED is false; there is no embedding provider to re-index with"
+                .into(),
+        ));
+    }
+    let limit = req.limit.clamp(1, 200);
+    let rows = sqlx::query(
+        "SELECT kc.id, kc.content FROM knowledge_chunks kc \
+         JOIN knowledge_documents kd ON kd.id = kc.knowledge_document_id \
+         WHERE kd.organization_id = $1 AND kd.status <> 'archived' \
+           AND kc.embedding IS NOT NULL \
+           AND (kc.embedding_model IS DISTINCT FROM $2 \
+                OR kc.embedding_prefix_scheme IS DISTINCT FROM $3 \
+                OR kc.embedding_dimensions IS DISTINCT FROM $4) \
+         ORDER BY kc.id LIMIT $5",
+    )
+    .bind(req.organization_id)
+    .bind(&state.cfg.embedding_model)
+    .bind(&state.cfg.embed_prefixes.document)
+    .bind(EMBEDDING_DIMENSIONS as i32)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(AppError::from)?;
+
+    let processed = if rows.is_empty() {
+        0
+    } else {
+        let ids: Vec<uuid::Uuid> = rows.iter().map(|r| r.get("id")).collect();
+        let contents: Vec<String> = rows.iter().map(|r| r.get("content")).collect();
+        let vectors = state
+            .embeddings
+            .embed(EmbedKind::Document, &contents)
+            .await?;
+        if vectors.len() != ids.len() {
+            return Err(AppError::Upstream(format!(
+                "embedding backend returned {} vectors for {} chunks",
+                vectors.len(),
+                ids.len()
+            )));
+        }
+        let mut tx = state.pool.begin().await?;
+        for (id, vector) in ids.iter().zip(vectors.iter()) {
+            sqlx::query(
+                "UPDATE knowledge_chunks SET embedding = $1::vector, embedding_model = $2, \
+                 embedding_prefix_scheme = $3, embedding_dimensions = $4 WHERE id = $5",
+            )
+            .bind(format_vector(vector))
+            .bind(&state.cfg.embedding_model)
+            .bind(&state.cfg.embed_prefixes.document)
+            .bind(vector.len() as i32)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        ids.len()
+    };
+
+    let remaining: i64 = sqlx::query(
+        "SELECT count(*) FROM knowledge_chunks kc \
+         JOIN knowledge_documents kd ON kd.id = kc.knowledge_document_id \
+         WHERE kd.organization_id = $1 AND kd.status <> 'archived' \
+           AND kc.embedding IS NOT NULL \
+           AND (kc.embedding_model IS DISTINCT FROM $2 \
+                OR kc.embedding_prefix_scheme IS DISTINCT FROM $3 \
+                OR kc.embedding_dimensions IS DISTINCT FROM $4)",
+    )
+    .bind(req.organization_id)
+    .bind(&state.cfg.embedding_model)
+    .bind(&state.cfg.embed_prefixes.document)
+    .bind(EMBEDDING_DIMENSIONS as i32)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(AppError::from)?
+    .get(0);
+
+    Ok(Json(json!({
+        "organization_id": req.organization_id.to_string(),
+        "processed": processed,
+        "remaining": remaining,
+        "done": remaining == 0,
+    })))
+}
+
 // ── Router / main ──
 
 fn build_router(state: AppState) -> Router {
@@ -664,6 +832,7 @@ fn build_router(state: AppState) -> Router {
         .route("/embed", post(embed_gone))
         .route("/search", post(search_knowledge))
         .route("/ingest-document", post(ingest_document))
+        .route("/reindex-batch", post(reindex_batch))
         .route("/prompt/denial-analysis", post(build_prompt))
         .layer(axum::middleware::from_fn_with_state(
             key,
@@ -711,6 +880,30 @@ async fn main() {
         cfg.embed_batch,
         cfg.embed_prefixes.clone(),
     );
+    // FB-13: a chunk from before provenance was recorded is assumed to match
+    // today's config rather than left NULL forever — there is no historical
+    // record to check it against, and treating "unknown" as "mismatched"
+    // would force a full re-embed on every existing deployment's first
+    // upgrade for no evidence anything actually drifted.
+    match sqlx::query(
+        "UPDATE knowledge_chunks SET embedding_model = $1, embedding_prefix_scheme = $2,          embedding_dimensions = $3          WHERE embedding IS NOT NULL AND embedding_model IS NULL",
+    )
+    .bind(&cfg.embedding_model)
+    .bind(&cfg.embed_prefixes.document)
+    .bind(EMBEDDING_DIMENSIONS as i32)
+    .execute(&pool)
+    .await
+    {
+        Ok(result) if result.rows_affected() > 0 => {
+            tracing::info!(
+                "Backfilled embedding provenance on {} pre-existing chunk(s)",
+                result.rows_affected()
+            );
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("Could not backfill embedding provenance: {e}"),
+    }
+
     let state = AppState {
         cfg,
         pool,

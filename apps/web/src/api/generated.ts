@@ -67,6 +67,7 @@ export interface ApiOperations {
   "GET /api/v1/knowledge/documents/{document_id}": { path: { "document_id": string } };
   "DELETE /api/v1/knowledge/documents/{document_id}": { path: { "document_id": string }; query?: { "purge"?: boolean } };
   "POST /api/v1/knowledge/documents/{document_id}/content": { path: { "document_id": string }; body: { "content": string } };
+  "POST /api/v1/knowledge/reindex": { body: { "limit"?: number } };
   "POST /api/v1/knowledge/search": { body: { "query": string; "top_k"?: number; "filters"?: Record<string, unknown> } };
   "GET /api/v1/notifications": { query?: { "unread_only"?: boolean; "limit"?: number } };
   "POST /api/v1/notifications/generate-digests": Record<string, never>;

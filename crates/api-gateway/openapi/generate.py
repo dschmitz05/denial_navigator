@@ -550,6 +550,17 @@ add("/api/v1/knowledge/search",
             description="Read-only. Rate limited (KNOWLEDGE_RATE_LIMIT/min).",
             body=jbody({"query": S(), "top_k": I(default=5),
                         "filters": OBJ}, ["query"])))
+add("/api/v1/knowledge/reindex",
+    post=op("Re-embed one batch of chunks with stale embedding provenance (manager+)", "knowledge",
+            description="A config change to EMBEDDING_MODEL or an EMBED_*_PREFIX leaves "
+                        "already-embedded chunks in a vector space the new config can no "
+                        "longer compare against; those chunks are excluded from vector "
+                        "search until re-embedded. Call repeatedly until the response's "
+                        "`done` is true - the mismatch count is in Settings > Service "
+                        "health. Resumable: each call re-selects whatever still "
+                        "mismatches, so it converges regardless of where a previous call "
+                        "stopped.",
+            body=jbody({"limit": I(default=25)})))
 
 # ── feedback ─────────────────────────────────────────────────────────────
 add("/api/v1/feedback",

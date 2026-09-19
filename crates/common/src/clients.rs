@@ -260,6 +260,25 @@ impl RAGEngineClient {
         check(resp).await
     }
 
+    /// Re-embeds one batch of an organization's chunks with stale embedding
+    /// provenance (FB-13). Re-embedding is slow, like `ingest_document`.
+    pub async fn reindex_batch(
+        &self,
+        organization_id: uuid::Uuid,
+        limit: i64,
+    ) -> Result<Value, AppError> {
+        let body = serde_json::json!({ "organization_id": organization_id, "limit": limit });
+        let resp = self
+            .client
+            .post(format!("{}/reindex-batch", self.base_url))
+            .header("X-Internal-Service-Key", &self.internal_service_api_key)
+            .timeout(Duration::from_secs(600))
+            .json(&body)
+            .send()
+            .await?;
+        check(resp).await
+    }
+
     pub async fn build_prompt(&self, payload: &Value) -> Result<Value, AppError> {
         self.resilience
             .send(|| {

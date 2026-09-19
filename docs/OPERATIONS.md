@@ -73,6 +73,16 @@ two model rows test real function, not just reachability:
 Either row failing makes the overall status *degraded*: analyses fall back to
 deterministic rules and new documents cannot be embedded until it is fixed.
 
+**Embedding provenance** counts chunks whose stored embedding no longer
+matches the running `EMBEDDING_MODEL`/prefix config (a config change moves the
+vector space); they are excluded from vector search, not deleted, so
+retrieval quietly loses coverage rather than erroring. A non-zero count also
+turns the overall status *degraded*. Fix it from the same page (the
+"Re-index" button that appears under this row) or with
+`scripts/reindex_knowledge.sh`, which drives `POST /knowledge/reindex` in a
+loop until it reports done; see docs/ARCHITECTURE.md for how the exclusion
+and the re-index endpoint work.
+
 **AI analyses (24 h)** reports what actually happened to the organization's
 analyses: how many fell back to deterministic rules or ran without policy
 evidence. It turns *degraded* when the three most recent analyses all did, or

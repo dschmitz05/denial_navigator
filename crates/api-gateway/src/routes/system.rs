@@ -92,6 +92,52 @@ fn ai_analyses_row(summary: Option<&Value>) -> (&'static str, String) {
     }
 }
 
+/// The embedding-provenance row (FB-13): chunks whose vector no longer
+/// matches the running embedding config, so they're excluded from vector
+/// search until re-embedded via `POST /knowledge/reindex`.
+fn provenance_row(service_ok: bool, body: &Value) -> (&'static str, String, i64, i64) {
+    if !service_ok {
+        return (
+            "down",
+            "Retrieval service did not report on embedding provenance".into(),
+            0,
+            0,
+        );
+    }
+    let provenance = body.get("embedding_provenance").unwrap_or(&Value::Null);
+    if let Some(err) = provenance.get("error").and_then(Value::as_str) {
+        return ("down", err.to_string(), 0, 0);
+    }
+    let total = provenance
+        .get("total_chunks")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let mismatched = provenance
+        .get("mismatched_chunks")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    if mismatched > 0 {
+        (
+            "degraded",
+            format!(
+                "{mismatched} of {total} chunks were embedded under a different model or \
+                 prefix and are excluded from vector search until re-indexed"
+            ),
+            total,
+            mismatched,
+        )
+    } else if total == 0 {
+        ("ok", "No indexed chunks yet".into(), total, mismatched)
+    } else {
+        (
+            "ok",
+            format!("All {total} chunks match the current embedding config"),
+            total,
+            mismatched,
+        )
+    }
+}
+
 /// The embedding row, from the RAG engine's probe embedding.
 fn embedding_provider_row(service_ok: bool, body: &Value) -> (&'static str, String) {
     if !service_ok {
@@ -138,6 +184,8 @@ async fn health(
     let llama_url = env_or("LLAMA_BASE_URL", "http://10.10.10.98:8080");
     let (llama_status, llama_message) = llm_provider_row(llm_ok, &llm_detail);
     let (embed_status, embed_message) = embedding_provider_row(rag_ok, &rag_detail);
+    let (provenance_status, provenance_message, provenance_total, provenance_mismatched) =
+        provenance_row(rag_ok, &rag_detail);
 
     // Providers can pass their probes while analyses still fall back; this
     // row reports what actually happened to the organization's analyses.
@@ -154,7 +202,10 @@ async fn health(
     let (ai_status, ai_message) = ai_analyses_row(ai_summary.as_ref());
 
     let essential_ok = db_ok && ediparser_ok && rag_ok && llm_ok;
-    let optional_ok = llama_status == "ok" && embed_status != "down" && ai_status != "degraded";
+    let optional_ok = llama_status == "ok"
+        && embed_status != "down"
+        && ai_status != "degraded"
+        && provenance_status == "ok";
     let status = |ok: bool| if ok { "ok" } else { "down" };
     let detail = |value: &Value, fallback: &str| {
         value
@@ -182,6 +233,9 @@ async fn health(
               "detail": llama_message },
             { "name": "Embedding provider", "status": embed_status, "essential": false,
               "detail": embed_message },
+            { "name": "Embedding provenance", "status": provenance_status, "essential": false,
+              "detail": provenance_message,
+              "total_chunks": provenance_total, "mismatched_chunks": provenance_mismatched },
             { "name": "AI analyses (24 h)", "status": ai_status, "essential": false,
               "detail": ai_message }
         ]
@@ -198,7 +252,7 @@ pub fn router() -> Router<AppState> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ai_analyses_row, embedding_provider_row, llm_provider_row};
+    use super::{ai_analyses_row, embedding_provider_row, llm_provider_row, provenance_row};
     use serde_json::json;
 
     #[test]
@@ -245,5 +299,25 @@ mod tests {
             "down"
         );
         assert_eq!(embedding_provider_row(false, &ok).0, "down");
+    }
+
+    #[test]
+    fn provenance_is_degraded_only_when_something_actually_mismatches() {
+        let clean = json!({"embedding_provenance": {"total_chunks": 40, "mismatched_chunks": 0}});
+        assert_eq!(
+            provenance_row(true, &clean),
+            (
+                "ok",
+                "All 40 chunks match the current embedding config".into(),
+                40,
+                0
+            )
+        );
+        let stale = json!({"embedding_provenance": {"total_chunks": 40, "mismatched_chunks": 12}});
+        let (status, _, total, mismatched) = provenance_row(true, &stale);
+        assert_eq!((status, total, mismatched), ("degraded", 40, 12));
+        assert_eq!(provenance_row(false, &clean).0, "down");
+        let empty = json!({"embedding_provenance": {"total_chunks": 0, "mismatched_chunks": 0}});
+        assert_eq!(provenance_row(true, &empty).0, "ok");
     }
 }

@@ -210,6 +210,29 @@ claim's date of service as `effective_on`, so a policy not yet in effect or
 already expired on that date is not used as evidence.
 `scripts/test_payer_retrieval.sh` covers both.
 
+**Embedding provenance.** Each chunk records the model, document task prefix
+and dimension count that produced its vector (`embedding_model`,
+`embedding_prefix_scheme`, `embedding_dimensions`; migration 045). Changing
+`EMBEDDING_MODEL` or `EMBED_DOCUMENT_PREFIX` moves the vector space; a chunk
+embedded under the old config sits in that old space, and a raw cosine
+distance against it is meaningless, not just weaker. `search_similar` only
+computes a real similarity score for a chunk whose provenance matches the
+running config exactly; a mismatched chunk is pinned to a score no
+`MIN_SIMILARITY` can clear, so it is excluded from vector search rather than
+returned as a false match, and stays excluded until it is re-embedded. It is
+never deleted, and lexical/keyword ranking is unaffected. Chunks from before
+this migration have no recorded provenance; rag-engine backfills them to the
+currently running config once at startup rather than leaving them NULL
+forever, since there is no historical record to check them against and
+treating "unknown" as "mismatched" would force a full re-embed on every
+existing deployment's first upgrade for no evidence anything actually
+drifted. Settings → Service health reports the mismatch count (RAG `/health`'s
+`embedding_provenance`), and a manager re-embeds them from there — or with
+`scripts/reindex_knowledge.sh` — via `POST /knowledge/reindex`, which
+re-selects whatever still mismatches on each call, so it is resumable from any
+point without tracked job state. `scripts/test_embedding_reindex.sh` covers
+detection, exclusion and repair end to end.
+
 ### LLM Service (`crates/llm-service/`)
 
 Builds the denial prompt, calls llama.cpp through the shared OpenAI-compatible

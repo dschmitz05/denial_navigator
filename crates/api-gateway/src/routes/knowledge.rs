@@ -559,6 +559,34 @@ pub async fn search_knowledge(
     })))
 }
 
+fn default_reindex_limit() -> i64 {
+    25
+}
+
+#[derive(Deserialize)]
+pub struct ReindexRequest {
+    #[serde(default = "default_reindex_limit")]
+    pub limit: i64,
+}
+
+/// Re-embeds one batch of the caller's organization's chunks whose embedding
+/// provenance no longer matches the running config (FB-13). Call it
+/// repeatedly — from Settings, or a cron script — until `done`; the mismatch
+/// count in Settings → Service health tells you whether there's any need to.
+pub async fn reindex(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Json(request): Json<ReindexRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let organization_id = organization_id(&principal)?;
+    let result = state
+        .rag
+        .reindex_batch(organization_id, request.limit)
+        .await
+        .map_err(|e| AppError::Upstream(format!("Re-index failed: {e}")))?;
+    Ok(Json(result))
+}
+
 pub async fn get_document(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -630,4 +658,5 @@ pub fn router() -> Router<AppState> {
             post(add_document_content),
         )
         .route("/search", post(search_knowledge))
+        .route("/reindex", post(reindex))
 }

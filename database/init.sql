@@ -338,11 +338,22 @@ CREATE TABLE knowledge_chunks (
     embedding vector(768),  -- nomic-embed-text produces 768-dim vectors
     metadata JSONB,
     token_count INTEGER,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    -- FB-13: what produced this chunk's vector. NULL means "not recorded yet"
+    -- (backfilled to the current config by rag-engine on startup); a value
+    -- that no longer matches the running config means the vector is in a
+    -- different, incomparable space and must be excluded from vector search
+    -- until it is re-embedded. See docs/ARCHITECTURE.md.
+    embedding_model TEXT,
+    embedding_prefix_scheme TEXT,
+    embedding_dimensions INTEGER
 );
 
 CREATE INDEX idx_knowledge_chunks_doc_id ON knowledge_chunks(knowledge_document_id);
 CREATE INDEX idx_knowledge_chunks_content_fts ON knowledge_chunks USING GIN (to_tsvector('english', content));
+CREATE INDEX idx_knowledge_chunks_embedding_provenance
+    ON knowledge_chunks (embedding_model, embedding_prefix_scheme, embedding_dimensions)
+    WHERE embedding IS NOT NULL;
 CREATE INDEX idx_knowledge_documents_effective_dates ON knowledge_documents (effective_date, expiration_date) WHERE status <> 'archived';
 CREATE INDEX idx_knowledge_documents_jurisdiction ON knowledge_documents (lower(COALESCE(metadata->>'jurisdiction', ''))) WHERE metadata ? 'jurisdiction';
 -- HNSW, not IVFFlat. IVFFlat computes its centroids at CREATE INDEX time, and

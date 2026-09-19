@@ -688,6 +688,59 @@ function PayersAndAliases({ canEdit }: { canEdit: boolean }) {
   )
 }
 
+/** Re-embeds chunks flagged by the "Embedding provenance" health row (FB-13). */
+function EmbeddingReindex({ provenance, canEdit, onDone }: { provenance?: AnyRecord; canEdit: boolean; onDone: () => void }) {
+  const [running, setRunning] = useState(false)
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const mismatched = provenance?.mismatched_chunks || 0
+  if (!provenance || mismatched === 0) return null
+
+  const run = async () => {
+    setRunning(true)
+    setError(null)
+    setProgress({ done: 0, total: mismatched })
+    let done = 0
+    try {
+      for (;;) {
+        const resp = await fetch(`${API_BASE}/knowledge/reindex`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ limit: 25 }),
+        })
+        if (!resp.ok) {
+          const data = await resp.json().catch(() => ({}))
+          throw new Error(typeof data.detail === 'string' ? data.detail : `Re-index failed (HTTP ${resp.status})`)
+        }
+        const data = await resp.json()
+        done += data.processed || 0
+        setProgress({ done, total: done + (data.remaining || 0) })
+        if (data.done || !data.processed) break
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Re-index failed')
+    }
+    setRunning(false)
+    onDone()
+  }
+
+  return (
+    <div style={{ marginTop: 8, marginBottom: 16 }}>
+      <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: 8 }}>
+        {mismatched} chunk{mismatched === 1 ? '' : 's'} were embedded under a different model or prefix than
+        the one now configured, and are excluded from vector search until re-embedded.
+      </p>
+      {canEdit && (
+        <button className="btn btn-primary btn-sm" onClick={run} disabled={running}>
+          {running && progress ? `Re-indexing… ${progress.done}/${progress.total}` : `Re-index ${mismatched} chunk${mismatched === 1 ? '' : 's'}`}
+        </button>
+      )}
+      {error && <span style={{ color: 'var(--danger)', marginLeft: 8 }}>{error}</span>}
+    </div>
+  )
+}
+
 export default function Settings() {
   const { can } = useAuth()
   const canEdit = can.manageKnowledge()      // policy curation, same as documents
@@ -815,6 +868,12 @@ export default function Settings() {
               )
             })}
           </div>
+
+          <EmbeddingReindex
+            provenance={(health?.services || []).find(svc => svc.name === 'Embedding provenance')}
+            canEdit={canEdit}
+            onDone={check}
+          />
 
           {(() => {
             const parser = (health?.services || []).find(svc => svc.name === 'EDI parser')
