@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import AssigneeCell, { useAssignableUsers } from '../components/AssigneeCell'
 
@@ -72,6 +73,7 @@ function workType(resolutionType?: string): WorkType {
 }
 
 export default function Worklist() {
+  const navigate = useNavigate()
   const [items, setItems] = useState<WorkItem[]>([])
   const [selected, setSelected] = useState<WorkItem | null>(null)
   const [detail, setDetail] = useState<WorkDetail | null>(null)
@@ -120,7 +122,7 @@ export default function Worklist() {
     }
   }
 
-  const updateOutcome = async (itemId: string, newStatus: string) => {
+  const updateOutcome = async (itemId: string, newStatus: string): Promise<boolean> => {
     setUpdating(true)
     try {
       const resp = await fetch(`${API_BASE}/appeals/${itemId}`, {
@@ -135,10 +137,13 @@ export default function Worklist() {
       loadItems({ outcome_status: outcomeFilter, resolution_type: typeFilter })
       const refreshed = await resp.json()
       setSelected(prev => (prev ? { ...prev, outcome_status: typeof refreshed.outcome_status === 'string' ? refreshed.outcome_status : prev.outcome_status } : prev))
+      return true
     } catch (err) {
       setNotice({ error: true, text: err instanceof Error ? err.message : 'Update failed' })
+      return false
+    } finally {
+      setUpdating(false)
     }
-    setUpdating(false)
   }
 
   const submitFeedback = async (item: WorkItem, outcome: string) => {
@@ -168,13 +173,23 @@ export default function Worklist() {
   }
 
   const closeOut = async (item: WorkItem, outcome: string) => {
+    if (!await updateOutcome(item.id, outcome)) return
+
     setUpdating(true)
-    await updateOutcome(item.id, outcome)
-    await submitFeedback(item, outcome)
-    setFeedback({ rating: 0, feedback_text: '' })
-    setShowDetail(false)
-    setNotice({ error: false, text: `Marked ${outcome.replace(/_/g, ' ')}.` })
-    setUpdating(false)
+    try {
+      // Cancellation re-queues the denial; it is not a completed work outcome
+      // and should not block navigation on an optional feedback request.
+      if (outcome !== 'cancelled') await submitFeedback(item, outcome)
+      setFeedback({ rating: 0, feedback_text: '' })
+      setShowDetail(false)
+      if (outcome === 'cancelled') {
+        navigate('/denials')
+        return
+      }
+      setNotice({ error: false, text: `Marked ${outcome.replace(/_/g, ' ')}.` })
+    } finally {
+      setUpdating(false)
+    }
   }
 
   const status = selected?.outcome_status || 'queued'

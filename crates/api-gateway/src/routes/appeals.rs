@@ -221,6 +221,17 @@ fn is_unique_violation(e: &sqlx::Error) -> bool {
     }
 }
 
+fn update_appeal_sql(mut sets: Vec<String>) -> String {
+    // `updated_at` is an expression, not a bound parameter. Compute the ID
+    // placeholder before appending it so the bind count and SQL stay aligned.
+    let id_idx = sets.len() + 1;
+    sets.push("updated_at = NOW()".to_string());
+    format!(
+        "UPDATE appeals_queue SET {} WHERE id = ${id_idx} RETURNING *",
+        sets.join(", ")
+    )
+}
+
 async fn record_audit(
     pool: &sqlx::PgPool,
     principal: &Principal,
@@ -278,7 +289,7 @@ pub async fn list_appeals(
     let mut need_where = false;
     qb.push(" WHERE c.organization_id = ");
     qb.push_bind(organization_id);
-    let mut push_prefix = |qb: &mut sqlx::QueryBuilder<sqlx::Postgres>, need_where: &mut bool| {
+    let push_prefix = |qb: &mut sqlx::QueryBuilder<sqlx::Postgres>, need_where: &mut bool| {
         if *need_where {
             qb.push(" WHERE ");
             *need_where = false;
@@ -531,14 +542,7 @@ pub async fn update_appeal(
         return Err(AppError::BadRequest("No fields to update".into()));
     }
 
-    sets.push("updated_at = NOW()".to_string());
-    let id_idx = sets.len() + 1;
-
-    let sql = format!(
-        "UPDATE appeals_queue SET {} WHERE id = ${} RETURNING *",
-        sets.join(", "),
-        id_idx
-    );
+    let sql = update_appeal_sql(sets);
 
     let mut q = sqlx::query(&sql);
     if let Some(ref v) = body.outcome_status {
@@ -1024,4 +1028,23 @@ pub fn router() -> Router<AppState> {
         .route("/{appeal_id}", get(get_appeal).patch(update_appeal))
         .route("/{appeal_id}/letter", get(get_appeal_letter))
         .route("/{appeal_id}/assign", post(assign_appeal))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::update_appeal_sql;
+
+    #[test]
+    fn update_sql_uses_the_next_bound_parameter_for_the_id() {
+        let sql = update_appeal_sql(vec!["outcome_status = $1".into()]);
+
+        assert!(sql.contains("WHERE id = $2"));
+    }
+
+    #[test]
+    fn update_sql_counts_all_bound_fields_before_the_id() {
+        let sql = update_appeal_sql(vec!["outcome_status = $1".into(), "notes = $2".into()]);
+
+        assert!(sql.contains("WHERE id = $3"));
+    }
 }
