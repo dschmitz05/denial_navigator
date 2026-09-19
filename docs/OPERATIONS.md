@@ -66,6 +66,15 @@ two model rows test real function, not just reachability:
 Either row failing makes the overall status *degraded*: analyses fall back to
 deterministic rules and new documents cannot be embedded until it is fixed.
 
+## Write-off approval
+
+Settings → Write-off approval (system or security administrators) sets the
+amount at or above which a write-off waits for a revenue cycle manager or
+system administrator other than the requester. It defaults to 0, meaning every
+write-off needs approval; raise it to let small balances be written off
+directly. Managers approve or reject pending write-offs at the top of the
+Worklist. The setting is per organization and every change is audit-logged.
+
 ## Air-gapped hosts
 
 Build/pull images and package the Rust/frontend dependency caches on a

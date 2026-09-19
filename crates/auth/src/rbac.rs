@@ -368,6 +368,8 @@ fn permissions(resource: &str) -> Option<(&'static [&'static str], &'static [&'s
         "reference" => (ALL_ROLES, MANAGER_UP),
         "audit" => (AUDIT_ROLES, NOBODY),
         "playbooks" => (MANAGER_UP, MANAGER_UP),
+        // Anyone who can write off may see requests; only managers decide.
+        "write-offs" => (WRITE_ROLES, MANAGER_UP),
         "users" => (ADMIN_ONLY, ADMIN_ONLY),
         "auth" => (ALL_ROLES, ADMIN_ONLY),
         "system" => (ALL_ROLES, NOBODY),
@@ -756,4 +758,74 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= a[i] ^ b[i];
     }
     diff == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{authorize, Principal, PrincipalKind};
+
+    fn user(role: &str) -> Principal {
+        Principal {
+            kind: PrincipalKind::User,
+            role: Some(role.into()),
+            ..Principal::anonymous()
+        }
+    }
+
+    #[test]
+    fn only_managers_and_system_admins_decide_write_offs() {
+        for role in ["revenue_cycle_manager", "system_admin"] {
+            assert!(authorize(
+                &user(role),
+                "POST",
+                "/api/v1/write-offs/0f5b2f6e-8a1c-4e5e-9a55-1c2d3e4f5a6b/approve"
+            )
+            .is_ok());
+            assert!(authorize(
+                &user(role),
+                "POST",
+                "/api/v1/write-offs/0f5b2f6e-8a1c-4e5e-9a55-1c2d3e4f5a6b/reject"
+            )
+            .is_ok());
+        }
+        for role in [
+            "billing_specialist",
+            "coding_specialist",
+            "security_admin",
+            "auditor",
+            "read_only",
+        ] {
+            assert!(
+                authorize(
+                    &user(role),
+                    "POST",
+                    "/api/v1/write-offs/0f5b2f6e-8a1c-4e5e-9a55-1c2d3e4f5a6b/approve"
+                )
+                .is_err(),
+                "{role} must not approve write-offs"
+            );
+        }
+    }
+
+    #[test]
+    fn people_who_write_off_can_see_requests() {
+        assert!(authorize(&user("billing_specialist"), "GET", "/api/v1/write-offs").is_ok());
+        assert!(authorize(&user("read_only"), "GET", "/api/v1/write-offs").is_err());
+    }
+
+    #[test]
+    fn the_threshold_is_an_admin_setting() {
+        assert!(authorize(
+            &user("system_admin"),
+            "PUT",
+            "/api/v1/settings/write-off-approval"
+        )
+        .is_ok());
+        assert!(authorize(
+            &user("revenue_cycle_manager"),
+            "PUT",
+            "/api/v1/settings/write-off-approval"
+        )
+        .is_err());
+    }
 }

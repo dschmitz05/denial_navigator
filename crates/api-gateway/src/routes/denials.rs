@@ -1,4 +1,5 @@
 use axum::extract::{Query, State};
+use axum::http::StatusCode;
 use axum::routing::get;
 use axum::Router;
 use axum::{Extension, Json};
@@ -14,6 +15,7 @@ use sqlx::{QueryBuilder, Row};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+use crate::routes::write_offs;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -864,7 +866,7 @@ pub async fn update_denial(
     Extension(principal): Extension<Principal>,
     axum::extract::Path(denial_id): axum::extract::Path<Uuid>,
     Json(body): Json<DenialUpdate>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
     let organization_id = organization_id(&principal)?;
     let mut sets = Vec::new();
 
@@ -889,6 +891,21 @@ pub async fn update_denial(
                 "Invalid denial status transition: {current} -> {status}"
             )));
         }
+        if changed && status == "written_off" {
+            if let write_offs::Gate::Pending {
+                request_id,
+                amount,
+                threshold,
+            } = write_offs::gate(&state.pool, &principal, denial_id, None, None).await?
+            {
+                return Ok((
+                    StatusCode::ACCEPTED,
+                    Json(write_offs::Gate::pending_response(
+                        request_id, amount, threshold,
+                    )),
+                ));
+            }
+        }
         sets.push(format!("status = ${}", sets.len() + 1));
         (changed, if changed { Some(current) } else { None })
     } else {
@@ -903,8 +920,10 @@ pub async fn update_denial(
         return Err(AppError::BadRequest("No updates provided".into()));
     }
 
-    sets.push("updated_at = NOW()".to_string());
+    // Number the WHERE placeholders from the bound SET values only; the
+    // `updated_at` expression below binds nothing.
     let id_idx = sets.len() + 1;
+    sets.push("updated_at = NOW()".to_string());
 
     let sql = format!(
         "UPDATE denials SET {} WHERE id = ${} AND claim_id IN (SELECT id FROM claims WHERE organization_id = ${}) RETURNING *",
@@ -947,7 +966,7 @@ pub async fn update_denial(
         .await;
     }
 
-    Ok(Json(row_to_json(&row)))
+    Ok((StatusCode::OK, Json(row_to_json(&row))))
 }
 
 pub fn router() -> Router<AppState> {

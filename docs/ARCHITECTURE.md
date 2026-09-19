@@ -91,9 +91,10 @@ is outermost deliberately, so a request rejected by access control is still
 recorded. Both are Tower middleware; in the Rust build they are
 `from_fn_with_state` layers over the whole router.
 
-Routes (`routes/` — 14 modules, mounted under `/api/v1`): `auth`, `claims`,
+Routes (`routes/` — 17 modules, mounted under `/api/v1`): `auth`, `claims`,
 `denials`, `analyses`, `appeals`, `ingestion`, `knowledge`, `feedback`,
-`reference`, `audit`, `users`, `notifications`, `system`, `retention`.
+`reference`, `audit`, `users`, `notifications`, `playbooks`, `system`,
+`retention`, `settings`, `write-offs`.
 
 The access decision — public paths → identity → MFA confinement → account
 currency → role authorisation — is one function
@@ -214,6 +215,7 @@ Core tables:
 | `ai_analyses` | LLM output, prompt, response, model, token counts |
 | `appeals_queue` | the operational worklist: appeals *and* non-appeal work |
 | `feedback_loop` | whether a recommendation was accepted and whether it paid |
+| `write_off_requests` | write-offs held for a manager's approval, and the decision |
 
 Reference: `carc_codes`, `rarc_codes`, `icd10_codes`, `cpt_codes`,
 `hcpcs_codes`, `modifier_codes`, `reference_imports`, `knowledge_documents`,
@@ -229,6 +231,16 @@ Constraints that carry real weight:
 - `ai_analyses.claim_id` has a foreign key to `claims`, like its siblings.
 - `appeal_deadline_for(payer, remit_date)` computes filing deadlines in SQL, so
   ingestion, backfill and recompute cannot disagree.
+- **Write-offs need a second person above a threshold.** Writing a denial off,
+  whether by closing a `write_off` worklist item or setting the denial to
+  `written_off`, goes through `routes/write_offs.rs::gate`. At or above the
+  organization's `write_off_approval_threshold` (0 = always) nothing changes:
+  the API answers 202 `pending_approval` and records a `write_off_requests` row
+  (one pending per denial, by partial unique index). A revenue cycle manager or
+  system administrator approves or rejects it under `/api/v1/write-offs`; a
+  `CHECK` and the handler both refuse a decision by the requester. Approval
+  writes the denial off and closes its worklist item; every step is audited.
+  `scripts/test_write_off_approval.sh` covers it end to end.
 
 Schema changes live in `database/migrations/`, numbered and managed by SQLx.
 `init.sql` remains the complete schema snapshot for fresh Compose volumes. On

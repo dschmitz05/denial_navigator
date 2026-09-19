@@ -14,6 +14,7 @@ pub mod retention;
 pub mod settings;
 pub mod system;
 pub mod users;
+pub mod write_offs;
 
 use crate::state::AppState;
 use axum::Router;
@@ -33,6 +34,7 @@ pub fn api_router() -> Router<AppState> {
         .nest("/users", users::router())
         .nest("/notifications", notifications::router())
         .nest("/playbooks", playbooks::router())
+        .nest("/write-offs", write_offs::router())
         .nest("/system", system::router())
         .nest("/retention", retention::router())
         .nest("/settings", settings::router())

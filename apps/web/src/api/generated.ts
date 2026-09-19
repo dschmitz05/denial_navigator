@@ -79,6 +79,10 @@ export interface ApiOperations {
   "POST /api/v1/retention/ai/prune": { body: { "older_than_days"?: number; "confirm": boolean } };
   "GET /api/v1/retention/audit": Record<string, never>;
   "POST /api/v1/retention/audit/prune": { body: { "older_than_days"?: number; "confirm": boolean } };
+  "GET /api/v1/settings/phi-disclosure": Record<string, never>;
+  "PUT /api/v1/settings/phi-disclosure": { body: { "level": "none" | "deidentified" | "limited_phi" | "full_context" } };
+  "GET /api/v1/settings/write-off-approval": Record<string, never>;
+  "PUT /api/v1/settings/write-off-approval": { body: { "threshold": number } };
   "GET /api/v1/system/health": Record<string, never>;
   "GET /api/v1/users": Record<string, never>;
   "GET /api/v1/users/assignable": Record<string, never>;
@@ -88,6 +92,9 @@ export interface ApiOperations {
   "POST /api/v1/users/{user_id}/password": { path: { "user_id": string }; body: { "new_password": string } };
   "POST /api/v1/users/{user_id}/totp": { path: { "user_id": string }; body: { "totp_required": boolean } };
   "POST /api/v1/users/{user_id}/totp/reset": { path: { "user_id": string } };
+  "GET /api/v1/write-offs": { query?: { "status"?: "pending" | "approved" | "rejected" } };
+  "POST /api/v1/write-offs/{id}/approve": { path: { "id": string }; body?: { "note"?: string } };
+  "POST /api/v1/write-offs/{id}/reject": { path: { "id": string }; body: { "note": string } };
 }
 
 export type ApiRequestOptions<Operation extends ApiOperation> = ApiOperations[Operation] & {

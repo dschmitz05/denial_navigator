@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import AssigneeCell, { useAssignableUsers } from '../components/AssigneeCell'
+import WriteOffApprovals from '../components/WriteOffApprovals'
 
 const API_BASE = '/api/v1'
 
@@ -134,6 +135,14 @@ export default function Worklist() {
         const data = await resp.json().catch(() => ({}))
         throw new Error(typeof data.detail === 'string' ? data.detail : `Update failed (HTTP ${resp.status})`)
       }
+      if (resp.status === 202) {
+        // Held for a manager's approval; nothing was written off yet.
+        const data = await resp.json().catch(() => ({}))
+        setNotice({ error: false, text: typeof data.detail === 'string' ? data.detail : 'Sent for manager approval.' })
+        setShowDetail(false)
+        loadItems({ outcome_status: outcomeFilter, resolution_type: typeFilter })
+        return false
+      }
       loadItems({ outcome_status: outcomeFilter, resolution_type: typeFilter })
       const refreshed = await resp.json()
       setSelected(prev => (prev ? { ...prev, outcome_status: typeof refreshed.outcome_status === 'string' ? refreshed.outcome_status : prev.outcome_status } : prev))
@@ -215,6 +224,10 @@ export default function Worklist() {
         </select>
         <button className="btn" onClick={() => { setOutcomeFilter(''); setTypeFilter('') }}>Clear</button>
       </div>
+
+      {can.approveWriteOffs() && (
+        <WriteOffApprovals onDecided={() => loadItems({ outcome_status: outcomeFilter, resolution_type: typeFilter })} />
+      )}
 
       {notice && (
         <div className="card" style={{ marginBottom: 12, borderLeft: `4px solid ${notice.error ? 'var(--danger)' : 'var(--success)'}` }}>

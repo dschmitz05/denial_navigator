@@ -110,6 +110,8 @@ ROUTE_PREFIXES = {
     "playbooks": "/api/v1/playbooks",
     "system": "/api/v1/system",
     "retention": "/api/v1/retention",
+    "settings": "/api/v1/settings",
+    "write_offs": "/api/v1/write-offs",
 }
 HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
 
@@ -365,6 +367,10 @@ add("/api/v1/denials/{denial_id}",
     get=op("One denial with codes, analysis and recommended resolution",
            "denials", params=[path_param("denial_id")]),
     patch=op("Update a denial", "denials",
+             description="Setting status to written_off at or above the "
+                         "organization's write-off approval threshold returns "
+                         "202 with status pending_approval and changes nothing "
+                         "until a manager approves it (see write-offs).",
              params=[path_param("denial_id")],
              body=jbody({"status": S(),
                          "appeal_deadline": S(format="date")})))
@@ -436,6 +442,10 @@ add("/api/v1/appeals/{appeal_id}",
     get=op("One worklist item", "appeals",
            params=[path_param("appeal_id")]),
     patch=op("Update outcome / notes / assignment", "appeals",
+             description="Closing a write_off item successfully at or above the "
+                         "organization's approval threshold returns 202 with "
+                         "status pending_approval and changes nothing until a "
+                         "manager approves it (see write-offs).",
              params=[path_param("appeal_id")],
              body=jbody({"outcome_status": S(), "notes": S(),
                          "payer_response": S(format="date"),
@@ -649,6 +659,40 @@ add("/api/v1/retention/ai/prune",
             body=jbody({"older_than_days": I(), "confirm": B()},
                        ["confirm"])))
 
+# ── write-off approval ───────────────────────────────────────────────────
+add("/api/v1/write-offs",
+    get=op("Write-off requests awaiting or past a decision", "write-offs",
+           params=[{"name": "status", "in": "query",
+                    "schema": S(enum=["pending", "approved", "rejected"],
+                                default="pending")}]))
+add("/api/v1/write-offs/{id}/approve",
+    post=op("Approve a write-off and write the denial off (manager+)",
+            "write-offs",
+            description="Refused (403) for the person who requested it.",
+            params=[path_param("id")],
+            body={"required": False, "content": {"application/json": {
+                "schema": {"type": "object", "properties": {"note": S()}}}}}))
+add("/api/v1/write-offs/{id}/reject",
+    post=op("Reject a write-off request (manager+)", "write-offs",
+            description="Refused (403) for the person who requested it.",
+            params=[path_param("id")],
+            body=jbody({"note": S()}, ["note"])))
+
+# ── settings (admin) ─────────────────────────────────────────────────────
+add("/api/v1/settings/phi-disclosure",
+    get=op("PHI disclosure level for AI prompts (admin)", "settings"),
+    put=op("Set the PHI disclosure level (admin)", "settings",
+           body=jbody({"level": S(enum=["none", "deidentified",
+                                        "limited_phi", "full_context"])},
+                      ["level"])))
+add("/api/v1/settings/write-off-approval",
+    get=op("Write-off approval threshold for the caller's organization (admin)",
+           "settings"),
+    put=op("Set the write-off approval threshold (admin)", "settings",
+           description="Write-offs at or above this amount need a manager's "
+                       "approval; 0 means every write-off does.",
+           body=jbody({"threshold": N(minimum=0)}, ["threshold"])))
+
 # ── playbooks ────────────────────────────────────────────────────────────
 PLAYBOOK_INPUT = {
     "name": S(), "description": S(), "triggers": OBJ, "recommendation": OBJ,
@@ -705,6 +749,8 @@ doc = {
             ("users", "User administration (admin)"),
             ("notifications", "Deadline digests and escalations"),
             ("playbooks", "Manager-curated deterministic resolution rules"),
+            ("write-offs", "Write-off approval above the organization threshold"),
+            ("settings", "Organization and system settings (admin)"),
             ("system", "Health"),
             ("retention", "Audit-log and AI-analysis retention (admin)"),
         ]

@@ -43,6 +43,7 @@ interface AuthContextValue {
     editClaims: () => boolean
     manageUsers: () => boolean
     assignWork: () => boolean
+    approveWriteOffs: () => boolean
   }
 }
 
@@ -156,6 +157,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     editClaims: () => hasRole(MANAGER_UP),
     manageUsers: () => hasRole(['system_admin', 'security_admin']),
     assignWork: () => hasRole(MANAGER_UP),
+    approveWriteOffs: () => hasRole(MANAGER_UP),
   }
 
   return (

@@ -379,6 +379,57 @@ function ReferenceCodes({ canEdit }: { canEdit: boolean }) {
   )
 }
 
+/** The amount at or above which a write-off needs a manager's approval.
+ *  Admin-only, like the API behind it. */
+function WriteOffThreshold() {
+  const [value, setValue] = useState('')
+  const [saved, setSaved] = useState<number | null>(null)
+  const [message, setMessage] = useState<{ error: boolean; text: string } | null>(null)
+
+  useEffect(() => {
+    fetch(`${API_BASE}/settings/write-off-approval`)
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then(d => { setSaved(d.threshold); setValue(String(d.threshold)) })
+      .catch(() => setMessage({ error: true, text: 'Could not load the write-off approval threshold' }))
+  }, [])
+
+  const save = async () => {
+    const threshold = Number(value)
+    if (!Number.isFinite(threshold) || threshold < 0) {
+      setMessage({ error: true, text: 'Enter an amount of 0 or more' })
+      return
+    }
+    const resp = await fetch(`${API_BASE}/settings/write-off-approval`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ threshold }),
+    })
+    if (resp.ok) {
+      setSaved(threshold)
+      setMessage({ error: false, text: 'Saved' })
+    } else {
+      setMessage({ error: true, text: `Could not save (HTTP ${resp.status})` })
+    }
+  }
+
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <h4 style={{ marginBottom: 8 }}>Write-off approval</h4>
+      <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: 0 }}>
+        Write-offs at or above this amount wait for a revenue cycle manager or administrator other than the
+        person who asked. 0 means every write-off needs approval.
+      </p>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <span>$</span>
+        <input className="form-input" style={{ maxWidth: 160 }} type="number" min={0} step="0.01"
+          value={value} onChange={e => setValue(e.target.value)} />
+        <button className="btn btn-primary" disabled={saved !== null && Number(value) === saved} onClick={save}>Save</button>
+        {message && <span style={{ color: message.error ? 'var(--danger)' : 'var(--success-text)' }}>{message.text}</span>}
+      </div>
+    </div>
+  )
+}
+
 export default function Settings() {
   const { can } = useAuth()
   const canEdit = can.manageKnowledge()      // policy curation, same as documents
@@ -587,6 +638,8 @@ export default function Settings() {
               Filing windows are edited by managers and above.
             </p>
           )}
+
+          {can.manageUsers() && <WriteOffThreshold />}
 
           <ReferenceCodes canEdit={canEdit} />
 

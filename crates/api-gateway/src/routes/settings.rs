@@ -97,9 +97,78 @@ pub async fn set_phi_disclosure(
     Ok(Json(serde_json::json!({ "phi_disclosure_level": level })))
 }
 
-pub fn router() -> Router<AppState> {
-    Router::new().route(
-        "/phi-disclosure",
-        get(get_phi_disclosure).put(set_phi_disclosure),
+fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
+    principal
+        .organization_id
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or(AppError::Forbidden)
+}
+
+#[derive(Deserialize)]
+pub struct SetThresholdRequest {
+    pub threshold: f64,
+}
+
+/// The amount at or above which a write-off in the caller's organization needs
+/// a second person's approval (0 = every write-off).
+pub async fn get_write_off_approval(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_admin(&principal)?;
+    let threshold: f64 = sqlx::query_scalar(
+        "SELECT write_off_approval_threshold::float8 FROM organizations WHERE id = $1",
     )
+    .bind(organization_id(&principal)?)
+    .fetch_one(&state.pool)
+    .await?;
+    Ok(Json(serde_json::json!({ "threshold": threshold })))
+}
+
+pub async fn set_write_off_approval(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Json(req): Json<SetThresholdRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_admin(&principal)?;
+    if !req.threshold.is_finite() || req.threshold < 0.0 {
+        return Err(AppError::Unprocessable(
+            "threshold must be a non-negative amount".into(),
+        ));
+    }
+    let organization_id = organization_id(&principal)?;
+    let previous: f64 = sqlx::query_scalar(
+        "UPDATE organizations o SET write_off_approval_threshold = ROUND($2::numeric, 2)          FROM organizations old WHERE o.id = $1 AND old.id = o.id          RETURNING old.write_off_approval_threshold::float8",
+    )
+    .bind(organization_id)
+    .bind(req.threshold)
+    .fetch_one(&state.pool)
+    .await?;
+    crate::routes::appeals::record_audit(
+        &state.pool,
+        &principal,
+        "write_off_threshold_changed",
+        "organization",
+        Some(&organization_id.to_string()),
+        &serde_json::json!({
+            "username": principal.username,
+            "from": previous,
+            "to": req.threshold,
+        }),
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "threshold": req.threshold })))
+}
+
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/phi-disclosure",
+            get(get_phi_disclosure).put(set_phi_disclosure),
+        )
+        .route(
+            "/write-off-approval",
+            get(get_write_off_approval).put(set_write_off_approval),
+        )
 }

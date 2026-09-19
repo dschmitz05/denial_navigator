@@ -42,8 +42,8 @@ docker inspect "$DB_CONTAINER" >/dev/null
 curl -fsS "${API_BASE_URL}/health/ready" >/dev/null
 
 OTHER_ORG="$(psql_exec "INSERT INTO organizations (slug, name) VALUES ('${OTHER_SLUG}', 'Isolation Test ${RUN_ID}') RETURNING id")"
-OTHER_USER_ID="$(psql_exec "INSERT INTO users (username, email, password_hash, full_name, role, is_active) VALUES ('${OTHER_USER}', '${OTHER_USER}@example.test', crypt('${TEST_PASSWORD}', gen_salt('bf', 12)), 'Isolation Test User', 'admin', TRUE) RETURNING id")"
-psql_exec "INSERT INTO organization_memberships (organization_id, user_id, role) VALUES ('${OTHER_ORG}'::uuid, '${OTHER_USER_ID}'::uuid, 'admin')" >/dev/null
+OTHER_USER_ID="$(psql_exec "INSERT INTO users (username, email, password_hash, full_name, role, is_active) VALUES ('${OTHER_USER}', '${OTHER_USER}@example.test', crypt('${TEST_PASSWORD}', gen_salt('bf', 12)), 'Isolation Test User', 'system_admin', TRUE) RETURNING id")"
+psql_exec "INSERT INTO organization_memberships (organization_id, user_id, role) VALUES ('${OTHER_ORG}'::uuid, '${OTHER_USER_ID}'::uuid, 'system_admin')" >/dev/null
 DEV_ADMIN_ID="$(psql_exec "SELECT id FROM users WHERE username = 'admin' LIMIT 1")"
 
 DEV_CLAIM_ID="$(psql_exec "INSERT INTO claims (organization_id, claim_number, patient_id, payer_name, total_charge, status) VALUES ('${DEV_ORG}'::uuid, 'ISO-DEV-${RUN_ID}', 'ISO-DEV-PATIENT', 'Isolation Payer', 1.00, 'ingested') RETURNING id")"
@@ -86,6 +86,15 @@ DEV_APPEAL_ID="$(psql_exec "INSERT INTO appeals_queue (denial_id, claim_id, reso
 STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer ${ADMIN_TOKEN}" -H 'Content-Type: application/json' \
   --data "{\"assigned_user_id\":\"${OTHER_USER_ID}\"}" "${API_BASE_URL}/api/v1/appeals/${DEV_APPEAL_ID}/assign")"
 [[ "$STATUS" == '404' ]]
+
+# A write-off request is decided only inside its own organization: the second
+# organization's administrator neither sees it nor can approve it.
+DEV_WRITE_OFF_ID="$(psql_exec "INSERT INTO write_off_requests (organization_id, denial_id, amount) VALUES ('${DEV_ORG}'::uuid, '${DEV_DENIAL_ID}'::uuid, 1.00) RETURNING id")"
+curl -fsS -H "Authorization: Bearer ${OTHER_TOKEN}" "${API_BASE_URL}/api/v1/write-offs" \
+  | jq -e --arg id "$DEV_WRITE_OFF_ID" '[.[] | select(.id == $id)] | length == 0' >/dev/null
+STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer ${OTHER_TOKEN}" "${API_BASE_URL}/api/v1/write-offs/${DEV_WRITE_OFF_ID}/approve")"
+[[ "$STATUS" == '404' ]]
+[[ "$(psql_exec "SELECT status FROM write_off_requests WHERE id = '${DEV_WRITE_OFF_ID}'")" == 'pending' ]]
 
 # Retention status is tenant scoped. A second-organization audit row cannot
 # change the Development admin's count.

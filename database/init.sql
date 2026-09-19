@@ -16,6 +16,10 @@ CREATE TABLE organizations (
     slug VARCHAR(100) UNIQUE NOT NULL,
     name VARCHAR(255) NOT NULL,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    -- Write-offs at or above this amount need a second person's approval
+    -- (write_off_requests); 0 means every write-off does.
+    write_off_approval_threshold DECIMAL(12, 2) NOT NULL DEFAULT 0
+        CHECK (write_off_approval_threshold >= 0),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -387,6 +391,29 @@ CREATE TABLE users (
     totp_confirmed_at TIMESTAMPTZ,
     totp_last_used_step BIGINT
 );
+
+-- Write-offs at or above organizations.write_off_approval_threshold wait here
+-- for a second person's approval (FB-03).
+CREATE TABLE write_off_requests (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL REFERENCES organizations(id),
+    denial_id UUID NOT NULL REFERENCES denials(id) ON DELETE CASCADE,
+    appeal_id UUID REFERENCES appeals_queue(id) ON DELETE SET NULL,
+    amount DECIMAL(12, 2) NOT NULL,
+    reason TEXT,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'approved', 'rejected')),
+    requested_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    decided_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    decided_at TIMESTAMPTZ,
+    decision_note TEXT,
+    CHECK (decided_by IS NULL OR requested_by IS NULL OR decided_by <> requested_by)
+);
+CREATE UNIQUE INDEX idx_write_off_requests_one_pending
+    ON write_off_requests (denial_id) WHERE status = 'pending';
+CREATE INDEX idx_write_off_requests_org_status
+    ON write_off_requests (organization_id, status, requested_at DESC);
 
 ALTER TABLE feedback_loop
     ADD CONSTRAINT feedback_loop_user_id_fkey
