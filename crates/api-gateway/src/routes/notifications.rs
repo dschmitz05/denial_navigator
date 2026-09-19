@@ -354,6 +354,54 @@ pub async fn generate_digests(
                 escalated += result.rows_affected() as i64;
             }
         }
+
+        // ── overpayments past their refund deadline (FB-08) ──
+        let overdue_refunds = sqlx::query(
+            "SELECT COUNT(*) AS n, SUM(amount)::float8 AS amount, MIN(due_date) AS oldest \
+               FROM overpayments \
+              WHERE organization_id = $1 AND status = 'identified' AND due_date < CURRENT_DATE",
+        )
+        .bind(org_id)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(AppError::Db)?;
+        let refund_n: i64 = overdue_refunds.try_get("n").unwrap_or(0);
+        if refund_n > 0 {
+            let oldest: Option<NaiveDate> = overdue_refunds.try_get("oldest").ok().flatten();
+            let amount: f64 = overdue_refunds
+                .try_get::<Option<f64>, _>("amount")
+                .ok()
+                .flatten()
+                .unwrap_or(0.0);
+            let title = format!("{refund_n} overpayment(s) past their refund deadline");
+            let body = format!(
+                "{} identified but not refunded, recouped or disputed; oldest due {}.",
+                money(amount),
+                oldest.map(|d| d.to_string()).unwrap_or_default(),
+            );
+            let payload = serde_json::json!({
+                "count": refund_n,
+                "amount": amount,
+                "oldest": oldest.map(|d| d.to_string()),
+            });
+            let result = sqlx::query(
+                "INSERT INTO notifications (organization_id, user_id, kind, title, body, payload) \
+                 SELECT $1, om.user_id, 'overpayment_due', $3, $4, $5::jsonb \
+                   FROM organization_memberships om \
+                  WHERE om.organization_id = $1 AND om.role = ANY($2::text[]) \
+                    AND om.user_id IN (SELECT id FROM users WHERE is_active) \
+                 ON CONFLICT (organization_id, user_id, kind, for_date) DO NOTHING",
+            )
+            .bind(org_id)
+            .bind(MANAGER_UP.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+            .bind(&title)
+            .bind(&body)
+            .bind(payload.to_string())
+            .execute(&state.pool)
+            .await
+            .map_err(AppError::Db)?;
+            escalated += result.rows_affected() as i64;
+        }
     }
 
     denial_audit::record(

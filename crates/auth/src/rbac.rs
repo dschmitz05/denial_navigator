@@ -101,6 +101,10 @@ const ADMIN_ONLY: &[&str] = &[SYSTEM_ADMIN, SECURITY_ADMIN];
 const AUDIT_ROLES: &[&str] = &[MANAGER, SYSTEM_ADMIN, SECURITY_ADMIN, AUDITOR];
 const NOBODY: &[&str] = &[];
 
+/// A token issued because the password must be changed (seeded default or
+/// admin-set) may only do that.
+pub const PASSWORD_CHANGE_PATHS: &[&str] = &["/api/v1/auth/change-password", "/api/v1/auth/me"];
+
 /// A token that has only cleared the password step may only touch these.
 const MFA_ONLY_PATHS: &[&str] = &[
     "/api/v1/auth/totp/enroll",
@@ -368,6 +372,11 @@ fn permissions(resource: &str) -> Option<(&'static [&'static str], &'static [&'s
         "reference" => (ALL_ROLES, MANAGER_UP),
         "audit" => (AUDIT_ROLES, NOBODY),
         "playbooks" => (MANAGER_UP, MANAGER_UP),
+        // Anyone who can write off may see requests; only managers decide.
+        "write-offs" => (WRITE_ROLES, MANAGER_UP),
+        // Refund deadlines are everyone's concern; recording the outcome is a manager's.
+        "overpayments" => (ALL_ROLES, MANAGER_UP),
+        "payers" => (ALL_ROLES, MANAGER_UP),
         "users" => (ADMIN_ONLY, ADMIN_ONLY),
         "auth" => (ALL_ROLES, ADMIN_ONLY),
         "system" => (ALL_ROLES, NOBODY),
@@ -387,6 +396,8 @@ fn path_permission(method: &str, norm: &str) -> Option<&'static [&'static str]> 
         ("POST", "/api/v1/users/{id}/totp") => ADMIN_ONLY,
         ("POST", "/api/v1/users/{id}/totp/reset") => ADMIN_ONLY,
         ("PUT", "/api/v1/denials/appeal-windows") => MANAGER_UP,
+        ("PUT", "/api/v1/denials/deadline-rules") => MANAGER_UP,
+        ("DELETE", "/api/v1/denials/deadline-rules/{id}") => MANAGER_UP,
         _ => return None,
     })
 }
@@ -403,9 +414,9 @@ pub fn authorize(who: &Principal, method: &str, path: &str) -> Result<(), String
             _ => Err(format!("{} may not use {method} {path}", who.username)),
         };
     }
-    // A half-authenticated token is confined to MFA_ONLY_PATHS by the
-    // middleware; nothing further to decide.
-    if who.scope.as_deref() == Some("mfa") {
+    // A half-authenticated or password-change token is confined to its own
+    // paths by the middleware; nothing further to decide.
+    if matches!(who.scope.as_deref(), Some("mfa") | Some("password_change")) {
         return Ok(());
     }
 
@@ -590,6 +601,12 @@ pub async fn decide(
             "Two-factor authentication has not been completed".to_string(),
         );
     }
+    if who.kind == PrincipalKind::User
+        && who.scope.as_deref() == Some("password_change")
+        && !PASSWORD_CHANGE_PATHS.contains(&ctx.path.as_str())
+    {
+        return Decision::Unauthorized("You must change your password first".to_string());
+    }
 
     // Every human request must resolve to an active organization membership
     // before repositories may use its tenant context. Local development users
@@ -756,4 +773,74 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= a[i] ^ b[i];
     }
     diff == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{authorize, Principal, PrincipalKind};
+
+    fn user(role: &str) -> Principal {
+        Principal {
+            kind: PrincipalKind::User,
+            role: Some(role.into()),
+            ..Principal::anonymous()
+        }
+    }
+
+    #[test]
+    fn only_managers_and_system_admins_decide_write_offs() {
+        for role in ["revenue_cycle_manager", "system_admin"] {
+            assert!(authorize(
+                &user(role),
+                "POST",
+                "/api/v1/write-offs/0f5b2f6e-8a1c-4e5e-9a55-1c2d3e4f5a6b/approve"
+            )
+            .is_ok());
+            assert!(authorize(
+                &user(role),
+                "POST",
+                "/api/v1/write-offs/0f5b2f6e-8a1c-4e5e-9a55-1c2d3e4f5a6b/reject"
+            )
+            .is_ok());
+        }
+        for role in [
+            "billing_specialist",
+            "coding_specialist",
+            "security_admin",
+            "auditor",
+            "read_only",
+        ] {
+            assert!(
+                authorize(
+                    &user(role),
+                    "POST",
+                    "/api/v1/write-offs/0f5b2f6e-8a1c-4e5e-9a55-1c2d3e4f5a6b/approve"
+                )
+                .is_err(),
+                "{role} must not approve write-offs"
+            );
+        }
+    }
+
+    #[test]
+    fn people_who_write_off_can_see_requests() {
+        assert!(authorize(&user("billing_specialist"), "GET", "/api/v1/write-offs").is_ok());
+        assert!(authorize(&user("read_only"), "GET", "/api/v1/write-offs").is_err());
+    }
+
+    #[test]
+    fn the_threshold_is_an_admin_setting() {
+        assert!(authorize(
+            &user("system_admin"),
+            "PUT",
+            "/api/v1/settings/write-off-approval"
+        )
+        .is_ok());
+        assert!(authorize(
+            &user("revenue_cycle_manager"),
+            "PUT",
+            "/api/v1/settings/write-off-approval"
+        )
+        .is_err());
+    }
 }

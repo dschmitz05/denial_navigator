@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import AssigneeCell, { useAssignableUsers } from '../components/AssigneeCell'
+import AiStatusBanner from '../components/AiStatusBanner'
 
 const API_BASE = '/api/v1'
 
@@ -139,6 +140,7 @@ export default function Appeals() {
 
   return (
     <div className="page-body">
+      <AiStatusBanner />
       <div className="filters-bar">
         <select className="form-select" value={outcomeFilter} onChange={e => setOutcomeFilter(e.target.value)}>
           <option value="">All Statuses</option>

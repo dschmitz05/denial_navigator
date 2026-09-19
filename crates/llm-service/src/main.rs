@@ -21,7 +21,7 @@ use denial_ai::chat::{
 };
 use denial_common::config::{env_or, env_required_secret, env_u64};
 use denial_common::error::AppError;
-use llama::{cached_model, check_model_available, resolve_model};
+use llama::{cached_model, model_status, resolve_model};
 
 /// Environment configuration for this service.
 #[derive(Clone)]
@@ -105,6 +105,10 @@ struct DenialAnalysisRequest {
     allowed_evidence_ids: Vec<String>,
     #[serde(default = "default_temp")]
     temperature: f64,
+    /// Set by the gateway when retrieval failed or found nothing; stored with
+    /// the analysis so the degradation is visible.
+    #[serde(default)]
+    fallback_reason: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -121,6 +125,9 @@ struct HealthResponse {
     status: String,
     model: String,
     model_available: bool,
+    /// Why analyses will fail when `model_available` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_error: Option<String>,
 }
 
 // ── Storage ──
@@ -139,6 +146,7 @@ async fn store_analysis(
     prompt_tokens: i64,
     completion_tokens: i64,
     total_tokens: i64,
+    fallback_reason: Option<&str>,
 ) -> bool {
     let payload = serde_json::json!({
         "denial_id": denial_id,
@@ -154,6 +162,7 @@ async fn store_analysis(
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
+        "fallback_reason": fallback_reason,
     });
     let result = state
         .http
@@ -247,23 +256,31 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     // Answer inside the gateway's probe budget, always. Bounded to 2 seconds;
     // a timeout is reported as "model not confirmed" rather than the service
     // being dead, which is what it actually means.
-    let probe = async {
-        let resolved = resolve_model(&state.ai, &state.cfg.llm_model).await;
-        let available = check_model_available(&state.ai, &resolved).await;
-        (resolved, available)
-    };
-    match tokio::time::timeout(Duration::from_secs(2), probe).await {
-        Ok((resolved, available)) => Json(HealthResponse {
+    match tokio::time::timeout(
+        Duration::from_secs(2),
+        model_status(&state.ai, &state.cfg.llm_model),
+    )
+    .await
+    {
+        Ok(Ok(model)) => Json(HealthResponse {
             status: "healthy".into(),
-            model: resolved,
-            model_available: available,
+            model,
+            model_available: true,
+            model_error: None,
+        }),
+        Ok(Err(reason)) => Json(HealthResponse {
+            status: "healthy".into(),
+            model: state.cfg.llm_model.clone(),
+            model_available: false,
+            model_error: Some(reason),
         }),
         Err(_) => {
-            tracing::warn!("llama.cpp did not answer the health probe in time");
+            tracing::warn!("LLM server did not answer the health probe in time");
             Json(HealthResponse {
                 status: "healthy".into(),
                 model: cached_model().unwrap_or_else(|| state.cfg.llm_model.clone()),
                 model_available: false,
+                model_error: Some("LLM server did not answer within 2 seconds".into()),
             })
         }
     }
@@ -389,6 +406,7 @@ async fn analyze_denial(
             prompt_tokens,
             completion_tokens,
             prompt_tokens + completion_tokens,
+            req.fallback_reason.as_deref(),
         )
         .await;
 

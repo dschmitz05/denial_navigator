@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import AiStatusBanner, { FALLBACK_LABEL } from '../components/AiStatusBanner'
 
 const API_BASE = '/api/v1'
 
@@ -151,13 +152,14 @@ export default function Denials() {
     coding_correction: 'corrected_claim',
     clinical_documentation: 'clinical_docs',
     bill_patient: 'bill_patient',
+    bill_secondary: 'bill_secondary',
     no_action_required: 'write_off',
   }
 
   // Which tab a queued item lands on. Mirrors APPEAL_RESOLUTION_TYPES in
   // crates/domain/src/lib.rs — only a letter to the payer is an appeal.
   const APPEAL_TYPES = ['appeal_letter']
-  const WORKLIST_TYPES = ['corrected_claim', 'clinical_docs', 'payer_contact', 'bill_patient', 'write_off']
+  const WORKLIST_TYPES = ['corrected_claim', 'clinical_docs', 'payer_contact', 'bill_patient', 'bill_secondary', 'write_off']
   const destinationFor = (t?: string) => (t && APPEAL_TYPES.includes(t) ? 'Appeals' : 'Worklist')
   const LABELS: Record<string, string> = {
     appeal_letter: '⚖️ Appeal letter',
@@ -165,6 +167,7 @@ export default function Denials() {
     clinical_docs: '📄 Clinical documentation',
     payer_contact: '📞 Payer contact',
     bill_patient: '🧾 Bill patient',
+    bill_secondary: '🏥 Bill secondary payer',
     write_off: '🗑️ Write-off',
   }
 
@@ -247,6 +250,7 @@ export default function Denials() {
 
   return (
     <div className="page-body">
+      <AiStatusBanner />
       <div className="filters-bar">
         <select className="form-select" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
           <option value="">Active Only</option>
@@ -406,6 +410,14 @@ export default function Denials() {
                   <div className="detail-label">Payer</div>
                   <div className="detail-value">{selectedDenial.payer_name}</div>
                 </div>
+                {selectedDenial.next_payer_name && (
+                  <div className="detail-item">
+                    <div className="detail-label">Pays next</div>
+                    <div className="detail-value" title={selectedDenial.next_payer_source === '835_crossover' ? 'Crossover named on the remittance' : 'Other coverage on the submitted claim'}>
+                      {selectedDenial.next_payer_name}
+                    </div>
+                  </div>
+                )}
                 <div className="detail-item">
                   <div className="detail-label">CPT Code</div>
                   <div className="detail-value">{selectedDenial.cpt_code || '—'}</div>
@@ -424,6 +436,33 @@ export default function Denials() {
                 </div>
               </div>
 
+              {/* Payer deadlines: the one for the recommended action first. */}
+              {Array.isArray(selectedDenial.deadlines) && selectedDenial.deadlines.length > 0 && (
+                <div style={{ marginBottom: 20 }}>
+                  <h4 style={{ marginBottom: 8 }}>⏰ Deadlines</h4>
+                  <div className="table-container">
+                    <table>
+                      <thead><tr><th>For</th><th>Due</th><th>Days left</th><th>Counted from</th></tr></thead>
+                      <tbody>
+                        {(selectedDenial.deadlines as Array<{ type: string; label: string; due_date: string; days_left: number; basis: string }>).map(d => {
+                          const isAction = selectedDenial.action_deadline?.type === d.type
+                          return (
+                            <tr key={d.type} style={isAction ? { fontWeight: 600 } : undefined}>
+                              <td>{d.label}{isAction ? ' (recommended action)' : ''}</td>
+                              <td>{formatDate(d.due_date)}</td>
+                              <td style={{ color: d.days_left < 0 ? 'var(--danger)' : d.days_left <= 14 ? 'var(--warning-text)' : undefined }}>
+                                {d.days_left < 0 ? `${-d.days_left} overdue` : d.days_left}
+                              </td>
+                              <td style={{ fontSize: '0.8rem' }}>{d.basis}</td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
               {/* AI Analysis */}
               {selectedDenial.explanation && (
                 <div style={{ marginBottom: 20 }}>
@@ -436,6 +475,13 @@ export default function Denials() {
                     <div className="card-body">
                       <p style={{ marginBottom: 12 }}><strong>Explanation:</strong> {selectedDenial.explanation}</p>
                       <p style={{ marginBottom: 12 }}><strong>Category:</strong> {selectedDenial.denial_category}</p>
+                      {selectedDenial.fallback_reason && FALLBACK_LABEL[selectedDenial.fallback_reason] && (
+                        <p style={{ marginBottom: 12 }}>
+                          <span className="badge badge-warning" title="This analysis is degraded">
+                            {FALLBACK_LABEL[selectedDenial.fallback_reason]}
+                          </span>
+                        </p>
+                      )}
                       {selectedDenial.required_action && (
                         <p style={{ marginBottom: 12 }}>
                           <strong>Required action:</strong>{' '}

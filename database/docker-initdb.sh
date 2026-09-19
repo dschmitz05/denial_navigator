@@ -28,13 +28,13 @@ if [ -f "$SRC/seed/sample_data.sql" ]; then
     soft -f "$SRC/seed/sample_data.sql" >/dev/null
 fi
 
-echo "[initdb] default admin  (admin / ${INIT_ADMIN_PASSWORD:-admin123})"
+echo "[initdb] default admin  (admin / ${INIT_ADMIN_PASSWORD:-admin123}; must be changed at first sign-in)"
 run <<SQL
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
-INSERT INTO users (username, email, password_hash, full_name, role, is_active)
+INSERT INTO users (username, email, password_hash, full_name, role, is_active, must_change_password)
 VALUES ('admin', 'admin@denialnavigator.local',
         crypt('${INIT_ADMIN_PASSWORD:-admin123}', gen_salt('bf', 12)),
-        'System Administrator', 'admin', TRUE)
+        'System Administrator', 'system_admin', TRUE, TRUE)
 ON CONFLICT (username) DO NOTHING;
 
 INSERT INTO organization_memberships (organization_id, user_id, role)

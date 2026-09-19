@@ -101,6 +101,12 @@ services:
       EMBED_QUERY_PREFIX: ${EMBED_QUERY_PREFIX:-}
       EMBED_DOCUMENT_PREFIX: ${EMBED_DOCUMENT_PREFIX:-}
       VECTOR_SEARCH_ENABLED: ${VECTOR_SEARCH_ENABLED:-true}
+      # The evidence cut, calibrated with scripts/eval_retrieval.py. Raising
+      # MIN_SIMILARITY loses real policies before it stops weak ones: the
+      # scores overlap. See docs/ARCHITECTURE.md.
+      MIN_SIMILARITY: ${MIN_SIMILARITY:-0.62}
+      RELATIVE_CUT: ${RELATIVE_CUT:-0.04}
+      ANCHOR_MAX_SHARE: ${ANCHOR_MAX_SHARE:-0.25}
     depends_on:
       postgres:
         condition: service_healthy
@@ -147,6 +153,7 @@ services:
       LLM_SERVICE_URL: http://llm-service:8000
       LLAMA_BASE_URL: ${LLAMA_BASE_URL:-http://10.10.10.98:8080}
       EMBED_BASE_URL: ${EMBED_BASE_URL:-http://10.10.10.98:8081}
+      AI_DEGRADED_THRESHOLD: ${AI_DEGRADED_THRESHOLD:-0.2}
       # `local` remains the default. To use the optional MinIO profile, set
       # OBJECT_STORAGE_BACKEND=s3 and retain the internal minio endpoint.
       OBJECT_STORAGE_BACKEND: ${OBJECT_STORAGE_BACKEND:-local}

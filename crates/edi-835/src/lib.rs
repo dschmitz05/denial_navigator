@@ -236,6 +236,11 @@ fn parse_claims(
                     if qualifier == "QC" {
                         c.patient_name = person_name(seg);
                         c.patient_id = opt(seg.el(9)).or(c.patient_id.take());
+                    } else if qualifier == "TT" {
+                        // Crossover carrier: the payer forwarded the claim, so
+                        // the remaining balance goes there, not to the patient.
+                        c.next_payer_name = person_name(seg);
+                        c.next_payer_source = Some("835_crossover".into());
                     } else if qualifier == "82" || qualifier == "85" {
                         c.provider_name = person_name(seg);
                         if seg.el(8) == "XX" {
@@ -384,6 +389,8 @@ fn parse_claim_header(seg: &Segment, payment_info: &ParsedPaymentInfo) -> Parsed
         service_lines: Vec::new(),
         claim_level_adjustments: Vec::new(),
         remark_codes: Vec::new(),
+        next_payer_name: None,
+        next_payer_source: None,
     }
 }
 
@@ -537,6 +544,9 @@ fn check_balance(claim: &ParsedClaim, warnings: &mut Vec<String>) {
     }
 }
 
+/// CLP02 value for a payer's reversal of a previously paid claim.
+pub const REVERSAL_STATUS: &str = "22";
+
 /// One denial row per adjustment that carries a CARC.
 ///
 /// Deliberately NOT limited to claims whose CLP02 is 4. A partially
@@ -552,6 +562,12 @@ fn derive_denials(claims: &[ParsedClaim], payment_info: &ParsedPaymentInfo) -> V
     let mut denials: Vec<ParsedDenial> = Vec::new();
 
     for claim in claims {
+        // A reversal (CLP02 22) takes back an earlier payment and repeats
+        // its adjustments with the signs flipped. Those are not new denials;
+        // the original ones already exist from the first remittance.
+        if claim.claim_status_code == REVERSAL_STATUS {
+            continue;
+        }
         for adjustment in &claim.claim_level_adjustments {
             if !is_denial(adjustment) {
                 continue;
@@ -626,5 +642,92 @@ mod tests {
             result.metadata.transaction_set_identifier.as_deref(),
             Some("835")
         );
+    }
+
+    #[test]
+    fn a_reversal_loop_creates_no_denials() {
+        let edi = "ISA*00*          *00*          *ZZ*PAYER          *ZZ*PROVIDER       *240201*0800*^*00501*000000009*0*P*:~\
+GS*HP*PAYER*PROVIDER*20240201*0800*9*X*005010X221A1~ST*835*0009~\
+BPR*I*800.00*C*ACH*CCP*01*011000015*DA*1*1**01*021000021*DA*2*20240205~\
+TRN*1*EFT9*1~N1*PR*SYNTHETIC PAYER~N1*PE*SYNTHETIC CLINIC*XX*1999999999~LX*1~\
+CLP*PAT009*22*-800.00*0.00*0.00*MC*PCN9*11*1~SVC*HC:71046*-800.00*0.00**1~CAS*CO*197*-800.00~\
+CLP*PAT009*1*800.00*800.00*0.00*MC*PCN9*11*1~SVC*HC:71046*800.00*800.00**1~\
+SE*12*0009~GE*1*9~IEA*1*000000009~";
+        let result = parse(edi).expect("synthetic reversal 835 parses");
+        assert_eq!(result.claims.len(), 2);
+        assert_eq!(result.claims[0].claim_status_code, super::REVERSAL_STATUS);
+        assert!(
+            result.denials.is_empty(),
+            "reversal CAS lines must not become denials: {:?}",
+            result.denials
+        );
+    }
+
+    fn envelope(body: &str) -> String {
+        format!(
+            "ISA*00*          *00*          *ZZ*SUBMITTER      *ZZ*RECEIVER       *260101*0800*^*00501*000000001*0*P*:~\
+GS*HC*SUBMITTER*RECEIVER*20260101*0800*1*X*005010X222A1~ST*837*0001*005010X222A1~\
+BHT*0019*00*SYN1*20260101*0800*CH~NM1*41*2*SYNTHETIC CLINIC*****46*SYN~\
+NM1*40*2*SYNTHETIC PAYER*****46*SYNPAY~HL*1**20*1~\
+NM1*85*2*SYNTHETIC CLINIC*****XX*1999999999~{body}SE*30*0001~GE*1*1~IEA*1*000000001~"
+        )
+    }
+
+    const SUBSCRIBER: &str = "HL*2*1*22*0~SBR*P*18*******MC~\
+NM1*IL*1*TESTPATIENT*ONE****MI*SYN0001~NM1*PR*2*SYNTHETIC PRIMARY PLAN*****PI*PRIM~";
+
+    #[test]
+    fn an_837_secondary_payer_is_the_next_payer() {
+        let edi = envelope(&format!(
+            "{SUBSCRIBER}CLM*SYNA*200.00***11:B:1*Y*A*Y*Y~HI*ABK:E119~\
+SBR*S*18*******CI~NM1*IL*1*TESTPATIENT*ONE****MI*SEC001~\
+NM1*PR*2*SYNTHETIC SECONDARY PLAN*****PI*SECPAY~\
+LX*1~SV1*HC:99213*200.00*UN*1***1~DTP*472*D8*20260101~\
+CLM*SYNB*100.00***11:B:1*Y*A*Y*Y~HI*ABK:E119~LX*1~SV1*HC:99212*100.00*UN*1***1~"
+        ));
+        let result = parse(&edi).expect("synthetic 837 parses");
+        let a = &result.claims[0];
+        assert_eq!(
+            a.next_payer_name.as_deref(),
+            Some("SYNTHETIC SECONDARY PLAN")
+        );
+        assert_eq!(a.next_payer_source.as_deref(), Some("837_other_subscriber"));
+        assert_eq!(a.payer_name.as_deref(), Some("SYNTHETIC PRIMARY PLAN"));
+
+        // The other payer's name must not leak into the next claim's payer.
+        let b = &result.claims[1];
+        assert_eq!(b.payer_name.as_deref(), Some("SYNTHETIC PRIMARY PLAN"));
+        assert!(b.next_payer_name.is_none());
+    }
+
+    #[test]
+    fn an_837_payer_that_paid_first_is_not_the_next_payer() {
+        let edi = envelope(
+            "HL*2*1*22*0~SBR*S*18*******CI~NM1*IL*1*TESTPATIENT*ONE****MI*SYN0001~\
+NM1*PR*2*SYNTHETIC SECONDARY PLAN*****PI*SECPAY~\
+CLM*SYNC*200.00***11:B:1*Y*A*Y*Y~HI*ABK:E119~\
+SBR*P*18*******MC~NM1*PR*2*SYNTHETIC PRIMARY PLAN*****PI*PRIM~\
+LX*1~SV1*HC:99213*200.00*UN*1***1~",
+        );
+        let result = parse(&edi).expect("synthetic 837 parses");
+        assert!(result.claims[0].next_payer_name.is_none());
+    }
+
+    #[test]
+    fn a_crossover_carrier_is_the_next_payer() {
+        let edi = "ISA*00*          *00*          *ZZ*PAYER          *ZZ*PROVIDER       *240201*0800*^*00501*000000010*0*P*:~\
+GS*HP*PAYER*PROVIDER*20240201*0800*10*X*005010X221A1~ST*835*0010~\
+BPR*I*80.00*C*ACH*CCP*01*011000015*DA*1*1**01*021000021*DA*2*20240205~\
+TRN*1*EFT10*1~N1*PR*SYNTHETIC PAYER~N1*PE*SYNTHETIC CLINIC*XX*1999999999~LX*1~\
+CLP*PAT010*19*100.00*80.00*20.00*MA*PCN10*11*1~NM1*QC*1*TESTPATIENT*TEN****MI*SYN10~\
+NM1*TT*2*SYNTHETIC SUPPLEMENT PLAN*****PI*SUPP~SVC*HC:99213*100.00*80.00**1~CAS*PR*2*20.00~\
+SE*12*0010~GE*1*10~IEA*1*000000010~";
+        let result = parse(edi).expect("synthetic crossover 835 parses");
+        let claim = &result.claims[0];
+        assert_eq!(
+            claim.next_payer_name.as_deref(),
+            Some("SYNTHETIC SUPPLEMENT PLAN")
+        );
+        assert_eq!(claim.next_payer_source.as_deref(), Some("835_crossover"));
     }
 }

@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use denial_auth::auth::{
     create_token, create_token_for_organization, decode_token, hash_password, verify_password,
 };
+use denial_auth::password::check_new_password;
 use denial_auth::rbac::Principal;
 use denial_common::error::AppError;
 use denial_common::totp;
@@ -19,7 +20,6 @@ use crate::state::AppState;
 const LOGIN_USER_LIMIT: i64 = 6;
 const LOGIN_IP_LIMIT: i64 = 20;
 const LOGIN_WINDOW_MINUTES: i64 = 5;
-const MIN_PASSWORD_LENGTH: usize = 8;
 const TOTP_FAILURE_LIMIT: i64 = 5;
 const TOTP_WINDOW_MINUTES: i64 = 10;
 
@@ -136,7 +136,7 @@ pub async fn login(
 
     let user = sqlx::query(
         "SELECT u.id, u.username, u.email, u.full_name, om.role, u.is_active, u.password_hash, \
-                u.totp_required, u.totp_confirmed_at, u.last_login \
+                u.totp_required, u.totp_confirmed_at, u.last_login, u.must_change_password \
          FROM users u JOIN organization_memberships om ON om.user_id = u.id \
          JOIN organizations o ON o.id = om.organization_id \
          WHERE u.username = $1 AND u.is_active = TRUE AND o.is_active = TRUE \
@@ -292,6 +292,13 @@ pub async fn login(
         })));
     }
 
+    let must_change_password: bool = user
+        .try_get("must_change_password")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    if must_change_password {
+        return password_change_required(&state, user_id, &username, &role, &organization_context);
+    }
+
     let token = create_token_for_organization(
         &user_id.to_string(),
         &username,
@@ -416,11 +423,7 @@ pub async fn register(
         .and_then(|id| Uuid::parse_str(id).ok())
         .ok_or(AppError::Forbidden)?;
 
-    if body.password.len() < MIN_PASSWORD_LENGTH {
-        return Err(AppError::BadRequest(format!(
-            "Password must be at least {MIN_PASSWORD_LENGTH} characters"
-        )));
-    }
+    check_new_password(&body.username, &body.password).map_err(AppError::BadRequest)?;
 
     let valid_roles = [
         "system_admin",
@@ -453,8 +456,9 @@ pub async fn register(
     let hashed = hash_password(&body.password).map_err(|e| AppError::Internal(e.to_string()))?;
     let row = sqlx::query(
         "WITH inserted AS ( \
-             INSERT INTO users (username, email, password_hash, full_name, role, is_active) \
-             VALUES ($1, $2, $3, $4, $5, TRUE) \
+             INSERT INTO users (username, email, password_hash, full_name, role, is_active, \
+                                must_change_password) \
+             VALUES ($1, $2, $3, $4, $5, TRUE, TRUE) \
              RETURNING id, username, email, full_name, role, is_active \
          ), membership AS ( \
              INSERT INTO organization_memberships (organization_id, user_id, role) \
@@ -501,16 +505,39 @@ pub async fn register(
     })))
 }
 
+/// The response for an account that must set a new password before anything
+/// else: a short-lived token confined to `PASSWORD_CHANGE_PATHS`.
+fn password_change_required(
+    state: &AppState,
+    user_id: Uuid,
+    username: &str,
+    role: &str,
+    organization_id: &str,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let token = create_token_for_organization(
+        &user_id.to_string(),
+        username,
+        role,
+        "password_change",
+        Some(organization_id),
+        &state.config.jwt_secret,
+        10,
+    )
+    .map_err(|e| AppError::Internal(e.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "status": "password_change_required",
+        "password_change_token": token,
+        "token_type": "password_change",
+        "username": username,
+    })))
+}
+
 pub async fn change_password(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Json(body): Json<PasswordChange>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    if body.new_password.len() < MIN_PASSWORD_LENGTH {
-        return Err(AppError::BadRequest(format!(
-            "New password must be at least {MIN_PASSWORD_LENGTH} characters"
-        )));
-    }
+    check_new_password(&principal.username, &body.new_password).map_err(AppError::BadRequest)?;
     if body.new_password == body.current_password {
         return Err(AppError::BadRequest(
             "New password must be different from the current one".into(),
@@ -540,7 +567,7 @@ pub async fn change_password(
         hash_password(&body.new_password).map_err(|e| AppError::Internal(e.to_string()))?;
     sqlx::query(
         "UPDATE users SET password_hash = $1, sessions_valid_from = date_trunc('second', NOW()), \
-         updated_at = NOW() WHERE id = $2",
+         must_change_password = FALSE, updated_at = NOW() WHERE id = $2",
     )
     .bind(&hashed)
     .bind(uid)
@@ -755,7 +782,8 @@ async fn complete_totp(
     .await;
 
     let full = sqlx::query(
-        "SELECT id, username, email, full_name, role, is_active FROM users WHERE id = $1",
+        "SELECT id, username, email, full_name, role, is_active, must_change_password \
+         FROM users WHERE id = $1",
     )
     .bind(user_id)
     .fetch_one(&state.pool)
@@ -771,6 +799,20 @@ async fn complete_totp(
     let is_active: bool = full
         .try_get("is_active")
         .map_err(|e| AppError::Internal(e.to_string()))?;
+    // The second factor comes first, so a leaked default password alone
+    // cannot be used to set a new one.
+    let must_change_password: bool = full
+        .try_get("must_change_password")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    if must_change_password {
+        return password_change_required(
+            state,
+            user_id,
+            &username,
+            &role,
+            principal.organization_id.as_deref().unwrap_or_default(),
+        );
+    }
 
     let token = create_token_for_organization(
         &user_id.to_string(),

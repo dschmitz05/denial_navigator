@@ -15,6 +15,8 @@ use sha2::{Digest, Sha256};
 use sqlx::{Column, Row};
 use uuid::Uuid;
 
+use crate::reprocessing;
+use crate::routes::{overpayments, provider_adjustments};
 use crate::state::AppState;
 
 const MAX_FILE_SIZE: usize = 25 * 1024 * 1024;
@@ -34,6 +36,9 @@ pub struct StoreIngestion {
     pub denials: Vec<serde_json::Value>,
     #[serde(default)]
     pub transaction_type: Option<String>,
+    /// The 835's payment details, including its PLB provider adjustments.
+    #[serde(default)]
+    pub payment_info: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -272,6 +277,12 @@ fn clean_claim(claim: &serde_json::Value, seen_numbers: &mut HashSet<String>) ->
         "service_from": service_from.map(|d| d.to_string()).unwrap_or_default(),
         "service_to": service_to.map(|d| d.to_string()).unwrap_or_default(),
         "diagnosis_codes": diagnosis_codes,
+        "next_payer_name": claim.get("next_payer_name").cloned(),
+        // Kept so a later remittance can tell a re-sent payment (same control
+        // number) from a second, duplicate one (FB-08).
+        "payer_claim_control_number": claim.get("payer_claim_control_number").cloned(),
+        "claim_status_code": claim.get("claim_status_code").cloned(),
+        "next_payer_source": claim.get("next_payer_source").cloned(),
     })
 }
 
@@ -630,6 +641,233 @@ async fn upsert_claim(
     Ok(())
 }
 
+/// Records a payer that pays after this claim's payer, when the file names
+/// one; a later file without that information leaves it in place.
+async fn record_next_payer(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    claim: &serde_json::Value,
+) -> Result<(), AppError> {
+    let name = claim
+        .get("next_payer_name")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let (Some(name), Some(number)) = (name, claim.get("claim_id").and_then(|v| v.as_str())) else {
+        return Ok(());
+    };
+    let source = claim.get("next_payer_source").and_then(|v| v.as_str());
+    sqlx::query(
+        "UPDATE claims SET next_payer_name = $3, next_payer_source = $4, updated_at = NOW() \
+         WHERE organization_id = $1 AND claim_number = $2",
+    )
+    .bind(organization_id)
+    .bind(number)
+    .bind(name)
+    .bind(source)
+    .execute(&mut **tx)
+    .await
+    .map_err(AppError::Db)?;
+    Ok(())
+}
+
+/// Stamps when claims were submitted (837) or first answered (835), so a
+/// submitted claim the payer never answers can be followed up (FB-09).
+async fn record_submission_or_response(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    transaction_type: Option<&str>,
+    claims: &[serde_json::Value],
+) -> Result<(), AppError> {
+    let numbers: Vec<&str> = claims
+        .iter()
+        .filter_map(|c| c.get("claim_id").and_then(|v| v.as_str()))
+        .collect();
+    if numbers.is_empty() {
+        return Ok(());
+    }
+    let column = if transaction_type == Some("837") {
+        "submitted_at"
+    } else {
+        "remittance_received_at"
+    };
+    sqlx::query(&format!(
+        "UPDATE claims SET {column} = COALESCE({column}, NOW()) \
+         WHERE organization_id = $1 AND claim_number = ANY($2::text[])"
+    ))
+    .bind(organization_id)
+    .bind(&numbers)
+    .execute(&mut **tx)
+    .await
+    .map_err(AppError::Db)?;
+    Ok(())
+}
+
+/// What storing one parsed file changed.
+struct Stored {
+    claims: usize,
+    denials: usize,
+    denials_written: i64,
+    claims_reversed: u64,
+    provider_adjustments: u64,
+    overpayments: u64,
+    settled: Vec<reprocessing::Settled>,
+}
+
+/// Stores a parsed file's claims and denials inside `tx`.
+///
+/// Reversal loops (835 CLP02 22) are recorded on their claims instead of being
+/// stored as claims, so their negated totals never overwrite the claim and the
+/// corrected loop that follows keeps the real claim number. Payments on claims
+/// that already have open denials settle them; see `reprocessing`.
+async fn store_remittance(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    ingestion_id: Uuid,
+    transaction_type: Option<&str>,
+    payment_info: Option<&serde_json::Value>,
+    claims: &[serde_json::Value],
+    denials: &[serde_json::Value],
+) -> Result<Stored, AppError> {
+    let (claims, reversed_numbers) = reprocessing::split_reversals(claims);
+    // Read before the upsert overwrites what each claim had been paid.
+    let prior_payments = overpayments::prior_payments(tx, organization_id, &claims).await?;
+    let mut seen_numbers = HashSet::new();
+    let cleaned_claims: Vec<serde_json::Value> = claims
+        .iter()
+        .map(|c| clean_claim(c, &mut seen_numbers))
+        .collect();
+    let cleaned_denials: Vec<serde_json::Value> = denials.iter().map(clean_denial).collect();
+
+    for claim_data in &cleaned_claims {
+        upsert_claim(tx, organization_id, transaction_type, claim_data).await?;
+        record_next_payer(tx, organization_id, claim_data).await?;
+    }
+    record_submission_or_response(tx, organization_id, transaction_type, &cleaned_claims).await?;
+
+    let mut denials_written: i64 = 0;
+    for denial_data in &cleaned_denials {
+        let claim_id: &str = denial_data
+            .get("claim_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let service_line_number: Option<i64> = denial_data
+            .get("service_line_number")
+            .and_then(|v| v.as_i64());
+        let cpt_code: Option<&str> = denial_data.get("cpt_code").and_then(|v| v.as_str());
+        let hcpcs_code: Option<&str> = denial_data.get("hcpcs_code").and_then(|v| v.as_str());
+        let modifier_1: Option<&str> = denial_data.get("modifier_1").and_then(|v| v.as_str());
+        let modifier_2: Option<&str> = denial_data.get("modifier_2").and_then(|v| v.as_str());
+        let charge_amount: f64 = denial_data
+            .get("charge_amount")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let payment_amount: f64 = denial_data
+            .get("payment_amount")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let adjustment_amount: f64 = denial_data
+            .get("adjustment_amount")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let cagc: Option<&str> = denial_data.get("cagc").and_then(|v| v.as_str());
+        let carc_code: Option<&str> = denial_data.get("carc_code").and_then(|v| v.as_str());
+        let rarc_code: Option<&str> = denial_data.get("rarc_code").and_then(|v| v.as_str());
+        let denial_reason: Option<&str> = denial_data.get("denial_reason").and_then(|v| v.as_str());
+        let denial_date: Option<&str> = denial_data
+            .get("denial_date")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+
+        // A payer re-sending a remittance changes the production date, which
+        // is part of idx_denials_natural_key; an active copy of the same
+        // adjustment on the same claim line is never inserted again.
+        let row = sqlx::query(
+            "INSERT INTO denials \
+             (claim_id, service_line_number, cpt_code, hcpcs_code, modifier_1, modifier_2, \
+              charge_amount, payment_amount, adjustment_amount, cagc, carc_code, rarc_code, \
+              adjustment_reason, denial_date, status, appeal_deadline) \
+             SELECT c.id, $2, $3, $4, $5, $6, $7::numeric, $8::numeric, $9::numeric, $10, $11, $12, \
+                    $13, $14::date, 'open', \
+                    appeal_deadline_for(c.payer_name, COALESCE($14::date, CURRENT_DATE)) \
+             FROM claims c \
+             WHERE c.claim_number = $1 AND c.organization_id = $15 \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM denials d \
+                   WHERE d.claim_id = c.id \
+                     AND d.service_line_number IS NOT DISTINCT FROM $2 \
+                     AND d.cpt_code IS NOT DISTINCT FROM $3 \
+                     AND d.cagc = $10 AND d.carc_code IS NOT DISTINCT FROM $11 \
+                     AND d.charge_amount = $7::numeric AND d.adjustment_amount = $9::numeric \
+                     AND d.status = ANY($16::text[])) \
+             ON CONFLICT DO NOTHING \
+             RETURNING id",
+        )
+        .bind(claim_id)
+        .bind(service_line_number)
+        .bind(cpt_code)
+        .bind(hcpcs_code)
+        .bind(modifier_1)
+        .bind(modifier_2)
+        .bind(charge_amount)
+        .bind(payment_amount)
+        .bind(adjustment_amount)
+        .bind(cagc)
+        .bind(carc_code)
+        .bind(rarc_code)
+        .bind(denial_reason)
+        .bind(denial_date)
+        .bind(organization_id)
+        .bind(reprocessing::ACTIVE_DENIAL_STATUSES)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(AppError::Db)?;
+
+        if row.is_some() {
+            denials_written += 1;
+        }
+    }
+
+    if !cleaned_denials.is_empty() {
+        let claim_numbers: Vec<&str> = cleaned_denials
+            .iter()
+            .filter_map(|d| d.get("claim_id").and_then(|v| v.as_str()))
+            .collect();
+        sqlx::query(
+            "UPDATE claims c \
+             SET status = CASE WHEN c.total_paid > 0 THEN 'partially_paid' ELSE 'denied' END, \
+                 updated_at = NOW() \
+             WHERE c.claim_number = ANY($1::text[]) AND c.organization_id = $2 \
+               AND EXISTS (SELECT 1 FROM denials d WHERE d.claim_id = c.id)",
+        )
+        .bind(claim_numbers)
+        .bind(organization_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(AppError::Db)?;
+    }
+
+    let claims_reversed =
+        reprocessing::mark_reversed(tx, organization_id, &reversed_numbers).await?;
+    // After the claims, so a PLB reference can link to one stored just now.
+    let provider_adjustments =
+        provider_adjustments::store(tx, organization_id, ingestion_id, payment_info).await?;
+    let found = overpayments::find(&claims, &prior_payments, &reversed_numbers);
+    let overpayments = overpayments::record(tx, organization_id, ingestion_id, &found).await?;
+    let settled =
+        reprocessing::settle_paid_denials(tx, organization_id, &reprocessing::payments(&claims))
+            .await?;
+
+    Ok(Stored {
+        claims: cleaned_claims.len(),
+        denials: cleaned_denials.len(),
+        denials_written,
+        claims_reversed,
+        provider_adjustments,
+        overpayments,
+        settled,
+    })
+}
+
 async fn already_ingested(
     pool: &sqlx::PgPool,
     organization_id: Uuid,
@@ -764,8 +1002,17 @@ pub async fn ingest_file(
                 .map(|dt| dt.format("%d %b %Y at %H:%M").to_string())
                 .unwrap_or_else(|| "unknown".into());
             let file_name: String = previous.get("file_name");
-            let claims_count: i64 = previous.get("claims_count");
-            let denials_count: i64 = previous.get("denials_count");
+            // INTEGER and nullable: reading them as i64 panicked and dropped
+            // the connection instead of returning this 409.
+            let count = |column: &str| {
+                previous
+                    .try_get::<Option<i32>, _>(column)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0)
+            };
+            let claims_count = count("claims_count");
+            let denials_count = count("denials_count");
             return Err(AppError::Conflict(format!(
                 "This exact file was already ingested as '{file_name}' on {when} \
                  ({claims_count} claims, {denials_count} denials). \
@@ -808,7 +1055,13 @@ pub async fn ingest_file(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    if claims.is_empty() && denials.is_empty() {
+    // A remittance can carry only PLB lines (a payment that is purely a
+    // recoupment), so an empty claim list alone is not "nothing to store".
+    let has_provider_adjustments = result
+        .pointer("/payment_info/provider_adjustments")
+        .and_then(|v| v.as_array())
+        .is_some_and(|lines| !lines.is_empty());
+    if claims.is_empty() && denials.is_empty() && !has_provider_adjustments {
         let _ = sqlx::query(
             "INSERT INTO ingestion_log \
              (organization_id, file_name, file_size_bytes, file_hash, status, claims_count, denials_count) \
@@ -853,114 +1106,19 @@ pub async fn ingest_file(
 
     let ingestion_id: Uuid = ingestion_row.get("id");
 
-    let mut seen_numbers = HashSet::new();
-    let cleaned_claims: Vec<serde_json::Value> = claims
-        .iter()
-        .map(|c| clean_claim(c, &mut seen_numbers))
-        .collect();
-    let cleaned_denials: Vec<serde_json::Value> = denials.iter().map(|d| clean_denial(d)).collect();
-
-    for claim_data in &cleaned_claims {
-        upsert_claim(
-            &mut tx,
-            organization_id,
-            transaction_type.as_deref(),
-            claim_data,
-        )
-        .await?;
-    }
-
-    let mut denials_written: i64 = 0;
-    for denial_data in &cleaned_denials {
-        let claim_id: &str = denial_data
-            .get("claim_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let service_line_number: Option<i64> = denial_data
-            .get("service_line_number")
-            .and_then(|v| v.as_i64());
-        let cpt_code: Option<&str> = denial_data.get("cpt_code").and_then(|v| v.as_str());
-        let hcpcs_code: Option<&str> = denial_data.get("hcpcs_code").and_then(|v| v.as_str());
-        let modifier_1: Option<&str> = denial_data.get("modifier_1").and_then(|v| v.as_str());
-        let modifier_2: Option<&str> = denial_data.get("modifier_2").and_then(|v| v.as_str());
-        let charge_amount: f64 = denial_data
-            .get("charge_amount")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let payment_amount: f64 = denial_data
-            .get("payment_amount")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let adjustment_amount: f64 = denial_data
-            .get("adjustment_amount")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let cagc: Option<&str> = denial_data.get("cagc").and_then(|v| v.as_str());
-        let carc_code: Option<&str> = denial_data.get("carc_code").and_then(|v| v.as_str());
-        let rarc_code: Option<&str> = denial_data.get("rarc_code").and_then(|v| v.as_str());
-        let denial_reason: Option<&str> = denial_data.get("denial_reason").and_then(|v| v.as_str());
-        let denial_date: Option<&str> = denial_data
-            .get("denial_date")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty());
-
-        let row = sqlx::query(
-            "INSERT INTO denials \
-             (claim_id, service_line_number, cpt_code, hcpcs_code, modifier_1, modifier_2, \
-              charge_amount, payment_amount, adjustment_amount, cagc, carc_code, rarc_code, \
-              adjustment_reason, denial_date, status, appeal_deadline) \
-             VALUES ((SELECT id FROM claims WHERE claim_number = $1 AND organization_id = $15), $2, $3, $4, $5, $6, \
-                     $7, $8, $9, $10, $11, $12, $13, $14::date, 'open', \
-                     appeal_deadline_for( \
-                         (SELECT payer_name FROM claims WHERE claim_number = $1 AND organization_id = $15), \
-                         COALESCE($14::date, CURRENT_DATE))) \
-             ON CONFLICT DO NOTHING \
-             RETURNING id",
-        )
-        .bind(claim_id)
-        .bind(service_line_number)
-        .bind(cpt_code)
-        .bind(hcpcs_code)
-        .bind(modifier_1)
-        .bind(modifier_2)
-        .bind(charge_amount)
-        .bind(payment_amount)
-        .bind(adjustment_amount)
-        .bind(cagc)
-        .bind(carc_code)
-        .bind(rarc_code)
-        .bind(denial_reason)
-        .bind(denial_date)
-        .bind(organization_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(AppError::Db)?;
-
-        if row.is_some() {
-            denials_written += 1;
-        }
-    }
-
-    if !cleaned_denials.is_empty() {
-        let claim_numbers: Vec<&str> = cleaned_denials
-            .iter()
-            .filter_map(|d| d.get("claim_id").and_then(|v| v.as_str()))
-            .collect();
-        sqlx::query(
-            "UPDATE claims c \
-             SET status = CASE WHEN c.total_paid > 0 THEN 'partially_paid' ELSE 'denied' END, \
-                 updated_at = NOW() \
-             WHERE c.claim_number = ANY($1::text[]) AND c.organization_id = $2 \
-               AND EXISTS (SELECT 1 FROM denials d WHERE d.claim_id = c.id)",
-        )
-        .bind(claim_numbers)
-        .bind(organization_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::Db)?;
-    }
-
+    let payment_info = result.get("payment_info").cloned();
+    let stored = store_remittance(
+        &mut tx,
+        organization_id,
+        ingestion_id,
+        transaction_type.as_deref(),
+        payment_info.as_ref(),
+        &claims,
+        &denials,
+    )
+    .await?;
     tx.commit().await.map_err(AppError::Db)?;
+    reprocessing::audit_settled(pool, organization_id, &fname, &stored.settled).await;
 
     Ok((
         axum::http::StatusCode::CREATED,
@@ -968,9 +1126,13 @@ pub async fn ingest_file(
             "status": "stored",
             "ingestion_id": ingestion_id.to_string(),
             "file_name": fname,
-            "claims_stored": cleaned_claims.len(),
-            "denials_stored": denials_written,
-            "denials_skipped_as_duplicates": cleaned_denials.len() as i64 - denials_written,
+            "claims_stored": stored.claims,
+            "denials_stored": stored.denials_written,
+            "denials_skipped_as_duplicates": stored.denials as i64 - stored.denials_written,
+            "claims_reversed": stored.claims_reversed,
+            "denials_settled": stored.settled.len(),
+            "provider_adjustments_stored": stored.provider_adjustments,
+            "overpayments_identified": stored.overpayments,
         })),
     ))
 }
@@ -1050,15 +1212,6 @@ pub async fn store_parsed_data(
         })));
     }
 
-    let mut seen_numbers = HashSet::new();
-    let cleaned_claims: Vec<serde_json::Value> = body
-        .claims
-        .iter()
-        .map(|c| clean_claim(c, &mut seen_numbers))
-        .collect();
-    let cleaned_denials: Vec<serde_json::Value> =
-        body.denials.iter().map(|d| clean_denial(d)).collect();
-
     let mut tx = pool.begin().await.map_err(AppError::Db)?;
 
     let ingestion_row = sqlx::query(
@@ -1072,123 +1225,38 @@ pub async fn store_parsed_data(
     .bind(&body.file_path)
     .bind(body.file_size)
     .bind(&body.file_hash)
-    .bind(cleaned_claims.len() as i64)
-    .bind(cleaned_denials.len() as i64)
+    .bind(body.claims.len() as i64)
+    .bind(body.denials.len() as i64)
     .fetch_one(&mut *tx)
     .await
     .map_err(AppError::Db)?;
 
     let ingestion_id: Uuid = ingestion_row.get("id");
 
-    for claim_data in &cleaned_claims {
-        upsert_claim(
-            &mut tx,
-            organization_id,
-            body.transaction_type.as_deref(),
-            claim_data,
-        )
-        .await?;
-    }
-
-    let mut denials_written: i64 = 0;
-    for denial_data in &cleaned_denials {
-        let claim_id: &str = denial_data
-            .get("claim_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let service_line_number: Option<i64> = denial_data
-            .get("service_line_number")
-            .and_then(|v| v.as_i64());
-        let cpt_code: Option<&str> = denial_data.get("cpt_code").and_then(|v| v.as_str());
-        let hcpcs_code: Option<&str> = denial_data.get("hcpcs_code").and_then(|v| v.as_str());
-        let modifier_1: Option<&str> = denial_data.get("modifier_1").and_then(|v| v.as_str());
-        let modifier_2: Option<&str> = denial_data.get("modifier_2").and_then(|v| v.as_str());
-        let charge_amount: f64 = denial_data
-            .get("charge_amount")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let payment_amount: f64 = denial_data
-            .get("payment_amount")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let adjustment_amount: f64 = denial_data
-            .get("adjustment_amount")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let cagc: Option<&str> = denial_data.get("cagc").and_then(|v| v.as_str());
-        let carc_code: Option<&str> = denial_data.get("carc_code").and_then(|v| v.as_str());
-        let rarc_code: Option<&str> = denial_data.get("rarc_code").and_then(|v| v.as_str());
-        let denial_reason: Option<&str> = denial_data.get("denial_reason").and_then(|v| v.as_str());
-        let denial_date: Option<&str> = denial_data
-            .get("denial_date")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty());
-
-        let row = sqlx::query(
-            "INSERT INTO denials \
-             (claim_id, service_line_number, cpt_code, hcpcs_code, modifier_1, modifier_2, \
-              charge_amount, payment_amount, adjustment_amount, cagc, carc_code, rarc_code, \
-              adjustment_reason, denial_date, status, appeal_deadline) \
-             VALUES ((SELECT id FROM claims WHERE claim_number = $1 AND organization_id = $15), $2, $3, $4, $5, $6, \
-                     $7, $8, $9, $10, $11, $12, $13, $14::date, 'open', \
-                     appeal_deadline_for( \
-                         (SELECT payer_name FROM claims WHERE claim_number = $1 AND organization_id = $15), \
-                         COALESCE($14::date, CURRENT_DATE))) \
-             ON CONFLICT DO NOTHING \
-             RETURNING id",
-        )
-        .bind(claim_id)
-        .bind(service_line_number)
-        .bind(cpt_code)
-        .bind(hcpcs_code)
-        .bind(modifier_1)
-        .bind(modifier_2)
-        .bind(charge_amount)
-        .bind(payment_amount)
-        .bind(adjustment_amount)
-        .bind(cagc)
-        .bind(carc_code)
-        .bind(rarc_code)
-        .bind(denial_reason)
-        .bind(denial_date)
-        .bind(organization_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(AppError::Db)?;
-
-        if row.is_some() {
-            denials_written += 1;
-        }
-    }
-
-    if !cleaned_denials.is_empty() {
-        let claim_numbers: Vec<&str> = cleaned_denials
-            .iter()
-            .filter_map(|d| d.get("claim_id").and_then(|v| v.as_str()))
-            .collect();
-        sqlx::query(
-            "UPDATE claims c \
-             SET status = CASE WHEN c.total_paid > 0 THEN 'partially_paid' ELSE 'denied' END, \
-                 updated_at = NOW() \
-             WHERE c.claim_number = ANY($1::text[]) AND c.organization_id = $2 \
-               AND EXISTS (SELECT 1 FROM denials d WHERE d.claim_id = c.id)",
-        )
-        .bind(claim_numbers)
-        .bind(organization_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::Db)?;
-    }
-
+    let stored = store_remittance(
+        &mut tx,
+        organization_id,
+        ingestion_id,
+        body.transaction_type.as_deref(),
+        body.payment_info.as_ref(),
+        &body.claims,
+        &body.denials,
+    )
+    .await?;
     tx.commit().await.map_err(AppError::Db)?;
+    reprocessing::audit_settled(pool, organization_id, &body.file_name, &stored.settled).await;
 
     Ok(Json(serde_json::json!({
         "status": "stored",
         "ingestion_id": ingestion_id.to_string(),
         "file_name": body.file_name,
-        "claims_stored": cleaned_claims.len(),
-        "denials_stored": denials_written,
-        "denials_skipped_as_duplicates": cleaned_denials.len() as i64 - denials_written,
+        "claims_stored": stored.claims,
+        "denials_stored": stored.denials_written,
+        "denials_skipped_as_duplicates": stored.denials as i64 - stored.denials_written,
+        "claims_reversed": stored.claims_reversed,
+        "denials_settled": stored.settled.len(),
+        "provider_adjustments_stored": stored.provider_adjustments,
+        "overpayments_identified": stored.overpayments,
     })))
 }
 
@@ -1201,6 +1269,11 @@ pub fn router() -> Router<AppState> {
         .route("/log", post(list_ingestion_log))
         .route("/history", get(get_ingestion_history))
         .route("/store", post(store_parsed_data))
+        .route("/provider-adjustments", get(provider_adjustments::list))
+        .route(
+            "/provider-adjustments/summary",
+            get(provider_adjustments::summary),
+        )
 }
 
 #[cfg(test)]

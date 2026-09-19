@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import ProviderAdjustmentsSummary from '../components/ProviderAdjustments'
 
 const API_BASE = '/api/v1'
 
@@ -239,6 +240,7 @@ export default function Upload() {
 
       {/* Ingestion History */}
       <IngestionHistory />
+      <ProviderAdjustmentsSummary />
     </div>
   )
 }

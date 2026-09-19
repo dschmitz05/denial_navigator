@@ -91,9 +91,10 @@ is outermost deliberately, so a request rejected by access control is still
 recorded. Both are Tower middleware; in the Rust build they are
 `from_fn_with_state` layers over the whole router.
 
-Routes (`routes/` — 14 modules, mounted under `/api/v1`): `auth`, `claims`,
+Routes (`routes/` — 17 modules, mounted under `/api/v1`): `auth`, `claims`,
 `denials`, `analyses`, `appeals`, `ingestion`, `knowledge`, `feedback`,
-`reference`, `audit`, `users`, `notifications`, `system`, `retention`.
+`reference`, `audit`, `users`, `notifications`, `playbooks`, `system`,
+`retention`, `settings`, `write-offs`.
 
 The access decision — public paths → identity → MFA confinement → account
 currency → role authorisation — is one function
@@ -175,6 +176,43 @@ Retrieval is filtered by payer: a denial is argued from documents whose
 scope for every denial. Archived documents are excluded, and results below
 `MIN_SIMILARITY` are dropped rather than padded out with weak matches.
 
+**The evidence cut** decides what the model is allowed to argue from, and was
+calibrated with `scripts/eval_retrieval.py` over the labelled queries in
+`scripts/fixtures/retrieval_eval.json`:
+
+- **Anchors.** A chunk must contain one of the query's own terms as a whole
+  word. When the query carries codes, only the codes anchor — a denial query
+  also carries its CARC wording ("Non-covered charge"), which unrelated
+  policies share. This is what makes a denial no document covers return
+  nothing.
+- **`MIN_SIMILARITY`** (0.62) and **`RELATIVE_CUT`** (0.04, dropping results
+  that far below the best match).
+- **`ANCHOR_MAX_SHARE`** (0.25): a term carried by more than this share of the
+  scoped chunks is too common to anchor on.
+
+Two measured facts shape this. Similarity alone cannot tell a good match from a
+bad one with nomic-embed-text: the correct document scores 0.62–0.84 and the
+best wrong one 0.61–0.75, so raising `MIN_SIMILARITY` discards real policies
+before it stops weak ones. And the query's wording matters more than the
+threshold — asking with bare codes and the payer name put the right document
+first 57% of the time, against 86% for the labelled form `build_search_query`
+now sends (`routes/analyses.rs`), which is also what the anchors key on. When
+nothing survives the cut, the analysis records the `no_evidence` fallback
+reason rather than citing weak matches. `scripts/test_retrieval_cut.sh` covers
+it end to end, and `scripts/eval_retrieval.py --check` is the CI gate.
+
+Payer names are spelled differently by remittances, claims and payer manuals
+("BlueCross BlueShield", "BLUECROSS BLUESHIELD OF ILLINOIS"), so a document
+also matches when its `payer_name` and the claim's payer name or payer ID are
+aliases of one payer (`payers`, `payer_aliases`, migration 044). Aliases are
+compared after `normalize_payer_name` (lower case, punctuation and repeated
+spaces removed) and are per organization. Managers map them in Settings →
+Payers & aliases, which also lists the payer names in claims and documents that
+no alias covers yet (`routes/payers.rs`). The analysis search also passes the
+claim's date of service as `effective_on`, so a policy not yet in effect or
+already expired on that date is not used as evidence.
+`scripts/test_payer_retrieval.sh` covers both.
+
 ### LLM Service (`llm-service/` · `crates/llm-service/`)
 
 Builds the denial prompt, calls llama.cpp through the shared OpenAI-compatible
@@ -184,11 +222,22 @@ or deterministic fallback through an internal `RecommendationProvider` boundary;
 authorization, tenant scoping, evidence validation, and persistence remain in
 the gateway.
 
-`LLM_MODEL=auto` follows whatever model llama.cpp currently has loaded rather
-than trusting a name pinned in `.env`. The host runs one `llama-server` at a
-time and systemd swaps the model; llama.cpp ignores the `model` field in a
-request, so a stale name never breaks a call — it just records the wrong model
-against the analysis, which is the one field the audit trail must not lie about.
+`LLM_MODEL=auto` follows whatever model the LLM server currently serves rather
+than trusting a name pinned in `.env`: the served name is resolved (and cached
+for a minute) and sent on every request. llama-server ignores the `model`
+field, but vLLM rejects an unknown name with 404, so a literal `auto` once made
+every analysis fall back. A pinned name must be one the server serves; System
+health reports it when it is not.
+
+**Degraded analyses are recorded and shown.** `ai_analyses.fallback_reason` is
+`llm_error` when the model call failed and deterministic rules were used,
+`retrieval_error` when the policy search failed, and `no_evidence` when it
+found nothing, so the model answered without evidence. `GET /analyses/status`
+reports the organization as degraded when its 3 most recent analyses all have a
+reason (an outage now) or when that share over 24 hours reaches
+`AI_DEGRADED_THRESHOLD` (default 0.2). The Denials, Worklist, Claims and
+Appeals pages then show a banner, each such analysis carries a badge, and
+System health has an "AI analyses (24 h)" row.
 
 The health endpoint is bounded to two seconds because the gateway's probe
 budget is three; an unbounded probe made a busy model look like a dead service.
@@ -214,6 +263,7 @@ Core tables:
 | `ai_analyses` | LLM output, prompt, response, model, token counts |
 | `appeals_queue` | the operational worklist: appeals *and* non-appeal work |
 | `feedback_loop` | whether a recommendation was accepted and whether it paid |
+| `write_off_requests` | write-offs held for a manager's approval, and the decision |
 
 Reference: `carc_codes`, `rarc_codes`, `icd10_codes`, `cpt_codes`,
 `hcpcs_codes`, `modifier_codes`, `reference_imports`, `knowledge_documents`,
@@ -229,6 +279,16 @@ Constraints that carry real weight:
 - `ai_analyses.claim_id` has a foreign key to `claims`, like its siblings.
 - `appeal_deadline_for(payer, remit_date)` computes filing deadlines in SQL, so
   ingestion, backfill and recompute cannot disagree.
+- **Write-offs need a second person above a threshold.** Writing a denial off,
+  whether by closing a `write_off` worklist item or setting the denial to
+  `written_off`, goes through `routes/write_offs.rs::gate`. At or above the
+  organization's `write_off_approval_threshold` (0 = always) nothing changes:
+  the API answers 202 `pending_approval` and records a `write_off_requests` row
+  (one pending per denial, by partial unique index). A revenue cycle manager or
+  system administrator approves or rejects it under `/api/v1/write-offs`; a
+  `CHECK` and the handler both refuse a decision by the requester. Approval
+  writes the denial off and closes its worklist item; every step is audited.
+  `scripts/test_write_off_approval.sh` covers it end to end.
 
 Schema changes live in `database/migrations/`, numbered and managed by SQLx.
 `init.sql` remains the complete schema snapshot for fresh Compose volumes. On
@@ -246,6 +306,16 @@ Fernet-encrypted secrets. Sessions are revocable: `users.sessions_valid_from`
 is compared against the token's `iat`, and it is stored via
 `date_trunc('second', NOW())` because `iat` truncates to whole seconds — a
 sub-second timestamp revoked every token the instant it was issued.
+
+**Passwords someone else chose are replaced at first sign-in.**
+`users.must_change_password` is set for the seeded admin, for accounts an
+administrator registers, after an administrator reset, and (migration 037) for
+any account still on the documented default. Sign-in then returns only a
+10-minute token with scope `password_change`, which the middleware confines to
+`POST /auth/change-password` and `GET /auth/me`; TOTP, when required, comes
+first, so a leaked default password alone cannot set a new one. New passwords
+must be at least 12 characters, must not contain the username or be a common
+password (`crates/auth/src/password.rs`), and must differ from the current one.
 
 **Authorisation.** Roles are `system_admin`, `security_admin`,
 `revenue_cycle_manager`, `billing_specialist`, `coding_specialist`, `auditor`,
@@ -295,7 +365,68 @@ unset, a known placeholder, or (for Fernet) not an exact 32-byte key.
 - **835 upserts never overwrite a non-zero charge with zero.** A remittance
   reports what was paid, not always what was billed.
 - **Duplicate denials are skipped, not re-inserted**, and the reported count
-  comes from `RETURNING`, so "offered" and "stored" are separate numbers.
+  comes from `RETURNING`, so "offered" and "stored" are separate numbers. A
+  payer re-sending a remittance with a new production date is still a
+  duplicate: an active denial with the same claim, line, procedure, group,
+  CARC and amounts is never inserted again.
+- **Reprocessed claims settle their denials** (`crates/api-gateway/src/reprocessing.rs`).
+  A reversal (CLP02 `22`) marks the claim `reversed_at` and is not stored as a
+  claim, so its negated totals never overwrite it and the corrected loop that
+  follows keeps the real claim number; its CAS lines are not denials. When a
+  later remittance pays a claim or line that has an active denial from an
+  earlier file, and no longer applies that group and CARC there, the denial
+  closes itself: `overruled` if it was under appeal, else `resolved`, with
+  `resolution_source = 'remittance'`, the recovered amount, an audit entry, and
+  its open worklist items closed. Recovery analytics count these as recovered.
+  `scripts/test_reprocessing.sh` exercises the whole sequence.
+- **A patient balance goes to the next payer first.** The 837 parser records
+  the claim's own payer order (SBR01) and, from an other-subscriber loop (2320
+  SBR / 2330B NM1*PR), a payer that pays later; the 835 parser records a
+  crossover carrier (NM1*TT). Ingestion stores it as `claims.next_payer_name`
+  and `next_payer_source`. A PR adjustment on such a claim is recommended as
+  `bill_secondary`, by the deterministic fallback, by the recommendation
+  consistency check (`denial_engine::recommended_resolution`) and by the model,
+  whose prompt now names the other coverage. Parsing that loop no longer
+  overwrites the next claim's payer name or filing indicator.
+  `scripts/test_secondary_coverage.sh` covers both sources.
+- **PLB provider-level adjustments are kept.** The 835 parser always read PLB
+  segments, but neither ingestion path passed them on. They are now stored in
+  `provider_adjustments` with the payment's trace number and date: recoupments
+  of earlier overpayments (WO), forward balances (FB), interest (L6) and the
+  rest. A positive amount reduced the payment. A reference matching a claim
+  number links the line to that claim, whose detail lists it; the Upload page
+  totals them by month, payer and reason. A re-sent payment adds nothing
+  (unique key on trace, reason, reference, amount and period).
+  `scripts/test_provider_adjustments.sh` covers it. A remittance with only PLB lines
+  (a payment that is purely a recoupment) is stored, not skipped as empty.
+- **Overpayments are tracked to a refund deadline** (`routes/overpayments.rs`).
+  Ingestion records a line paid above its allowed amount (`AMT*B6`), and a
+  claim paid again under a different payer claim control number with no
+  reversal; a re-sent remittance keeps its control number and is not a
+  duplicate. Each gets a due date of identification plus the organization's
+  `overpayment_refund_days` (default 60, the Medicare rule; confirm it with
+  compliance). A PLB WO recoupment naming the claim marks it `recouped`;
+  managers record `refunded` or `disputed` on the Overpayments page, and
+  overdue ones reach them in the deadline digest.
+  `scripts/test_overpayments.sh` covers it.
+- **Payers run several clocks.** Besides the appeal window
+  (`payer_appeal_policies`, which sets `denials.appeal_deadline`),
+  `payer_deadline_rules` holds per-organization days for timely filing (from
+  the date of service), corrected claims and reconsiderations (from the
+  remittance date) and second-level appeals (from the first appeal's
+  decision); payer `*` is the default. The denial detail lists every deadline
+  that has a rule and marks the one for the recommended resolution
+  (`routes/deadlines.rs`). Managers edit the rules in Settings.
+  `scripts/test_deadlines.sh` covers it.
+- **Claims the payer never answers are followed up** (`routes/unanswered.rs`).
+  Ingestion stamps `claims.submitted_at` for an 837 and
+  `remittance_received_at` for an 835. A submitted claim with no remittance
+  after the payer's `payer_response` rule (30 days if none) appears on the
+  No Response page with days outstanding and, given a timely-filing rule, the
+  days left to file; staff record status inquiries, resubmissions and payer
+  contacts (`claim_followups`). Its first 835 takes it off the list. Claims
+  from before migration 043 have no submission time and are not listed.
+  `scripts/test_unanswered_claims.sh` covers it.
 - **Bulk queueing resolves the whole batch in one query** instead of three per
   denial, and reports partial success rather than failing the batch.
 - **The connection pool** is created once at startup with a liveness check;

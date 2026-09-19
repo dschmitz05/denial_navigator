@@ -5,6 +5,7 @@ type LoginResult =
   | { user: unknown }
   | { organizations: Array<{ id: string; name: string }> }
   | { mfa: 'totp_required' | 'enrollment_required'; mfaToken: string }
+  | { passwordChangeToken: string }
 
 type Enrollment = { qr_svg: string; secret: string }
 
@@ -14,7 +15,7 @@ type LoginProps = {
 }
 
 export default function Login({ onLogin, onComplete }: LoginProps) {
-  const { completeTotp, startEnrollment } = useAuth()
+  const { completeTotp, completePasswordChange, startEnrollment } = useAuth()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
@@ -27,6 +28,9 @@ export default function Login({ onLogin, onComplete }: LoginProps) {
   const [enrollment, setEnrollment] = useState<Enrollment | null>(null)
   const [organizations, setOrganizations] = useState<Array<{ id: string; name: string }>>([])
   const [organizationId, setOrganizationId] = useState('')
+  const [passwordChangeToken, setPasswordChangeToken] = useState<string | null>(null)
+  const [newPassword, setNewPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
@@ -37,6 +41,11 @@ export default function Login({ onLogin, onComplete }: LoginProps) {
       if ('organizations' in result) {
         setOrganizations(result.organizations)
         setStage('organization')
+        return
+      }
+      if ('passwordChangeToken' in result) {
+        setPasswordChangeToken(result.passwordChangeToken)
+        setStage('change-password')
         return
       }
       if ('mfa' in result) {
@@ -61,7 +70,12 @@ export default function Login({ onLogin, onComplete }: LoginProps) {
     setLoading(true)
     try {
       if (!mfaToken) throw new Error('Your sign-in session has expired. Please start again.')
-      await completeTotp(mfaToken, code, { enrolling: stage === 'enroll' })
+      const step = await completeTotp(mfaToken, code, { enrolling: stage === 'enroll' })
+      if ('passwordChangeToken' in step) {
+        setPasswordChangeToken(step.passwordChangeToken)
+        setStage('change-password')
+        return
+      }
       onComplete?.()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'That code is not valid')
@@ -71,8 +85,28 @@ export default function Login({ onLogin, onComplete }: LoginProps) {
     }
   }
 
+  const handlePasswordChange = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault()
+    setError('')
+    if (newPassword !== confirmPassword) {
+      setError('The two new passwords do not match')
+      return
+    }
+    setLoading(true)
+    try {
+      if (!passwordChangeToken) throw new Error('Your sign-in session has expired. Please start again.')
+      await completePasswordChange(passwordChangeToken, password, newPassword)
+      onComplete?.()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not change the password')
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const restart = () => {
     setStage('password'); setMfaToken(null); setCode(''); setEnrollment(null)
+    setPasswordChangeToken(null); setNewPassword(''); setConfirmPassword('')
     setError(''); setPassword('')
   }
 
@@ -102,6 +136,40 @@ export default function Login({ onLogin, onComplete }: LoginProps) {
                 {organizations.map((organization) => <option key={organization.id} value={organization.id}>{organization.name}</option>)}
               </select>
               <button className="btn btn-primary" type="submit" disabled={loading || !organizationId}>Continue</button>
+            </form>
+          ) : stage === 'change-password' ? (
+            <form onSubmit={handlePasswordChange} style={{ textAlign: 'left' }}>
+              <h3 style={{ fontSize: '1.05rem', marginBottom: 6 }}>Choose a new password</h3>
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: 16 }}>
+                This account's password was set by someone else. Choose your own before continuing:
+                at least 12 characters, not your username and not a common password.
+              </p>
+              {error && (
+                <div style={{
+                  background: 'var(--danger-light)', color: 'var(--danger-text)',
+                  border: '1px solid var(--danger)', borderRadius: 8,
+                  padding: 10, marginBottom: 16, fontSize: '0.9rem',
+                }}>{error}</div>
+              )}
+              <div className="form-group">
+                <label className="form-label">New password</label>
+                <input className="form-input" type="password" value={newPassword} autoFocus
+                  autoComplete="new-password" minLength={12} required
+                  onChange={e => setNewPassword(e.target.value)} style={{ width: '100%' }} />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Confirm new password</label>
+                <input className="form-input" type="password" value={confirmPassword}
+                  autoComplete="new-password" minLength={12} required
+                  onChange={e => setConfirmPassword(e.target.value)} style={{ width: '100%' }} />
+              </div>
+              <button type="submit" className="btn btn-primary" disabled={loading}
+                      style={{ width: '100%', marginBottom: 10 }}>
+                {loading ? 'Saving…' : 'Set password and sign in'}
+              </button>
+              <button type="button" className="btn" onClick={restart} style={{ width: '100%' }}>
+                Back
+              </button>
             </form>
           ) : stage !== 'password' ? (
             <form onSubmit={handleCode}>

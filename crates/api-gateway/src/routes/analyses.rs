@@ -74,7 +74,80 @@ pub struct StoreAnalysis {
     pub total_tokens: i64,
     #[serde(default)]
     pub allowed_evidence_ids: Vec<String>,
+    /// Why the analysis is degraded, if it is; see FALLBACK_REASONS.
+    #[serde(default)]
+    pub fallback_reason: Option<String>,
 }
+
+/// Values of `ai_analyses.fallback_reason`. Anything else from a caller is
+/// dropped rather than stored.
+/// The description an organization has imported for a code, if any. CPT and
+/// ICD-10 descriptions are licensed, so these tables are often empty and the
+/// query then carries the bare code.
+async fn code_description(pool: &sqlx::PgPool, table: &str, code: Option<&str>) -> Option<String> {
+    let code = code?;
+    let sql = format!("SELECT description FROM {table} WHERE code = $1 AND is_active");
+    sqlx::query_scalar(&sql)
+        .bind(code)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn code_descriptions(
+    pool: &sqlx::PgPool,
+    table: &str,
+    codes: &[String],
+) -> Vec<Option<String>> {
+    let mut out = Vec::with_capacity(codes.len());
+    for code in codes {
+        out.push(code_description(pool, table, Some(code)).await);
+    }
+    out
+}
+
+/// The retrieval query for a denial.
+///
+/// Bare codes retrieve badly: the embedding model has no idea that 80053 is a
+/// metabolic panel, and against the test knowledge base a query of payer name
+/// and codes put the right document first 57% of the time against 93% for this
+/// form (`scripts/eval_retrieval.py`). Each code is labelled the way documents
+/// write it ("CPT 80053"), which is also what the RAG engine anchors on, and
+/// the CARC description supplies the words the denial is actually about. The
+/// payer name is left out: retrieval is already scoped to the payer, and
+/// repeating it pulled in that payer's unrelated documents.
+fn build_search_query(
+    cpt: Option<&str>,
+    cpt_description: Option<&str>,
+    icd: &[String],
+    icd_descriptions: &[Option<String>],
+    carc: Option<&str>,
+    carc_description: Option<&str>,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(code) = cpt.filter(|c| !c.is_empty()) {
+        parts.push(match cpt_description {
+            Some(d) if !d.is_empty() => format!("CPT {code} {d}"),
+            _ => format!("CPT {code}"),
+        });
+    }
+    for (i, code) in icd.iter().filter(|c| !c.is_empty()).enumerate() {
+        parts.push(match icd_descriptions.get(i).and_then(|d| d.as_deref()) {
+            Some(d) if !d.is_empty() => format!("ICD-10 {code} {d}"),
+            _ => format!("ICD-10 {code}"),
+        });
+    }
+    if let Some(code) = carc.filter(|c| !c.is_empty()) {
+        parts.push(match carc_description {
+            Some(d) if !d.is_empty() => format!("CARC {code}: {d}"),
+            _ => format!("CARC {code}"),
+        });
+    }
+    parts.join(" ")
+}
+
+pub const FALLBACK_REASONS: &[&str] = &["llm_error", "retrieval_error", "no_evidence"];
 
 #[derive(Clone, Deserialize)]
 pub struct GenerateAnalysisRequest {
@@ -111,11 +184,25 @@ struct DeterministicRecommendationProvider<'a> {
     cagc: &'a str,
     carc: &'a str,
     description: &'a str,
+    /// A payer that pays after this claim's payer, if the claim names one.
+    next_payer: Option<&'a str>,
 }
 
 impl RecommendationProvider for DeterministicRecommendationProvider<'_> {
     async fn recommend(&self) -> Result<serde_json::Value, AppError> {
-        let (category, action, step) = if self.cagc == "PR" {
+        let secondary_step;
+        let (category, action, step) = if let (true, Some(payer)) =
+            (self.cagc == "PR", self.next_payer)
+        {
+            secondary_step = format!(
+                "Send the balance to {payer} with this remittance before billing the patient; bill the patient only for what it leaves."
+            );
+            (
+                "patient_responsibility",
+                "bill_secondary",
+                secondary_step.as_str(),
+            )
+        } else if self.cagc == "PR" {
             (
             "patient_responsibility",
             "bill_patient",
@@ -151,7 +238,7 @@ const ANALYSIS_COLUMNS: &str =
     aa.prompt_tokens, aa.completion_tokens, aa.total_tokens, aa.system_prompt_template, \
     aa.raw_prompt, aa.raw_response, aa.explanation, aa.denial_category, aa.root_cause_summary, \
     aa.required_action, aa.action_plan, aa.steps, aa.citations, aa.needs_appeal, aa.draft_appeal_letter, \
-    aa.confidence_score::float8 AS confidence_score, aa.created_at, aa.updated_at";
+    aa.confidence_score::float8 AS confidence_score, aa.fallback_reason, aa.created_at, aa.updated_at";
 
 /// Keep only unique IDs the model cited from the retrieved-evidence allowlist.
 /// The subsequent database query scopes those IDs to the analyzed claim's
@@ -349,15 +436,15 @@ pub async fn store_analysis(
              prompt_tokens, completion_tokens, total_tokens, \
              system_prompt_template, raw_prompt, raw_response, \
               explanation, denial_category, required_action, root_cause_summary, action_plan, steps, \
-              citations, needs_appeal, draft_appeal_letter, confidence_score) \
+              citations, needs_appeal, draft_appeal_letter, confidence_score, fallback_reason) \
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::jsonb, $19::jsonb, \
-                   $20::jsonb, $21, $22, $23) \
+                   $20::jsonb, $21, $22, $23, $24) \
            RETURNING id, denial_id, claim_id, model_name, provider_name, provider_version, prompt_template_version, \
                prompt_tokens, completion_tokens, \
                total_tokens, system_prompt_template, raw_prompt, raw_response, explanation, \
                denial_category, root_cause_summary, required_action, action_plan, steps, \
                citations, needs_appeal, draft_appeal_letter, confidence_score::float8 AS confidence_score, \
-              created_at, updated_at",
+              fallback_reason, created_at, updated_at",
     )
     .bind(denial_id)
     .bind(claim_id)
@@ -382,6 +469,11 @@ pub async fn store_analysis(
     .bind(needs_appeal)
     .bind(draft_appeal_letter)
     .bind(confidence_score)
+    .bind(
+        a.fallback_reason
+            .as_deref()
+            .filter(|reason| FALLBACK_REASONS.contains(reason)),
+    )
     .fetch_one(&state.pool)
     .await
     .map_err(AppError::Db)?;
@@ -421,7 +513,8 @@ async fn generate_analysis_for_request(
 
     let denial = sqlx::query(
         "SELECT d.cagc, d.cpt_code, d.carc_code, d.rarc_code, d.claim_id, \
-                c.claim_number, c.patient_name, c.payer_name, c.icd_10_codes, \
+                c.claim_number, c.patient_name, c.payer_name, c.icd_10_codes, c.next_payer_name, \
+                c.service_from, c.payer_id_number, \
                 cc.description AS carc_description, \
                 rc.description AS rarc_description \
          FROM denials d \
@@ -448,6 +541,9 @@ async fn generate_analysis_for_request(
     let rarc_code: Option<String> = denial.try_get("rarc_code").ok().flatten();
     let carc_description: Option<String> = denial.try_get("carc_description").ok().flatten();
     let rarc_description: Option<String> = denial.try_get("rarc_description").ok().flatten();
+    let next_payer_name: Option<String> = denial.try_get("next_payer_name").ok().flatten();
+    let service_from: Option<chrono::NaiveDate> = denial.try_get("service_from").ok().flatten();
+    let payer_id_number: Option<String> = denial.try_get("payer_id_number").ok().flatten();
     let icd_codes: Vec<String> = denial
         .try_get::<Option<Vec<String>>, _>("icd_10_codes")
         .ok()
@@ -457,16 +553,21 @@ async fn generate_analysis_for_request(
     // All of them, not just the first: a medical-necessity denial usually
     // turns on the secondary diagnosis. Capped so a long list cannot drown
     // out the CPT and CARC terms.
-    let icd = icd_codes
-        .iter()
-        .take(5)
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let icd: Vec<String> = icd_codes.iter().take(5).cloned().collect();
     let cpt = cpt_code.as_deref().unwrap_or("");
     let carc = carc_code.as_deref().unwrap_or("");
-    let search_query = format!("{payer_name} {cpt} {icd} {carc}");
+    let cpt_description = code_description(&state.pool, "cpt_codes", cpt_code.as_deref()).await;
+    let icd_descriptions = code_descriptions(&state.pool, "icd10_codes", &icd).await;
+    let search_query = build_search_query(
+        cpt_code.as_deref(),
+        cpt_description.as_deref(),
+        &icd,
+        &icd_descriptions,
+        carc_code.as_deref(),
+        carc_description.as_deref(),
+    );
 
+    let mut retrieval_failed = false;
     let policy_texts: Vec<String> = match state
         .rag
         // The RAG service refuses unscoped searches. Forward the organization
@@ -477,6 +578,10 @@ async fn generate_analysis_for_request(
             5,
             serde_json::json!({
                 "payer": payer_name,
+                "payer_id_number": payer_id_number,
+                // Only policies in effect on the date of service count as
+                // evidence for this claim.
+                "effective_on": service_from.map(|d| d.to_string()),
                 "organization_id": organization_id,
             }),
         )
@@ -501,8 +606,16 @@ async fn generate_analysis_for_request(
             .unwrap_or_default(),
         Err(e) => {
             tracing::warn!("RAG search failed: {e}");
+            retrieval_failed = true;
             Vec::new()
         }
+    };
+    let retrieval_fallback = if retrieval_failed {
+        Some("retrieval_error")
+    } else if policy_texts.is_empty() {
+        Some("no_evidence")
+    } else {
+        None
     };
 
     let prompt = state
@@ -510,8 +623,9 @@ async fn generate_analysis_for_request(
         .build_prompt(&serde_json::json!({
             "claim_id": claim_number,
             "payer_name": payer_name,
+            "next_payer_name": next_payer_name,
             "cpt_code": cpt,
-            "icd10_code": icd,
+            "icd10_code": icd.join(" "),
             "cagc": cagc.as_deref().unwrap_or(""),
             "carc_code": carc,
             "carc_definition": carc_description.as_deref().unwrap_or("Unknown"),
@@ -537,6 +651,7 @@ async fn generate_analysis_for_request(
             "claim_id": claim_db_id.to_string(),
             "prompt": prompt,
             "allowed_evidence_ids": allowed_evidence_ids,
+            "fallback_reason": retrieval_fallback,
             "temperature": request.temperature,
         }),
     };
@@ -552,6 +667,7 @@ async fn generate_analysis_for_request(
                 description: carc_description
                     .as_deref()
                     .unwrap_or("the payer's adjustment reason"),
+                next_payer: next_payer_name.as_deref(),
             }
             .recommend()
             .await?;
@@ -602,6 +718,7 @@ async fn generate_analysis_for_request(
                     completion_tokens: 0,
                     total_tokens: 0,
                     allowed_evidence_ids: Vec::new(),
+                    fallback_reason: Some("llm_error".into()),
                 }),
             )
             .await?;
@@ -661,6 +778,50 @@ mod tests {
         RecommendationProvider,
     };
 
+    #[test]
+    fn a_denial_query_labels_each_code_and_carries_the_carc_wording() {
+        let q = super::build_search_query(
+            Some("80053"),
+            None,
+            &["E11.65".to_string()],
+            &[None],
+            Some("50"),
+            Some("These are non-covered services because this is not deemed a 'medical necessity'"),
+        );
+        assert_eq!(
+            q,
+            "CPT 80053 ICD-10 E11.65 CARC 50: These are non-covered services \
+             because this is not deemed a 'medical necessity'"
+                .replace("             ", "")
+        );
+    }
+
+    #[test]
+    fn descriptions_are_used_when_the_organization_has_imported_them() {
+        let q = super::build_search_query(
+            Some("20610"),
+            Some("Arthrocentesis, major joint"),
+            &["M17.11".to_string()],
+            &[Some(
+                "Unilateral primary osteoarthritis, right knee".to_string(),
+            )],
+            None,
+            None,
+        );
+        assert_eq!(
+            q,
+            "CPT 20610 Arthrocentesis, major joint ICD-10 M17.11 Unilateral primary osteoarthritis, right knee"
+        );
+    }
+
+    #[test]
+    fn a_denial_with_no_codes_has_an_empty_query() {
+        assert_eq!(
+            super::build_search_query(None, None, &[], &[], Some(""), None),
+            ""
+        );
+    }
+
     const FIRST: &str = "11111111-1111-1111-1111-111111111111";
     const SECOND: &str = "22222222-2222-2222-2222-222222222222";
 
@@ -712,6 +873,7 @@ mod tests {
             cagc: "PR",
             carc: "1",
             description: "Deductible amount",
+            next_payer: None,
         }
         .recommend()
         .await
@@ -719,6 +881,25 @@ mod tests {
 
         assert_eq!(recommendation["required_action"], "bill_patient");
         assert_eq!(recommendation["provider"], "deterministic_rules");
+    }
+
+    #[tokio::test]
+    async fn a_patient_balance_goes_to_the_next_payer_first() {
+        let recommendation = DeterministicRecommendationProvider {
+            cagc: "PR",
+            carc: "2",
+            description: "Coinsurance amount",
+            next_payer: Some("SYNTHETIC SECONDARY PLAN"),
+        }
+        .recommend()
+        .await
+        .unwrap();
+
+        assert_eq!(recommendation["required_action"], "bill_secondary");
+        assert!(recommendation["steps"][0]["action"]
+            .as_str()
+            .unwrap()
+            .contains("SYNTHETIC SECONDARY PLAN"));
     }
 }
 
@@ -814,9 +995,85 @@ pub async fn get_generation_job(
     Ok(Json(row_to_json(&row)))
 }
 
+/// Analyses needed before a fallback share is judged; one failure out of two
+/// is noise, not an outage.
+const DEGRADED_MIN_ANALYSES: i64 = 3;
+
+/// Whether AI analyses are degraded: either the organization's most recent
+/// `DEGRADED_MIN_ANALYSES` analyses all fell back or ran without evidence (an
+/// outage happening now), or that share over the last 24 hours reaches
+/// `AI_DEGRADED_THRESHOLD` (default 0.2). The 24-hour share alone reacts too
+/// slowly: after a busy day, several failures in a row are still a small share.
+pub async fn ai_status(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    Ok(Json(
+        ai_fallback_summary(&state.pool, organization_id(&principal)?).await?,
+    ))
+}
+
+/// The body of [`ai_status`], shared with system health.
+pub async fn ai_fallback_summary(
+    pool: &sqlx::PgPool,
+    organization_id: Uuid,
+) -> Result<serde_json::Value, AppError> {
+    let threshold = std::env::var("AI_DEGRADED_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| (0.0..=1.0).contains(v))
+        .unwrap_or(0.2);
+    let row = sqlx::query(
+        "SELECT COUNT(*) AS total, \
+                COUNT(*) FILTER (WHERE aa.fallback_reason IS NOT NULL) AS degraded, \
+                COUNT(*) FILTER (WHERE aa.fallback_reason = 'llm_error') AS llm_error, \
+                COUNT(*) FILTER (WHERE aa.fallback_reason = 'retrieval_error') AS retrieval_error, \
+                COUNT(*) FILTER (WHERE aa.fallback_reason = 'no_evidence') AS no_evidence \
+         FROM ai_analyses aa JOIN claims c ON c.id = aa.claim_id \
+         WHERE c.organization_id = $1 AND aa.created_at > NOW() - INTERVAL '24 hours'",
+    )
+    .bind(organization_id)
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::Db)?;
+    let recent: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT aa.fallback_reason FROM ai_analyses aa JOIN claims c ON c.id = aa.claim_id \
+         WHERE c.organization_id = $1 ORDER BY aa.created_at DESC LIMIT $2",
+    )
+    .bind(organization_id)
+    .bind(DEGRADED_MIN_ANALYSES)
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Db)?;
+    let recent_all_degraded =
+        recent.len() as i64 == DEGRADED_MIN_ANALYSES && recent.iter().all(Option::is_some);
+    let total: i64 = row.get("total");
+    let degraded_count: i64 = row.get("degraded");
+    let share = if total == 0 {
+        0.0
+    } else {
+        degraded_count as f64 / total as f64
+    };
+    Ok(serde_json::json!({
+        "degraded": recent_all_degraded
+            || (total >= DEGRADED_MIN_ANALYSES && share >= threshold),
+        "recent_all_degraded": recent_all_degraded,
+        "window_hours": 24,
+        "analyses": total,
+        "fallback_share": share,
+        "threshold": threshold,
+        "reasons": {
+            "llm_error": row.get::<i64, _>("llm_error"),
+            "retrieval_error": row.get::<i64, _>("retrieval_error"),
+            "no_evidence": row.get::<i64, _>("no_evidence"),
+        },
+    }))
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_analyses))
+        .route("/status", get(ai_status))
         .route("/store", post(store_analysis))
         .route("/generate", post(generate_analysis))
         .route("/generate-jobs", post(enqueue_generation))

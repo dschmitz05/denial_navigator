@@ -1,4 +1,5 @@
 use axum::extract::{Query, State};
+use axum::http::StatusCode;
 use axum::routing::get;
 use axum::Router;
 use axum::{Extension, Json};
@@ -14,6 +15,7 @@ use sqlx::{QueryBuilder, Row};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+use crate::routes::{deadlines, write_offs};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -407,9 +409,11 @@ pub async fn denial_financial_summary(
     Extension(principal): Extension<Principal>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let organization_id = organization_id(&principal)?;
+    // A later remittance paying the denied line is the payer's own answer, so
+    // it outranks an outcome recorded by hand in the feedback loop.
     let row = sqlx::query(
         "WITH tenant_denials AS ( \
-             SELECT d.id, d.charge_amount \
+             SELECT d.id, d.charge_amount, d.resolution_source \
              FROM denials d JOIN claims c ON c.id = d.claim_id \
              WHERE c.organization_id = $1 \
          ), latest_outcome AS ( \
@@ -419,15 +423,20 @@ pub async fn denial_financial_summary(
              JOIN tenant_denials td ON td.id = aa.denial_id \
              WHERE fl.was_paid_on_resubmit IS NOT NULL \
              ORDER BY aa.denial_id, fl.created_at DESC \
+         ), outcomes AS ( \
+             SELECT td.charge_amount, \
+                    CASE WHEN td.resolution_source = 'remittance' THEN TRUE \
+                         ELSE lo.was_paid_on_resubmit END AS paid \
+             FROM tenant_denials td LEFT JOIN latest_outcome lo ON lo.denial_id = td.id \
          ) \
          SELECT COUNT(*) AS total_denials, \
-                COALESCE(SUM(td.charge_amount), 0)::float8 AS denied_dollars, \
-                COALESCE(SUM(td.charge_amount) FILTER (WHERE lo.was_paid_on_resubmit), 0)::float8 AS recovered_dollars, \
-                COALESCE(SUM(td.charge_amount) FILTER (WHERE lo.was_paid_on_resubmit IS FALSE), 0)::float8 AS not_recovered_dollars, \
-                COALESCE(SUM(td.charge_amount) FILTER (WHERE lo.was_paid_on_resubmit IS NULL), 0)::float8 AS unresolved_dollars, \
-                COUNT(*) FILTER (WHERE lo.was_paid_on_resubmit IS NOT NULL) AS outcome_known_count, \
-                COUNT(*) FILTER (WHERE lo.was_paid_on_resubmit) AS recovered_count \
-         FROM tenant_denials td LEFT JOIN latest_outcome lo ON lo.denial_id = td.id",
+                COALESCE(SUM(charge_amount), 0)::float8 AS denied_dollars, \
+                COALESCE(SUM(charge_amount) FILTER (WHERE paid), 0)::float8 AS recovered_dollars, \
+                COALESCE(SUM(charge_amount) FILTER (WHERE paid IS FALSE), 0)::float8 AS not_recovered_dollars, \
+                COALESCE(SUM(charge_amount) FILTER (WHERE paid IS NULL), 0)::float8 AS unresolved_dollars, \
+                COUNT(*) FILTER (WHERE paid IS NOT NULL) AS outcome_known_count, \
+                COUNT(*) FILTER (WHERE paid) AS recovered_count \
+         FROM outcomes",
     )
     .bind(organization_id)
     .fetch_one(&state.pool)
@@ -679,7 +688,8 @@ pub async fn get_denial(
          aa.id AS ai_analysis_id, \
           aa.explanation, aa.action_plan, aa.steps, aa.citations, aa.draft_appeal_letter, \
          aa.denial_category, aa.required_action, aa.needs_appeal, \
-         aa.confidence_score, \
+         aa.confidence_score, aa.fallback_reason, aa.provider_name AS analysis_provider, \
+         c.next_payer_name, c.next_payer_source, c.service_from, \
          aq.id AS appeal_id, aq.outcome_status AS appeal_status, \
          aq.resolution_type AS appeal_resolution_type \
          FROM denials d \
@@ -709,11 +719,38 @@ pub async fn get_denial(
     let required_action: Option<String> = row.try_get("required_action").unwrap_or(None);
     let denial_category: Option<String> = row.try_get("denial_category").unwrap_or(None);
 
+    let next_payer_name: Option<String> = row.try_get("next_payer_name").unwrap_or(None);
     let recommendation = recommended_resolution(
         cagc.as_deref(),
         required_action.as_deref(),
         denial_category.as_deref(),
+        next_payer_name.as_deref(),
     );
+    let payer_name: String = row.try_get("payer_name").ok().flatten().unwrap_or_default();
+    let first_appeal_decision: Option<NaiveDate> = sqlx::query_scalar(
+        "SELECT COALESCE(payer_response, updated_at::date) FROM appeals_queue \
+         WHERE denial_id = $1 AND resolution_type = 'appeal_letter' AND outcome_status = 'denied_again' \
+         ORDER BY updated_at LIMIT 1",
+    )
+    .bind(denial_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(AppError::Db)?
+    .flatten();
+    let rules = deadlines::rule_days(&state.pool, organization_id, &payer_name).await?;
+    let (all_deadlines, action_deadline) = deadlines::deadlines(
+        &rules,
+        &deadlines::Anchors {
+            date_of_service: row.try_get("service_from").ok().flatten(),
+            remittance_date: row.try_get("denial_date").ok().flatten(),
+            first_appeal_decision,
+            appeal_level_1_due: row.try_get("appeal_deadline").ok().flatten(),
+        },
+        recommendation.resolution.as_deref(),
+        chrono::Local::now().date_naive(),
+    );
+    denial["deadlines"] = serde_json::json!(all_deadlines);
+    denial["action_deadline"] = action_deadline.unwrap_or(serde_json::Value::Null);
     denial["recommended_resolution"] = serde_json::to_value(recommendation.resolution).unwrap();
     denial["recommendation_note"] = serde_json::to_value(recommendation.note).unwrap();
 
@@ -857,7 +894,7 @@ pub async fn update_denial(
     Extension(principal): Extension<Principal>,
     axum::extract::Path(denial_id): axum::extract::Path<Uuid>,
     Json(body): Json<DenialUpdate>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
     let organization_id = organization_id(&principal)?;
     let mut sets = Vec::new();
 
@@ -882,6 +919,21 @@ pub async fn update_denial(
                 "Invalid denial status transition: {current} -> {status}"
             )));
         }
+        if changed && status == "written_off" {
+            if let write_offs::Gate::Pending {
+                request_id,
+                amount,
+                threshold,
+            } = write_offs::gate(&state.pool, &principal, denial_id, None, None).await?
+            {
+                return Ok((
+                    StatusCode::ACCEPTED,
+                    Json(write_offs::Gate::pending_response(
+                        request_id, amount, threshold,
+                    )),
+                ));
+            }
+        }
         sets.push(format!("status = ${}", sets.len() + 1));
         (changed, if changed { Some(current) } else { None })
     } else {
@@ -896,8 +948,10 @@ pub async fn update_denial(
         return Err(AppError::BadRequest("No updates provided".into()));
     }
 
-    sets.push("updated_at = NOW()".to_string());
+    // Number the WHERE placeholders from the bound SET values only; the
+    // `updated_at` expression below binds nothing.
     let id_idx = sets.len() + 1;
+    sets.push("updated_at = NOW()".to_string());
 
     let sql = format!(
         "UPDATE denials SET {} WHERE id = ${} AND claim_id IN (SELECT id FROM claims WHERE organization_id = ${}) RETURNING *",
@@ -940,7 +994,7 @@ pub async fn update_denial(
         .await;
     }
 
-    Ok(Json(row_to_json(&row)))
+    Ok((StatusCode::OK, Json(row_to_json(&row))))
 }
 
 pub fn router() -> Router<AppState> {
@@ -956,6 +1010,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/appeal-windows",
             get(list_appeal_windows).put(set_appeal_window),
+        )
+        .route(
+            "/deadline-rules",
+            get(deadlines::list_rules).put(deadlines::set_rule),
+        )
+        .route(
+            "/deadline-rules/{rule_id}",
+            axum::routing::delete(deadlines::delete_rule),
         )
         .route("/{denial_id}", get(get_denial).patch(update_denial))
 }

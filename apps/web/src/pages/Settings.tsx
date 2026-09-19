@@ -13,8 +13,9 @@ type AppealWindow = AnyRecord & { payer_name: string; appeal_window_days?: numbe
 const STATUS_LOOK: Record<string, { icon: string; word: string; tone: string }> = {
   ok:       { icon: '✅', word: 'Running',      tone: 'success' },
   degraded: { icon: '⚠️', word: 'Degraded',     tone: 'warning' },
-  down:     { icon: '❌', word: 'Not reachable', tone: 'danger' },
+  down:     { icon: '❌', word: 'Not working',  tone: 'danger' },
   starting: { icon: '⏳', word: 'Starting',      tone: 'warning' },
+  disabled: { icon: '⏸️', word: 'Turned off',   tone: '' },
 }
 
 const KIND_LABEL: Record<string, string> = {
@@ -378,6 +379,315 @@ function ReferenceCodes({ canEdit }: { canEdit: boolean }) {
   )
 }
 
+/** The amount at or above which a write-off needs a manager's approval.
+ *  Admin-only, like the API behind it. */
+function WriteOffThreshold() {
+  const [value, setValue] = useState('')
+  const [saved, setSaved] = useState<number | null>(null)
+  const [message, setMessage] = useState<{ error: boolean; text: string } | null>(null)
+
+  useEffect(() => {
+    fetch(`${API_BASE}/settings/write-off-approval`)
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then(d => { setSaved(d.threshold); setValue(String(d.threshold)) })
+      .catch(() => setMessage({ error: true, text: 'Could not load the write-off approval threshold' }))
+  }, [])
+
+  const save = async () => {
+    const threshold = Number(value)
+    if (!Number.isFinite(threshold) || threshold < 0) {
+      setMessage({ error: true, text: 'Enter an amount of 0 or more' })
+      return
+    }
+    const resp = await fetch(`${API_BASE}/settings/write-off-approval`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ threshold }),
+    })
+    if (resp.ok) {
+      setSaved(threshold)
+      setMessage({ error: false, text: 'Saved' })
+    } else {
+      setMessage({ error: true, text: `Could not save (HTTP ${resp.status})` })
+    }
+  }
+
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <h4 style={{ marginBottom: 8 }}>Write-off approval</h4>
+      <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: 0 }}>
+        Write-offs at or above this amount wait for a revenue cycle manager or administrator other than the
+        person who asked. 0 means every write-off needs approval.
+      </p>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <span>$</span>
+        <input className="form-input" style={{ maxWidth: 160 }} type="number" min={0} step="0.01"
+          value={value} onChange={e => setValue(e.target.value)} />
+        <button className="btn btn-primary" disabled={saved !== null && Number(value) === saved} onClick={save}>Save</button>
+        {message && <span style={{ color: message.error ? 'var(--danger)' : 'var(--success-text)' }}>{message.text}</span>}
+      </div>
+    </div>
+  )
+}
+
+/** Days from identifying an overpayment to its refund deadline. */
+function OverpaymentRefundDays() {
+  const [value, setValue] = useState('')
+  const [message, setMessage] = useState<{ error: boolean; text: string } | null>(null)
+
+  useEffect(() => {
+    fetch(`${API_BASE}/settings/overpayment-refund`)
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then(d => setValue(String(d.days)))
+      .catch(() => setMessage({ error: true, text: 'Could not load the refund window' }))
+  }, [])
+
+  const save = async () => {
+    const days = Number(value)
+    if (!Number.isInteger(days) || days < 1 || days > 3650) {
+      setMessage({ error: true, text: 'Enter a whole number of days between 1 and 3650' })
+      return
+    }
+    const resp = await fetch(`${API_BASE}/settings/overpayment-refund`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ days }),
+    })
+    setMessage(resp.ok ? { error: false, text: 'Saved' } : { error: true, text: `Could not save (HTTP ${resp.status})` })
+  }
+
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <h4 style={{ marginBottom: 8 }}>Overpayment refund window</h4>
+      <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: 0 }}>
+        Days from identifying an overpayment to its refund deadline. Many payers set this by rule (60 days
+        for Medicare); confirm the value with your compliance team.
+      </p>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <input className="form-input" style={{ maxWidth: 120 }} type="number" min={1} max={3650} step={1}
+          value={value} onChange={e => setValue(e.target.value)} />
+        <span>days</span>
+        <button className="btn btn-primary" onClick={save}>Save</button>
+        {message && <span style={{ color: message.error ? 'var(--danger)' : 'var(--success-text)' }}>{message.text}</span>}
+      </div>
+    </div>
+  )
+}
+
+const DEADLINE_TYPES: Record<string, string> = {
+  timely_filing: 'Timely filing (from date of service)',
+  corrected_claim: 'Corrected claim (from remittance)',
+  reconsideration: 'Reconsideration (from remittance)',
+  appeal_level_2: 'Second-level appeal (from first appeal decision)',
+  payer_response: 'Payer response time (days before a claim needs follow-up)',
+}
+type DeadlineRule = { id: string; payer_name: string; deadline_type: string; days: number; notes?: string | null }
+
+/** Payer clocks beyond the appeal window. '*' is the organization default. */
+function PayerDeadlineRules({ canEdit }: { canEdit: boolean }) {
+  const [rules, setRules] = useState<DeadlineRule[]>([])
+  const [draft, setDraft] = useState({ payer_name: '*', deadline_type: 'timely_filing', days: '' })
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(() => {
+    fetch(`${API_BASE}/denials/deadline-rules`)
+      .then(r => (r.ok ? r.json() : []))
+      .then(setRules)
+      .catch(() => setRules([]))
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  const save = async () => {
+    setError(null)
+    const resp = await fetch(`${API_BASE}/denials/deadline-rules`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...draft, days: Number(draft.days) }),
+    })
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}))
+      setError(typeof data.detail === 'string' ? data.detail : `Could not save (HTTP ${resp.status})`)
+      return
+    }
+    setDraft({ ...draft, days: '' })
+    load()
+  }
+  const remove = async (id: string) => {
+    await fetch(`${API_BASE}/denials/deadline-rules/${id}`, { method: 'DELETE' })
+    load()
+  }
+
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <h4 style={{ marginBottom: 8 }}>Payer deadlines</h4>
+      <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: 0 }}>
+        Clocks beyond the appeal window, from each payer's manual or contract. A denial shows every deadline
+        that has a rule here and marks the one for its recommended action. Payer <code>*</code> is the default.
+      </p>
+      <div className="table-container">
+        <table>
+          <thead><tr><th>Payer</th><th>Deadline</th><th>Days</th><th></th></tr></thead>
+          <tbody>
+            {rules.length === 0 && <tr><td colSpan={4} style={{ textAlign: 'center' }}>No rules yet</td></tr>}
+            {rules.map(r => (
+              <tr key={r.id}>
+                <td>{r.payer_name === '*' ? 'Default (*)' : r.payer_name}</td>
+                <td>{DEADLINE_TYPES[r.deadline_type] || r.deadline_type}</td>
+                <td>{r.days}</td>
+                <td>{canEdit && <button className="btn btn-sm" onClick={() => remove(r.id)}>Remove</button>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {canEdit && (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' }}>
+          <input className="form-input" style={{ maxWidth: 240 }} placeholder="Payer name or *" value={draft.payer_name}
+            onChange={e => setDraft({ ...draft, payer_name: e.target.value })} />
+          <select className="form-select" value={draft.deadline_type} onChange={e => setDraft({ ...draft, deadline_type: e.target.value })}>
+            {Object.entries(DEADLINE_TYPES).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+          </select>
+          <input className="form-input" style={{ maxWidth: 100 }} type="number" min={1} max={3650} placeholder="Days"
+            value={draft.days} onChange={e => setDraft({ ...draft, days: e.target.value })} />
+          <button className="btn btn-primary" disabled={!draft.payer_name.trim() || !draft.days} onClick={save}>Save rule</button>
+          {error && <span style={{ color: 'var(--danger)' }}>{error}</span>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+type PayerAlias = { id: string; alias: string; kind: 'name' | 'payer_id' }
+type Payer = { id: string; name: string; aliases: PayerAlias[] }
+type UnmappedName = { name: string; source: string; count: number }
+
+/** Payer names and IDs that mean the same payer, so knowledge documents match claims however each spells it. */
+function PayersAndAliases({ canEdit }: { canEdit: boolean }) {
+  const [payers, setPayers] = useState<Payer[]>([])
+  const [unmapped, setUnmapped] = useState<UnmappedName[]>([])
+  const [newPayer, setNewPayer] = useState('')
+  const [aliasDraft, setAliasDraft] = useState<Record<string, { alias: string; kind: 'name' | 'payer_id' }>>({})
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(() => {
+    fetch(`${API_BASE}/payers`)
+      .then(r => (r.ok ? r.json() : { payers: [], unmapped: [] }))
+      .then(data => { setPayers(data.payers || []); setUnmapped(data.unmapped || []) })
+      .catch(() => { setPayers([]); setUnmapped([]) })
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  const send = async (url: string, method: string, body?: unknown) => {
+    setError(null)
+    const resp = await fetch(url, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    })
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}))
+      setError(typeof data.detail === 'string' ? data.detail : `Could not save (HTTP ${resp.status})`)
+      return false
+    }
+    load()
+    return true
+  }
+  const createPayer = async (name: string) => {
+    if (await send(`${API_BASE}/payers`, 'POST', { name })) setNewPayer('')
+  }
+  const addAlias = async (payerId: string, alias: string, kind: 'name' | 'payer_id' = 'name') => {
+    if (await send(`${API_BASE}/payers/${payerId}/aliases`, 'POST', { alias, kind })) {
+      setAliasDraft({ ...aliasDraft, [payerId]: { alias: '', kind: 'name' } })
+    }
+  }
+
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <h4 style={{ marginBottom: 8 }}>Payers &amp; aliases</h4>
+      <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: 0 }}>
+        Remittances, claims and payer manuals spell payer names differently. Names and payer IDs listed under one
+        payer are treated as the same payer when the AI looks for policies that apply to a denial.
+      </p>
+      <div className="table-container">
+        <table>
+          <thead><tr><th>Payer</th><th>Aliases</th>{canEdit && <th>Add alias</th>}</tr></thead>
+          <tbody>
+            {payers.length === 0 && <tr><td colSpan={canEdit ? 3 : 2} style={{ textAlign: 'center' }}>No payers yet</td></tr>}
+            {payers.map(p => {
+              const draft = aliasDraft[p.id] || { alias: '', kind: 'name' as const }
+              return (
+                <tr key={p.id}>
+                  <td>
+                    {p.name}
+                    {canEdit && <button className="btn btn-sm" style={{ marginLeft: 8 }}
+                      onClick={() => send(`${API_BASE}/payers/${p.id}`, 'DELETE')}>Delete</button>}
+                  </td>
+                  <td>
+                    {p.aliases.map(a => (
+                      <span key={a.id} className="badge" style={{ marginRight: 6, display: 'inline-block', marginBottom: 4 }}>
+                        {a.kind === 'payer_id' ? `ID ${a.alias}` : a.alias}
+                        {canEdit && <button className="btn btn-sm" style={{ marginLeft: 4, padding: '0 4px' }} title="Remove alias"
+                          onClick={() => send(`${API_BASE}/payers/${p.id}/aliases/${a.id}`, 'DELETE')}>×</button>}
+                      </span>
+                    ))}
+                  </td>
+                  {canEdit && (
+                    <td>
+                      <div style={{ display: 'flex', gap: 4 }}>
+                        <input className="form-input" style={{ maxWidth: 200 }} placeholder="Name or payer ID" value={draft.alias}
+                          onChange={e => setAliasDraft({ ...aliasDraft, [p.id]: { ...draft, alias: e.target.value } })} />
+                        <select className="form-select" value={draft.kind}
+                          onChange={e => setAliasDraft({ ...aliasDraft, [p.id]: { ...draft, kind: e.target.value as 'name' | 'payer_id' } })}>
+                          <option value="name">Name</option>
+                          <option value="payer_id">Payer ID</option>
+                        </select>
+                        <button className="btn btn-sm" disabled={!draft.alias.trim()} onClick={() => addAlias(p.id, draft.alias, draft.kind)}>Add</button>
+                      </div>
+                    </td>
+                  )}
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+      {canEdit && (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' }}>
+          <input className="form-input" style={{ maxWidth: 280 }} placeholder="New payer name" value={newPayer}
+            onChange={e => setNewPayer(e.target.value)} />
+          <button className="btn btn-primary" disabled={!newPayer.trim()} onClick={() => createPayer(newPayer)}>Add payer</button>
+          {error && <span style={{ color: 'var(--danger)' }}>{error}</span>}
+        </div>
+      )}
+      {unmapped.length > 0 && (
+        <details style={{ marginTop: 12 }}>
+          <summary>{unmapped.length} payer name{unmapped.length === 1 ? '' : 's'} not mapped to a payer</summary>
+          <table style={{ marginTop: 8 }}>
+            <thead><tr><th>Name</th><th>Seen in</th><th>Count</th>{canEdit && payers.length > 0 && <th>Add as alias of</th>}</tr></thead>
+            <tbody>
+              {unmapped.map(u => (
+                <tr key={`${u.source}:${u.name}`}>
+                  <td>{u.name}</td>
+                  <td>{u.source}</td>
+                  <td>{u.count}</td>
+                  {canEdit && payers.length > 0 && (
+                    <td>
+                      <select className="form-select" defaultValue="" onChange={e => e.target.value && addAlias(e.target.value, u.name)}>
+                        <option value="">Choose payer…</option>
+                        {payers.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                      </select>
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </details>
+      )}
+    </div>
+  )
+}
+
 export default function Settings() {
   const { can } = useAuth()
   const canEdit = can.manageKnowledge()      // policy curation, same as documents
@@ -586,6 +896,12 @@ export default function Settings() {
               Filing windows are edited by managers and above.
             </p>
           )}
+
+          <PayerDeadlineRules canEdit={canEdit} />
+          <PayersAndAliases canEdit={canEdit} />
+
+          {can.manageUsers() && <WriteOffThreshold />}
+          {can.manageUsers() && <OverpaymentRefundDays />}
 
           <ReferenceCodes canEdit={canEdit} />
 

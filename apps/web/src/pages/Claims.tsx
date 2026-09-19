@@ -1,4 +1,6 @@
 import React, { useState, useEffect } from 'react'
+import AiStatusBanner, { FALLBACK_LABEL } from '../components/AiStatusBanner'
+import { reasonLabel, type ProviderAdjustment } from '../components/ProviderAdjustments'
 
 const API_BASE = '/api/v1'
 
@@ -121,6 +123,32 @@ function ClaimDetails({ claim, onRefresh, refreshing }: { claim: ClaimDetail; on
         Patient paid reflects PR (patient-responsibility) adjustments reported on the remittance.
       </p>
 
+      {(claim.provider_adjustments as ProviderAdjustment[] | undefined)?.length ? (
+        <>
+          <h4 style={{ margin: '12px 0 8px' }}>Provider-level adjustments naming this claim</h4>
+          <p style={{ margin: '-4px 0 8px', color: 'var(--gray-500)', fontSize: '0.78rem' }}>
+            PLB lines on a remittance that reference this claim, such as recovering an earlier overpayment from
+            another payment. A positive amount was taken out of that payment.
+          </p>
+          <div className="table-container" style={{ marginBottom: 12 }}>
+            <table>
+              <thead><tr><th>Date</th><th>Payer</th><th>Reason</th><th>Trace</th><th>Amount</th></tr></thead>
+              <tbody>
+                {(claim.provider_adjustments as ProviderAdjustment[]).map(pa => (
+                  <tr key={pa.id}>
+                    <td>{pa.payment_date || '—'}</td>
+                    <td>{pa.payer_name || '—'}</td>
+                    <td>{reasonLabel(pa.reason_code)}</td>
+                    <td>{pa.trace_number || '—'}</td>
+                    <td>{formatCurrency(pa.amount)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ) : null}
+
       <h4 style={{ margin: '12px 0 8px' }}>Denial lines ({denials.length})</h4>
       {denials.length === 0 ? (
         <p style={{ color: 'var(--gray-500)' }}>No denial lines on this claim.</p>
@@ -185,6 +213,9 @@ function ClaimDetails({ claim, onRefresh, refreshing }: { claim: ClaimDetail; on
                   <span style={{ fontWeight: 600 }}>{a.model_name || 'AI analysis'}</span>
                   {a.denial_category && (
                     <span className="badge badge-analyzed">{a.denial_category.replace(/_/g, ' ')}</span>
+                  )}
+                  {a.fallback_reason && FALLBACK_LABEL[a.fallback_reason] && (
+                    <span className="badge badge-warning" title="This analysis is degraded">{FALLBACK_LABEL[a.fallback_reason]}</span>
                   )}
                   {a.required_action && (
                     <span className="badge">{a.required_action.replace(/_/g, ' ')}</span>
@@ -306,6 +337,7 @@ export default function Claims() {
 
   return (
     <div className="page-body">
+      <AiStatusBanner />
       <div className="filters-bar">
         <select className="form-select" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
           <option value="">All Statuses</option>

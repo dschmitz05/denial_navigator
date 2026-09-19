@@ -155,6 +155,10 @@ pub async fn get_claim(
     .await
     .map_err(AppError::Db)?;
     result["patient_paid"] = serde_json::json!(patient_paid.0.unwrap_or(0.0));
+    result["provider_adjustments"] = serde_json::json!(
+        crate::routes::provider_adjustments::for_claim(&state.pool, organization_id, claim_id)
+            .await?
+    );
 
     Ok(Json(result))
 }
@@ -445,5 +449,10 @@ pub fn router() -> Router<AppState> {
         .route("/export.csv", get(export_claims_csv))
         .route("/", get(list_claims).post(create_claim))
         .route("/dashboard/stats", get(dashboard_stats))
+        .route("/unanswered", get(crate::routes::unanswered::list))
+        .route(
+            "/{claim_id}/followups",
+            axum::routing::post(crate::routes::unanswered::record_followup),
+        )
         .route("/{claim_id}", get(get_claim).patch(update_claim))
 }

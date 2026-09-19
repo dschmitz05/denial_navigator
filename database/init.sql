@@ -16,6 +16,13 @@ CREATE TABLE organizations (
     slug VARCHAR(100) UNIQUE NOT NULL,
     name VARCHAR(255) NOT NULL,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    -- Write-offs at or above this amount need a second person's approval
+    -- (write_off_requests); 0 means every write-off does.
+    write_off_approval_threshold DECIMAL(12, 2) NOT NULL DEFAULT 0
+        CHECK (write_off_approval_threshold >= 0),
+    -- Days from identifying an overpayment to its refund deadline (FB-08).
+    overpayment_refund_days INTEGER NOT NULL DEFAULT 60
+        CHECK (overpayment_refund_days BETWEEN 1 AND 3650),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -58,6 +65,15 @@ CREATE TABLE claims (
     correlation_status VARCHAR(20) NOT NULL DEFAULT 'unmatched'
         CHECK (correlation_status IN ('unmatched', 'matched', 'ambiguous')),
     correlation_confidence DECIMAL(3, 2),
+    -- A payer that pays after this one (FB-06): PR balances go there first.
+    next_payer_name VARCHAR(255),
+    next_payer_source VARCHAR(30)
+        CHECK (next_payer_source IN ('837_other_subscriber', '835_crossover')),
+    -- Set when the payer reverses the claim (835 CLP02 22).
+    reversed_at TIMESTAMPTZ,
+    -- When an 837 submitted it and when its first remittance arrived (FB-09).
+    submitted_at TIMESTAMPTZ,
+    remittance_received_at TIMESTAMPTZ,
     parsed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -97,6 +113,10 @@ CREATE TABLE denials (
         CHECK (status IN ('open', 'analyzed', 'in_progress', 'in_appeal',
                           'appealed', 'overruled', 'resolved', 'written_off')),
     appeal_deadline DATE,
+    -- 'remittance' when a later 835 paid the denied line and closed it.
+    resolution_source VARCHAR(20) CHECK (resolution_source IN ('user', 'remittance')),
+    recovered_amount DECIMAL(12, 2),
+    resolved_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -110,6 +130,18 @@ CREATE INDEX idx_denials_cpt_code ON denials(cpt_code);
 CREATE INDEX idx_denials_denial_date ON denials(denial_date);
 CREATE INDEX idx_denials_appeal_deadline ON denials(appeal_deadline);
 CREATE INDEX idx_denials_charge_amount ON denials(charge_amount DESC);
+-- One row per adjustment occurrence (migration 007); re-ingesting a file must
+-- not duplicate denials.
+CREATE UNIQUE INDEX idx_denials_natural_key ON denials (
+    claim_id,
+    COALESCE(service_line_number, -1),
+    COALESCE(cpt_code, ''),
+    cagc,
+    COALESCE(carc_code, ''),
+    charge_amount,
+    adjustment_amount,
+    COALESCE(denial_date, '1900-01-01'::date)
+);
 
 -- ============================================================
 -- 3. AI Analyses
@@ -135,6 +167,9 @@ CREATE TABLE ai_analyses (
                                    'bundled_service', 'duplicate_claim', 'timely_filing',
                                    'non_covered_service', 'patient_responsibility', 'other')),
     root_cause_summary TEXT,
+    -- Why the analysis is degraded, if it is (llm_error, retrieval_error, no_evidence).
+    fallback_reason VARCHAR(20)
+        CHECK (fallback_reason IN ('llm_error', 'retrieval_error', 'no_evidence')),
     required_action TEXT,
     action_plan JSONB,
     steps JSONB,
@@ -149,6 +184,7 @@ CREATE TABLE ai_analyses (
 CREATE INDEX idx_ai_analyses_denial_id ON ai_analyses(denial_id);
 CREATE INDEX idx_ai_analyses_claim_id ON ai_analyses(claim_id);
 CREATE INDEX idx_ai_analyses_denial_category ON ai_analyses(denial_category);
+CREATE INDEX idx_ai_analyses_created_fallback ON ai_analyses (created_at DESC, fallback_reason);
 CREATE INDEX idx_ai_analyses_created_at ON ai_analyses(created_at);
 
 -- ============================================================
@@ -162,7 +198,8 @@ CREATE TABLE appeals_queue (
     assigned_user_id UUID,
     resolution_type VARCHAR(100),
     -- 'appeal_letter'  -> Appeals tab; everything below -> Worklist tab.
-    -- 'corrected_claim', 'clinical_docs', 'payer_contact', 'bill_patient', 'write_off'
+    -- 'corrected_claim', 'clinical_docs', 'payer_contact', 'bill_patient',
+    -- 'bill_secondary', 'write_off'
     -- 'bill_patient' and 'write_off' are NOT interchangeable: a PR balance is
     -- billed to the patient and collected; a CO write-off is absorbed.
     outcome_status VARCHAR(50)
@@ -355,6 +392,9 @@ CREATE TABLE users (
         CHECK (role IN ('system_admin', 'security_admin', 'revenue_cycle_manager',
                         'billing_specialist', 'coding_specialist', 'auditor', 'read_only')),
     is_active BOOLEAN DEFAULT TRUE,
+    -- Set when someone else chose the password (seeded default, admin
+    -- registration or reset); cleared when the user sets their own.
+    must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     last_login TIMESTAMPTZ,
@@ -369,6 +409,30 @@ CREATE TABLE users (
     totp_confirmed_at TIMESTAMPTZ,
     totp_last_used_step BIGINT
 );
+
+-- Write-offs at or above organizations.write_off_approval_threshold wait here
+-- for a second person's approval (FB-03).
+CREATE TABLE write_off_requests (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL REFERENCES organizations(id),
+    denial_id UUID NOT NULL REFERENCES denials(id) ON DELETE CASCADE,
+    appeal_id UUID REFERENCES appeals_queue(id) ON DELETE SET NULL,
+    amount DECIMAL(12, 2) NOT NULL,
+    reason TEXT,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'approved', 'rejected')),
+    requested_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    decided_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    decided_at TIMESTAMPTZ,
+    decision_note TEXT,
+    CHECK (decided_by IS NULL OR requested_by IS NULL OR decided_by <> requested_by)
+);
+CREATE UNIQUE INDEX idx_write_off_requests_one_pending
+    ON write_off_requests (denial_id) WHERE status = 'pending';
+CREATE INDEX idx_write_off_requests_org_status
+    ON write_off_requests (organization_id, status, requested_at DESC);
+
 
 ALTER TABLE feedback_loop
     ADD CONSTRAINT feedback_loop_user_id_fkey
@@ -434,6 +498,81 @@ CREATE INDEX idx_ingestion_log_status ON ingestion_log(status);
 CREATE INDEX idx_ingestion_log_created_at ON ingestion_log(created_at);
 CREATE INDEX idx_ingestion_log_organization_created ON ingestion_log(organization_id, created_at DESC);
 
+
+-- FB-07: PLB provider-level adjustments from 835s. They change a payment
+-- without belonging to a patient claim: recoupment of an earlier overpayment
+-- (WO), forward balances (FB), interest (L6) and others. A positive amount
+-- reduced the payment; a negative one added to it.
+CREATE TABLE provider_adjustments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL REFERENCES organizations(id),
+    ingestion_id UUID REFERENCES ingestion_log(id) ON DELETE SET NULL,
+    payer_name VARCHAR(255),
+    payer_identifier VARCHAR(80),
+    -- TRN02: the check or EFT trace number of the payment it adjusted.
+    trace_number VARCHAR(80),
+    payment_date DATE,
+    provider_identifier VARCHAR(80),
+    fiscal_period_date DATE,
+    reason_code VARCHAR(10) NOT NULL,
+    reference_number VARCHAR(80),
+    amount DECIMAL(12, 2) NOT NULL,
+    -- The claim the reference names, when it matches one.
+    claim_id UUID REFERENCES claims(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- The same payment re-sent in another file is not recorded twice.
+CREATE UNIQUE INDEX idx_provider_adjustments_natural_key
+    ON provider_adjustments (organization_id, COALESCE(trace_number, ''), reason_code,
+                             COALESCE(reference_number, ''), amount,
+                             COALESCE(fiscal_period_date, '1900-01-01'::date));
+CREATE INDEX idx_provider_adjustments_org_date
+    ON provider_adjustments (organization_id, payment_date DESC);
+CREATE INDEX idx_provider_adjustments_claim ON provider_adjustments (claim_id);
+
+-- FB-08: overpayments found in remittances, tracked to a refund deadline.
+CREATE TABLE overpayments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL REFERENCES organizations(id),
+    claim_id UUID NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
+    ingestion_id UUID REFERENCES ingestion_log(id) ON DELETE SET NULL,
+    -- paid_above_allowed: a line paid more than its allowed amount (AMT*B6)
+    -- duplicate_payment: the claim paid again under a different payer claim
+    --                    control number, with no reversal of the first payment
+    kind VARCHAR(30) NOT NULL CHECK (kind IN ('paid_above_allowed', 'duplicate_payment')),
+    service_line_number INTEGER,
+    amount DECIMAL(12, 2) NOT NULL CHECK (amount > 0),
+    payer_name VARCHAR(255),
+    detail TEXT,
+    identified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    due_date DATE NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'identified'
+        CHECK (status IN ('identified', 'refunded', 'recouped', 'disputed')),
+    resolved_at TIMESTAMPTZ,
+    resolved_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    resolution_note TEXT
+);
+
+-- Re-ingesting the same remittance does not identify the same overpayment twice.
+CREATE UNIQUE INDEX idx_overpayments_natural_key
+    ON overpayments (organization_id, claim_id, kind, COALESCE(service_line_number, -1), amount);
+CREATE INDEX idx_overpayments_org_status_due
+    ON overpayments (organization_id, status, due_date);
+
+-- FB-09: follow-up on claims the payer has not answered.
+CREATE INDEX idx_claims_unanswered ON claims (organization_id, submitted_at) WHERE remittance_received_at IS NULL;
+CREATE TABLE claim_followups (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL REFERENCES organizations(id),
+    claim_id UUID NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
+    action VARCHAR(30) NOT NULL CHECK (action IN ('status_inquiry', 'resubmitted', 'payer_contact')),
+    note TEXT,
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_claim_followups_claim ON claim_followups (claim_id, created_at DESC);
+
 -- ============================================================
 -- 13. Payer appeal filing windows
 -- ============================================================
@@ -454,6 +593,54 @@ CREATE UNIQUE INDEX idx_payer_appeal_policies_name
 
 INSERT INTO payer_appeal_policies (payer_name, appeal_window_days, notes)
 VALUES ('*', 90, 'Default filing window for payers without a specific policy.');
+
+-- FB-11: payers and the spellings and IDs that resolve to them.
+CREATE OR REPLACE FUNCTION normalize_payer_name(p TEXT)
+RETURNS TEXT
+LANGUAGE sql
+IMMUTABLE
+AS $fn$
+    SELECT trim(regexp_replace(lower(COALESCE(p, '')), '[^a-z0-9]+', ' ', 'g'));
+$fn$;
+
+CREATE TABLE payers (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL REFERENCES organizations(id),
+    name VARCHAR(255) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX idx_payers_org_name
+    ON payers (organization_id, normalize_payer_name(name));
+
+CREATE TABLE payer_aliases (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL REFERENCES organizations(id),
+    payer_id UUID NOT NULL REFERENCES payers(id) ON DELETE CASCADE,
+    alias VARCHAR(255) NOT NULL,
+    alias_normalized VARCHAR(255) NOT NULL,
+    kind VARCHAR(10) NOT NULL DEFAULT 'name' CHECK (kind IN ('name', 'payer_id')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+-- An alias belongs to one payer per organization.
+CREATE UNIQUE INDEX idx_payer_aliases_org_alias
+    ON payer_aliases (organization_id, alias_normalized);
+
+-- FB-10: other payer clocks (timely filing, corrected claim, reconsideration,
+-- second-level appeal), per organization; payer_name '*' is the default.
+CREATE TABLE payer_deadline_rules (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL REFERENCES organizations(id),
+    payer_name VARCHAR(255) NOT NULL,
+    deadline_type VARCHAR(30) NOT NULL
+        CHECK (deadline_type IN ('timely_filing', 'corrected_claim', 'reconsideration',
+                                 'appeal_level_2', 'payer_response')),
+    days INTEGER NOT NULL CHECK (days BETWEEN 1 AND 3650),
+    notes TEXT,
+    updated_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX idx_payer_deadline_rules_unique
+    ON payer_deadline_rules (organization_id, lower(payer_name), deadline_type);
 
 CREATE OR REPLACE FUNCTION appeal_deadline_for(p_payer TEXT, p_base DATE)
 RETURNS DATE

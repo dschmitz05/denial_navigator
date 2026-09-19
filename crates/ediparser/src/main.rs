@@ -314,6 +314,7 @@ async fn store_parsed_data(
         "transaction_type": parsed.metadata.transaction_set_identifier,
         "claims": claims,
         "denials": denials,
+        "payment_info": parsed.payment_info,
     });
 
     let result = state
@@ -496,6 +497,8 @@ struct IngestResponse {
     denials_parsed: usize,
     status: String,
     message: String,
+    /// Payment details, including PLB provider adjustments (835 only).
+    payment_info: Value,
     claims: Vec<Value>,
     denials: Vec<Value>,
 }
@@ -611,6 +614,7 @@ async fn ingest_file(
         denials_parsed: parsed.denials.len(),
         status: "completed".into(),
         message,
+        payment_info: serde_json::to_value(&parsed.payment_info).unwrap_or(Value::Null),
         claims,
         denials,
     }))

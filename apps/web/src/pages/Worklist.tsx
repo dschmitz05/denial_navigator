@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import AssigneeCell, { useAssignableUsers } from '../components/AssigneeCell'
+import WriteOffApprovals from '../components/WriteOffApprovals'
+import AiStatusBanner from '../components/AiStatusBanner'
 
 const API_BASE = '/api/v1'
 
@@ -51,6 +53,14 @@ const WORK_TYPES: Record<string, WorkType> = {
     blurb: 'The payer assigned this balance to the patient — deductible, coinsurance or copay. '
          + 'Move it to patient billing and send a statement. This money is collectible.',
     submitLabel: '📤 Mark statement sent',
+    skipSubmit: false,
+  },
+  bill_secondary: {
+    label: 'Bill secondary payer',
+    icon: '🏥',
+    blurb: 'The claim has other coverage that pays after this payer. Send the patient balance '
+         + 'there with this remittance (or confirm the crossover arrived) before billing the patient.',
+    submitLabel: '📤 Mark sent to secondary payer',
     skipSubmit: false,
   },
   write_off: {
@@ -134,6 +144,14 @@ export default function Worklist() {
         const data = await resp.json().catch(() => ({}))
         throw new Error(typeof data.detail === 'string' ? data.detail : `Update failed (HTTP ${resp.status})`)
       }
+      if (resp.status === 202) {
+        // Held for a manager's approval; nothing was written off yet.
+        const data = await resp.json().catch(() => ({}))
+        setNotice({ error: false, text: typeof data.detail === 'string' ? data.detail : 'Sent for manager approval.' })
+        setShowDetail(false)
+        loadItems({ outcome_status: outcomeFilter, resolution_type: typeFilter })
+        return false
+      }
       loadItems({ outcome_status: outcomeFilter, resolution_type: typeFilter })
       const refreshed = await resp.json()
       setSelected(prev => (prev ? { ...prev, outcome_status: typeof refreshed.outcome_status === 'string' ? refreshed.outcome_status : prev.outcome_status } : prev))
@@ -198,6 +216,7 @@ export default function Worklist() {
 
   return (
     <div className="page-body">
+      <AiStatusBanner />
       <div className="filters-bar">
         <select className="form-select" value={typeFilter} onChange={e => setTypeFilter(e.target.value)}>
           <option value="">All Work Types</option>
@@ -215,6 +234,10 @@ export default function Worklist() {
         </select>
         <button className="btn" onClick={() => { setOutcomeFilter(''); setTypeFilter('') }}>Clear</button>
       </div>
+
+      {can.approveWriteOffs() && (
+        <WriteOffApprovals onDecided={() => loadItems({ outcome_status: outcomeFilter, resolution_type: typeFilter })} />
+      )}
 
       {notice && (
         <div className="card" style={{ marginBottom: 12, borderLeft: `4px solid ${notice.error ? 'var(--danger)' : 'var(--success)'}` }}>

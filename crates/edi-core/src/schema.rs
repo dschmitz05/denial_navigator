@@ -197,6 +197,14 @@ pub struct ParsedClaim {
     pub service_lines: Vec<ParsedServiceLineDetail>,
     pub claim_level_adjustments: Vec<ParsedClaimAdjustment>,
     pub remark_codes: Vec<String>,
+    /// A payer that pays after this one: another subscriber on the 837 with a
+    /// later responsibility sequence, or the 835's crossover carrier (NM1*TT).
+    /// A patient-responsibility balance goes there before the patient.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_payer_name: Option<String>,
+    /// `837_other_subscriber` or `835_crossover`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_payer_source: Option<String>,
 }
 
 fn default_claim_type() -> String {
@@ -230,6 +238,8 @@ impl Default for ParsedClaim {
             service_lines: Vec::new(),
             claim_level_adjustments: Vec::new(),
             remark_codes: Vec::new(),
+            next_payer_name: None,
+            next_payer_source: None,
         }
     }
 }

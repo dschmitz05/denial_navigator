@@ -17,6 +17,8 @@ import Users from './pages/Users'
 import Profile from './pages/Profile'
 import Insights from './pages/Insights'
 import Playbooks from './pages/Playbooks'
+import Overpayments from './pages/Overpayments'
+import UnansweredClaims from './pages/Unanswered'
 
 const MANAGER_UP = ['revenue_cycle_manager', 'system_admin'] as const
 
@@ -87,6 +89,8 @@ function AppContent() {
       <Route path="/knowledge" element={<ProtectedRoute><KnowledgeBase /></ProtectedRoute>} />
       <Route path="/insights" element={<ProtectedRoute><Insights /></ProtectedRoute>} />
       <Route path="/playbooks" element={<ProtectedRoute roles={MANAGER_UP}><Playbooks /></ProtectedRoute>} />
+      <Route path="/overpayments" element={<ProtectedRoute><Overpayments /></ProtectedRoute>} />
+      <Route path="/unanswered" element={<ProtectedRoute><UnansweredClaims /></ProtectedRoute>} />
       <Route path="/audit" element={<ProtectedRoute roles={MANAGER_UP}><Audit /></ProtectedRoute>} />
       <Route path="/users" element={<ProtectedRoute roles={['system_admin', 'security_admin']}><Users /></ProtectedRoute>} />
       <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />

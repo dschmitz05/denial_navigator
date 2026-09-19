@@ -30,6 +30,7 @@ pub const WORKLIST_RESOLUTION_TYPES: &[&str] = &[
     "clinical_docs",
     "payer_contact",
     "bill_patient",
+    "bill_secondary",
     "write_off",
 ];
 
@@ -40,6 +41,7 @@ pub const ALL_RESOLUTION_TYPES: &[&str] = &[
     "clinical_docs",
     "payer_contact",
     "bill_patient",
+    "bill_secondary",
     "write_off",
 ];
 
@@ -51,6 +53,9 @@ pub enum ResolutionType {
     ClinicalDocs,
     PayerContact,
     BillPatient,
+    /// A patient-responsibility balance sent to a payer that pays after this
+    /// one (secondary coverage or a crossover) before the patient is billed.
+    BillSecondary,
     WriteOff,
 }
 

@@ -8,6 +8,13 @@ check `GET /health/ready` and Settings → Service health. The reverse proxy
 serves HTTPS on port 3444; provide a real certificate with `TLS_MODE=provided`
 before production use.
 
+**First sign-in.** A new database seeds `admin` with `INIT_ADMIN_PASSWORD`
+(default `admin123`). That account, any account an administrator creates or
+resets, and any existing account still on `admin123` must choose its own
+password (12+ characters) before it can do anything else. The test scripts in
+`scripts/` sign in as `ADMIN_USER` / `ADMIN_PASSWORD` (default `admin` /
+`admin123`); set them once the admin password has been changed.
+
 The EDI parser runs as a non-root user and polls its mounted `dropzone` volume.
 Files are marked processed only after a successful parse/store cycle, making
 restarts idempotent. Parsed output retention is controlled by
@@ -49,6 +56,46 @@ organization's approved retention/encryption policy.
    historical migration files manually against an existing schema.
 4. Verify service health, then run the synthetic 835 and 837
    fixtures. Retain the previous image digest until this verification passes.
+
+## Service health
+
+Settings → System health (`GET /api/v1/system/health`) reports each service. The
+two model rows test real function, not just reachability:
+
+- **LLM provider** comes from the recommendation service, which lists the LLM
+  server's models with its API key and checks that the model it will request
+  (`LLM_MODEL`, or the first served model for `auto`) is served. A wrong model
+  name, rejected key or unreachable server shows here with the server's reason.
+- **Embedding provider** comes from the retrieval service, which embeds a probe
+  string and requires a 768-dimension vector, the size of the index. The result
+  is cached for 30 seconds. It reads *Turned off* when `VECTOR_SEARCH_ENABLED=false`.
+
+Either row failing makes the overall status *degraded*: analyses fall back to
+deterministic rules and new documents cannot be embedded until it is fixed.
+
+**AI analyses (24 h)** reports what actually happened to the organization's
+analyses: how many fell back to deterministic rules or ran without policy
+evidence. It turns *degraded* when the three most recent analyses all did, or
+when their share over 24 hours reaches `AI_DEGRADED_THRESHOLD` (default 0.2);
+AI pages then show a banner until analyses succeed again.
+
+## Write-off approval
+
+Settings → Write-off approval (system or security administrators) sets the
+amount at or above which a write-off waits for a revenue cycle manager or
+system administrator other than the requester. It defaults to 0, meaning every
+write-off needs approval; raise it to let small balances be written off
+directly. Managers approve or reject pending write-offs at the top of the
+Worklist. The setting is per organization and every change is audit-logged.
+
+## Overpayment refund window
+
+Settings → Overpayment refund window (administrators) sets the days from
+identifying an overpayment to its refund deadline, per organization. It
+defaults to 60, the Medicare rule; other payers and states differ, so confirm
+the value with compliance. The Overpayments page lists open items by due date,
+and the deadline digest (`POST /notifications/generate-digests`, run by
+`scripts/send_deadline_digests.sh`) notifies managers of overdue ones.
 
 ## Air-gapped hosts
 

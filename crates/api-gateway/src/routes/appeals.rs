@@ -8,16 +8,20 @@
 use std::collections::HashMap;
 
 use axum::extract::{Extension, Path, Query, State};
+use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, NaiveDate, Utc};
 use denial_auth::rbac::{Principal, PrincipalKind};
 use denial_common::error::AppError;
-use denial_domain::{ALL_RESOLUTION_TYPES, APPEAL_RESOLUTION_TYPES, TERMINAL_WORK_OUTCOMES};
+use denial_domain::{
+    ALL_RESOLUTION_TYPES, APPEAL_RESOLUTION_TYPES, TERMINAL_DENIAL_STATUSES, TERMINAL_WORK_OUTCOMES,
+};
 use serde::Deserialize;
 use sqlx::{Column, Row};
 use uuid::Uuid;
 
+use crate::routes::write_offs;
 use crate::state::AppState;
 
 const SPECIALIST: &str = "billing_specialist";
@@ -193,7 +197,10 @@ fn parse_json_field(val: &mut serde_json::Value) {
     }
 }
 
-async fn refresh_claim_status(pool: &sqlx::PgPool, claim_id: &Uuid) -> Result<(), AppError> {
+pub(crate) async fn refresh_claim_status(
+    pool: &sqlx::PgPool,
+    claim_id: &Uuid,
+) -> Result<(), AppError> {
     let _ = sqlx::query(
         "UPDATE claims c SET status = CASE \
          WHEN s.open_denials = 0 THEN 'resolved' \
@@ -206,12 +213,8 @@ async fn refresh_claim_status(pool: &sqlx::PgPool, claim_id: &Uuid) -> Result<()
          WHERE c.id = $1 AND s.total > 0 RETURNING c.status",
     )
     .bind(claim_id)
-    .bind(
-        TERMINAL_WORK_OUTCOMES
-            .iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>(),
-    )
+    // Denial statuses, not worklist outcomes: a written-off denial is closed.
+    .bind(TERMINAL_DENIAL_STATUSES)
     .fetch_optional(pool)
     .await
     .map_err(AppError::Db)?;
@@ -242,7 +245,7 @@ fn update_appeal_sql(mut sets: Vec<String>) -> String {
     )
 }
 
-async fn record_audit(
+pub(crate) async fn record_audit(
     pool: &sqlx::PgPool,
     principal: &Principal,
     action: &str,
@@ -250,6 +253,11 @@ async fn record_audit(
     resource_id: Option<&str>,
     details: &serde_json::Value,
 ) {
+    // users.rs runs this exact statement with a Uuid resource id. Postgres
+    // prepared statements are cached per connection by SQL text, so binding a
+    // string here failed ("incorrect binary data format") whenever the other
+    // caller had prepared it first, and the audit entry was lost.
+    let resource_id: Option<Uuid> = resource_id.and_then(|id| Uuid::parse_str(id).ok());
     let result = sqlx::query(
         "INSERT INTO audit_log (organization_id, user_id, action, resource_type, resource_id, details, ip_address) \
          VALUES ($1::uuid, $2::uuid, $3, $4, $5::uuid, $6::jsonb, $7::inet)",
@@ -502,12 +510,13 @@ pub async fn update_appeal(
     Extension(principal): Extension<Principal>,
     Path(appeal_id): Path<Uuid>,
     Json(body): Json<AppealUpdate>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
     let pool = &state.pool;
     let organization_id = organization_id(&principal)?;
 
     let old_row = sqlx::query(
-        "SELECT aq.outcome_status, aq.assigned_user_id FROM appeals_queue aq \
+        "SELECT aq.outcome_status, aq.assigned_user_id, aq.resolution_type, aq.denial_id \
+         FROM appeals_queue aq \
          JOIN denials d ON d.id = aq.denial_id JOIN claims c ON c.id = d.claim_id \
          WHERE aq.id = $1 AND c.organization_id = $2",
     )
@@ -530,6 +539,44 @@ pub async fn update_appeal(
         .and_then(|r| r.try_get("assigned_user_id").ok().flatten());
 
     assert_may_touch(&principal, old_assigned)?;
+
+    // Closing a write-off item successfully writes the denial off, which can
+    // need a second person's approval first; nothing is changed until then.
+    let old_resolution_type: Option<String> = old_row
+        .as_ref()
+        .and_then(|r| r.try_get("resolution_type").ok().flatten());
+    let completes_write_off = old_resolution_type.as_deref() == Some("write_off")
+        && body.outcome_status != old_outcome
+        && body
+            .outcome_status
+            .as_deref()
+            .is_some_and(|o| SUCCESS_OUTCOMES.contains(&o));
+    if completes_write_off {
+        let denial_id: Uuid = old_row
+            .as_ref()
+            .and_then(|r| r.try_get("denial_id").ok())
+            .ok_or(AppError::NotFound)?;
+        if let write_offs::Gate::Pending {
+            request_id,
+            amount,
+            threshold,
+        } = write_offs::gate(
+            pool,
+            &principal,
+            denial_id,
+            Some(appeal_id),
+            body.notes.as_deref(),
+        )
+        .await?
+        {
+            return Ok((
+                StatusCode::ACCEPTED,
+                Json(write_offs::Gate::pending_response(
+                    request_id, amount, threshold,
+                )),
+            ));
+        }
+    }
 
     let mut sets: Vec<String> = Vec::new();
 
@@ -651,7 +698,7 @@ pub async fn update_appeal(
         }
     }
 
-    Ok(Json(row_to_json(&row)))
+    Ok((StatusCode::OK, Json(row_to_json(&row))))
 }
 
 pub async fn get_appeal(

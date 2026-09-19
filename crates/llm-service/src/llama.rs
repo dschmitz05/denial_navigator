@@ -6,17 +6,34 @@ use std::time::{Duration, Instant};
 
 use denial_ai::chat::AiProvider;
 
-/// True if `model` matches a loaded model exactly or as a prefix.
-pub async fn check_model_available(provider: &impl AiProvider, model: &str) -> bool {
-    match provider.list_models().await {
-        Ok(available) => available
-            .iter()
-            .any(|name| name == model || model.starts_with(name)),
-        Err(error) => {
-            tracing::warn!("could not list models for availability check: {error}");
-            false
-        }
+/// The model requests will use, chosen from what the server serves, or the
+/// reason no configured model fits. `auto` takes the first served model;
+/// anything else must be served, exactly or as a prefix of the configured name.
+pub fn select_model(configured: &str, served: &[String]) -> Result<String, String> {
+    if served.is_empty() {
+        return Err("LLM server lists no models".into());
     }
+    if configured.eq_ignore_ascii_case("auto") {
+        return Ok(served[0].clone());
+    }
+    if served
+        .iter()
+        .any(|name| name == configured || configured.starts_with(name.as_str()))
+    {
+        Ok(configured.to_string())
+    } else {
+        Err(format!(
+            "LLM_MODEL '{configured}' is not served; served: {}",
+            served.join(", ")
+        ))
+    }
+}
+
+/// Whether analyses can run: the model they will use, or why they will fail
+/// (unreachable server, rejected key, or a model the server does not serve).
+pub async fn model_status(provider: &impl AiProvider, configured: &str) -> Result<String, String> {
+    let served = provider.list_models().await.map_err(|e| e.to_string())?;
+    select_model(configured, &served)
 }
 
 #[derive(Default)]
@@ -75,4 +92,36 @@ pub async fn resolve_model(provider: &impl AiProvider, configured: &str) -> Stri
 /// The cached model name, if any.
 pub fn cached_model() -> Option<String> {
     cache().lock().unwrap().name.clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_model;
+
+    fn served() -> Vec<String> {
+        vec!["Qwen3.8".into(), "Qwen3.6".into()]
+    }
+
+    #[test]
+    fn auto_uses_the_first_served_model() {
+        assert_eq!(select_model("auto", &served()), Ok("Qwen3.8".into()));
+    }
+
+    #[test]
+    fn a_served_model_is_used_as_configured() {
+        assert_eq!(select_model("Qwen3.6", &served()), Ok("Qwen3.6".into()));
+    }
+
+    #[test]
+    fn an_unserved_model_names_what_is_served() {
+        assert_eq!(
+            select_model("qwen2.5:7b", &served()),
+            Err("LLM_MODEL 'qwen2.5:7b' is not served; served: Qwen3.8, Qwen3.6".into())
+        );
+    }
+
+    #[test]
+    fn an_empty_model_list_is_an_error() {
+        assert!(select_model("auto", &[]).is_err());
+    }
 }

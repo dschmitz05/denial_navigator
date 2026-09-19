@@ -8,6 +8,7 @@ export interface ApiOperations {
   "POST /api/v1/analyses/generate": { body: { "denial_id": string; "temperature"?: number } };
   "POST /api/v1/analyses/generate-jobs": { body: { "denial_id": string; "temperature"?: number } };
   "GET /api/v1/analyses/generate-jobs/{job_id}": { path: { "job_id": string } };
+  "GET /api/v1/analyses/status": Record<string, never>;
   "POST /api/v1/analyses/store": { body: { "denial_id": string; "claim_id": string; "model_name": string; "raw_prompt": string; "raw_response": string; "parsed_result": Record<string, unknown>; "prompt_tokens"?: number; "completion_tokens"?: number; "total_tokens"?: number } };
   "GET /api/v1/appeals": { query?: { "status"?: string; "resolution_type"?: string; "assigned"?: string; "limit"?: number; "offset"?: number } };
   "POST /api/v1/appeals": { body: { "denial_id": string; "resolution_type": string; "notes"?: string } };
@@ -30,8 +31,10 @@ export interface ApiOperations {
   "POST /api/v1/claims": { body: { "claim_number": string; "patient_id": string; "payer_name": string; "total_charge": number; "icd_10_codes"?: Array<string> } };
   "GET /api/v1/claims/dashboard/stats": Record<string, never>;
   "GET /api/v1/claims/export.csv": { query?: { "status"?: string; "q"?: string } };
+  "GET /api/v1/claims/unanswered": Record<string, never>;
   "GET /api/v1/claims/{claim_id}": { path: { "claim_id": string } };
   "PATCH /api/v1/claims/{claim_id}": { path: { "claim_id": string }; body: { "status"?: string; "total_paid"?: number; "total_adjustment"?: number } };
+  "POST /api/v1/claims/{claim_id}/followups": { path: { "claim_id": string }; body: { "action": "status_inquiry" | "resubmitted" | "payer_contact"; "note"?: string } };
   "GET /api/v1/denials": { query?: { "status"?: string; "carc_code"?: string; "payer_name"?: string; "min_amount"?: number; "max_amount"?: number; "min_age_days"?: number; "max_age_days"?: number; "owner"?: string; "facility_type_code"?: string; "cagc"?: string; "claim_id"?: string; "q"?: string; "priority"?: boolean; "sort"?: "amount" | "deadline" | "created"; "descending"?: boolean; "cursor"?: string; "limit"?: number; "offset"?: number } };
   "GET /api/v1/denials/aging-buckets": Record<string, never>;
   "GET /api/v1/denials/appeal-windows": Record<string, never>;
@@ -40,6 +43,9 @@ export interface ApiOperations {
   "GET /api/v1/denials/by-payer": Record<string, never>;
   "GET /api/v1/denials/by-root-cause": Record<string, never>;
   "GET /api/v1/denials/carc-options": { query?: { "status"?: string } };
+  "GET /api/v1/denials/deadline-rules": Record<string, never>;
+  "PUT /api/v1/denials/deadline-rules": { body: { "payer_name": string; "deadline_type": "timely_filing" | "corrected_claim" | "reconsideration" | "appeal_level_2" | "payer_response"; "days": number; "notes"?: string } };
+  "DELETE /api/v1/denials/deadline-rules/{rule_id}": { path: { "rule_id": string } };
   "GET /api/v1/denials/financial-summary": Record<string, never>;
   "GET /api/v1/denials/resolution-timing": Record<string, never>;
   "GET /api/v1/denials/{denial_id}": { path: { "denial_id": string } };
@@ -51,6 +57,8 @@ export interface ApiOperations {
   "GET /api/v1/ingestion/history": { query?: { "limit"?: number } };
   "POST /api/v1/ingestion/ingest": Record<string, never>;
   "POST /api/v1/ingestion/log": { body: Record<string, unknown> };
+  "GET /api/v1/ingestion/provider-adjustments": { query?: { "claim_number"?: string; "reason_code"?: string; "limit"?: number } };
+  "GET /api/v1/ingestion/provider-adjustments/summary": Record<string, never>;
   "POST /api/v1/ingestion/store": { body: { "file_name": string; "file_hash": string; "file_size"?: number; "claims": Array<Record<string, unknown>>; "denials": Array<Record<string, unknown>> } };
   "POST /api/v1/ingestion/upload": { body: FormData };
   "GET /api/v1/knowledge/documents": { query?: { "source_type"?: string; "status"?: string; "limit"?: number } };
@@ -64,6 +72,13 @@ export interface ApiOperations {
   "POST /api/v1/notifications/generate-digests": Record<string, never>;
   "POST /api/v1/notifications/read-all": Record<string, never>;
   "POST /api/v1/notifications/{notification_id}/read": { path: { "notification_id": string } };
+  "GET /api/v1/overpayments": { query?: { "status"?: "identified" | "refunded" | "recouped" | "disputed" } };
+  "POST /api/v1/overpayments/{id}/status": { path: { "id": string }; body: { "status": "identified" | "refunded" | "recouped" | "disputed"; "note"?: string } };
+  "GET /api/v1/payers": Record<string, never>;
+  "POST /api/v1/payers": { body: { "name": string } };
+  "DELETE /api/v1/payers/{payer_id}": { path: { "payer_id": string } };
+  "POST /api/v1/payers/{payer_id}/aliases": { path: { "payer_id": string }; body: { "alias": string; "kind"?: "name" | "payer_id" } };
+  "DELETE /api/v1/payers/{payer_id}/aliases/{alias_id}": { path: { "payer_id": string; "alias_id": string } };
   "GET /api/v1/playbooks": { query?: { "status"?: string } };
   "POST /api/v1/playbooks": { body: { "name": string; "description"?: string; "triggers"?: Record<string, unknown>; "recommendation"?: Record<string, unknown> } };
   "POST /api/v1/playbooks/test": { body: { "carc_code"?: string; "cagc"?: string; "payer_name"?: string } };
@@ -79,6 +94,12 @@ export interface ApiOperations {
   "POST /api/v1/retention/ai/prune": { body: { "older_than_days"?: number; "confirm": boolean } };
   "GET /api/v1/retention/audit": Record<string, never>;
   "POST /api/v1/retention/audit/prune": { body: { "older_than_days"?: number; "confirm": boolean } };
+  "GET /api/v1/settings/overpayment-refund": Record<string, never>;
+  "PUT /api/v1/settings/overpayment-refund": { body: { "days": number } };
+  "GET /api/v1/settings/phi-disclosure": Record<string, never>;
+  "PUT /api/v1/settings/phi-disclosure": { body: { "level": "none" | "deidentified" | "limited_phi" | "full_context" } };
+  "GET /api/v1/settings/write-off-approval": Record<string, never>;
+  "PUT /api/v1/settings/write-off-approval": { body: { "threshold": number } };
   "GET /api/v1/system/health": Record<string, never>;
   "GET /api/v1/users": Record<string, never>;
   "GET /api/v1/users/assignable": Record<string, never>;
@@ -88,6 +109,9 @@ export interface ApiOperations {
   "POST /api/v1/users/{user_id}/password": { path: { "user_id": string }; body: { "new_password": string } };
   "POST /api/v1/users/{user_id}/totp": { path: { "user_id": string }; body: { "totp_required": boolean } };
   "POST /api/v1/users/{user_id}/totp/reset": { path: { "user_id": string } };
+  "GET /api/v1/write-offs": { query?: { "status"?: "pending" | "approved" | "rejected" } };
+  "POST /api/v1/write-offs/{id}/approve": { path: { "id": string }; body?: { "note"?: string } };
+  "POST /api/v1/write-offs/{id}/reject": { path: { "id": string }; body: { "note": string } };
 }
 
 export type ApiRequestOptions<Operation extends ApiOperation> = ApiOperations[Operation] & {

@@ -23,6 +23,24 @@ struct Context {
     payer_id: Option<String>,
     filing_indicator: Option<String>,
     in_dependent_loop: bool,
+    /// SBR01 of the subscriber loop (2000B): this claim's payer order.
+    payer_sequence: Option<String>,
+    /// SBR01 of an other-subscriber loop (2320) inside the claim, until the
+    /// loop ends; its NM1*PR names that other payer.
+    other_payer_sequence: Option<String>,
+}
+
+/// Payer responsibility order (SBR01): primary, secondary, tertiary, then
+/// payers 4 to 11.
+const PAYER_ORDER: &[&str] = &["P", "S", "T", "A", "B", "C", "D", "E", "F", "G", "H"];
+
+/// Whether a payer at `other` pays after one at `current` (primary if unknown).
+fn pays_after(other: &str, current: Option<&str>) -> bool {
+    let rank = |code: &str| PAYER_ORDER.iter().position(|p| *p == code);
+    match (rank(other), rank(current.unwrap_or("P"))) {
+        (Some(o), Some(c)) => o > c,
+        _ => false,
+    }
 }
 
 impl Context {
@@ -188,6 +206,7 @@ pub fn parse_837(
         let name = seg.name.as_str();
 
         if name == "HL" {
+            ctx.other_payer_sequence = None;
             let level = seg.el(3);
             if level == "20" || level == "22" || level == "23" {
                 if let Some(c) = claim.take() {
@@ -219,8 +238,15 @@ pub fn parse_837(
         }
 
         if name == "SBR" {
-            if let Some(v) = opt(seg.el(9)) {
-                ctx.filing_indicator = Some(v);
+            if claim.is_some() {
+                // Loop 2320 (other subscriber) belongs to this claim; it must
+                // not change the filing indicator used by the next claim.
+                ctx.other_payer_sequence = opt(seg.el(1));
+            } else {
+                ctx.payer_sequence = opt(seg.el(1));
+                if let Some(v) = opt(seg.el(9)) {
+                    ctx.filing_indicator = Some(v);
+                }
             }
             continue;
         }
@@ -244,8 +270,21 @@ pub fn parse_837(
                     ctx.patient_id = identifier;
                 }
                 "PR" => {
-                    ctx.payer_name = person_name(seg);
-                    ctx.payer_id = identifier;
+                    if let (Some(c), Some(other)) =
+                        (claim.as_mut(), ctx.other_payer_sequence.as_deref())
+                    {
+                        // Loop 2330B: the other payer. Only one that pays after
+                        // this claim's payer takes a patient balance first.
+                        if c.next_payer_name.is_none()
+                            && pays_after(other, ctx.payer_sequence.as_deref())
+                        {
+                            c.next_payer_name = person_name(seg);
+                            c.next_payer_source = Some("837_other_subscriber".into());
+                        }
+                    } else {
+                        ctx.payer_name = person_name(seg);
+                        ctx.payer_id = identifier;
+                    }
                 }
                 "82" => {
                     if let Some(c) = claim.as_mut() {
@@ -314,7 +353,10 @@ pub fn parse_837(
                 service_lines: Vec::new(),
                 claim_level_adjustments: Vec::new(),
                 remark_codes: Vec::new(),
+                next_payer_name: None,
+                next_payer_source: None,
             });
+            ctx.other_payer_sequence = None;
             line_counter = 0;
             continue;
         }
@@ -330,6 +372,7 @@ pub fn parse_837(
                 }
             }
             "LX" => {
+                ctx.other_payer_sequence = None;
                 if let (Some(c), Some(l)) = (claim.as_mut(), line.take()) {
                     c.service_lines.push(ParsedServiceLineDetail {
                         service_line: l,

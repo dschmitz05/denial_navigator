@@ -110,6 +110,10 @@ ROUTE_PREFIXES = {
     "playbooks": "/api/v1/playbooks",
     "system": "/api/v1/system",
     "retention": "/api/v1/retention",
+    "settings": "/api/v1/settings",
+    "write_offs": "/api/v1/write-offs",
+    "overpayments": "/api/v1/overpayments",
+    "payers": "/api/v1/payers",
 }
 HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
 
@@ -361,10 +365,28 @@ add("/api/v1/denials/appeal-windows",
     put=op("Set a payer's appeal window (manager+)", "denials",
            body=jbody({"payer_name": S(), "appeal_window_days": I(),
                        "notes": S()}, ["payer_name", "appeal_window_days"])))
+add("/api/v1/denials/deadline-rules",
+    get=op("Payer deadline rules for the caller's organization", "denials",
+           description="timely_filing counts from the date of service; "
+                       "corrected_claim and reconsideration from the remittance "
+                       "date; appeal_level_2 from the first appeal's decision. "
+                       "payer_name '*' is the organization default."),
+    put=op("Create or replace a payer deadline rule (manager+)", "denials",
+           body=jbody({"payer_name": S(), "deadline_type": S(enum=[
+               "timely_filing", "corrected_claim", "reconsideration",
+               "appeal_level_2", "payer_response"]), "days": I(minimum=1, maximum=3650),
+               "notes": S()}, ["payer_name", "deadline_type", "days"])))
+add("/api/v1/denials/deadline-rules/{rule_id}",
+    delete=op("Delete a payer deadline rule (manager+)", "denials",
+              params=[path_param("rule_id")]))
 add("/api/v1/denials/{denial_id}",
-    get=op("One denial with codes, analysis and recommended resolution",
+    get=op("One denial with codes, analysis, recommended resolution and deadlines",
            "denials", params=[path_param("denial_id")]),
     patch=op("Update a denial", "denials",
+             description="Setting status to written_off at or above the "
+                         "organization's write-off approval threshold returns "
+                         "202 with status pending_approval and changes nothing "
+                         "until a manager approves it (see write-offs).",
              params=[path_param("denial_id")],
              body=jbody({"status": S(),
                          "appeal_deadline": S(format="date")})))
@@ -396,6 +418,22 @@ add("/api/v1/analyses/generate",
                 "404": {"$ref": "#/components/responses/NotFound"},
                 "429": {"description": "Rate limited."},
                 "401": {"$ref": "#/components/responses/Unauthorized"}}))
+add("/api/v1/analyses/status",
+    get=op("Whether AI analyses are degraded (last 24 h, caller's organization)",
+           "analyses",
+           description="Degraded when the 3 most recent analyses all fell back "
+                       "to deterministic rules or ran without policy evidence, "
+                       "or when that share over 24 hours reaches "
+                       "AI_DEGRADED_THRESHOLD (default 0.2; needs 3+ analyses).",
+           responses={"200": {"description": "OK", "content": {"application/json": {
+               "schema": {"type": "object", "properties": {
+                   "degraded": B(), "recent_all_degraded": B(),
+                   "window_hours": I(), "analyses": I(),
+                   "fallback_share": N(), "threshold": N(),
+                   "reasons": {"type": "object", "properties": {
+                       "llm_error": I(), "retrieval_error": I(),
+                       "no_evidence": I()}}}}}}},
+               "401": {"$ref": "#/components/responses/Unauthorized"}}))
 add("/api/v1/analyses/generate-jobs",
     post=op("Queue asynchronous recommendation generation", "analyses",
             description="Returns a durable job ID; poll its status endpoint for the result.",
@@ -436,6 +474,10 @@ add("/api/v1/appeals/{appeal_id}",
     get=op("One worklist item", "appeals",
            params=[path_param("appeal_id")]),
     patch=op("Update outcome / notes / assignment", "appeals",
+             description="Closing a write_off item successfully at or above the "
+                         "organization's approval threshold returns 202 with "
+                         "status pending_approval and changes nothing until a "
+                         "manager approves it (see write-offs).",
              params=[path_param("appeal_id")],
              body=jbody({"outcome_status": S(), "notes": S(),
                          "payer_response": S(format="date"),
@@ -649,6 +691,110 @@ add("/api/v1/retention/ai/prune",
             body=jbody({"older_than_days": I(), "confirm": B()},
                        ["confirm"])))
 
+# ── provider-level adjustments (PLB) ─────────────────────────────────────
+add("/api/v1/ingestion/provider-adjustments",
+    get=op("PLB provider-level adjustments from 835s", "ingestion",
+           description="Recoupments (WO), forward balances (FB), interest (L6) "
+                       "and other payment changes that belong to no patient "
+                       "claim. Positive amounts reduced a payment.",
+           params=[{"name": "claim_number", "in": "query", "schema": S(),
+                    "description": "Only lines whose reference names this claim."},
+                   {"name": "reason_code", "in": "query", "schema": S()},
+                   P_LIMIT]))
+add("/api/v1/ingestion/provider-adjustments/summary",
+    get=op("PLB totals by month, payer and reason", "ingestion"))
+
+# ── unanswered claims ────────────────────────────────────────────────────
+add("/api/v1/claims/unanswered",
+    get=op("Submitted claims with no remittance past the payer's response time",
+           "claims",
+           description="Claims submitted on an 837 with no 835 after the "
+                       "payer_response deadline rule (30 days if none), with "
+                       "days left before timely filing when a rule exists. A "
+                       "claim leaves the list when its first 835 arrives."))
+add("/api/v1/claims/{claim_id}/followups",
+    post=op("Record a follow-up on an unanswered claim", "claims",
+            params=[path_param("claim_id")],
+            body=jbody({"action": S(enum=["status_inquiry", "resubmitted",
+                                          "payer_contact"]), "note": S()},
+                       ["action"])))
+
+# ── payers and aliases ───────────────────────────────────────────────────
+add("/api/v1/payers",
+    get=op("Payers with their aliases, and payer names not yet mapped", "payers",
+           description="Claims and documents name payers however their source "
+                       "spelled them; a document matches a claim when both "
+                       "names (or the claim's payer ID) are aliases of one payer."),
+    post=op("Create a payer; its name becomes its first alias (manager+)", "payers",
+            body=jbody({"name": S()}, ["name"])))
+add("/api/v1/payers/{payer_id}",
+    delete=op("Delete a payer and its aliases (manager+)", "payers",
+              params=[path_param("payer_id")]))
+add("/api/v1/payers/{payer_id}/aliases",
+    post=op("Add a name or payer-ID alias (manager+)", "payers",
+            description="409 when the alias already belongs to a payer.",
+            params=[path_param("payer_id")],
+            body=jbody({"alias": S(), "kind": S(enum=["name", "payer_id"])}, ["alias"])))
+add("/api/v1/payers/{payer_id}/aliases/{alias_id}",
+    delete=op("Remove an alias (manager+)", "payers",
+              params=[path_param("payer_id"), path_param("alias_id")]))
+
+# ── overpayments ─────────────────────────────────────────────────────────
+add("/api/v1/overpayments",
+    get=op("Overpayments found in remittances, with refund deadlines", "overpayments",
+           description="paid_above_allowed: a line paid more than its allowed "
+                       "amount; duplicate_payment: the claim paid again under a "
+                       "different payer claim control number with no reversal. "
+                       "A PLB WO recoupment naming the claim marks it recouped.",
+           params=[{"name": "status", "in": "query",
+                    "schema": S(enum=["identified", "refunded", "recouped", "disputed"])}]))
+add("/api/v1/overpayments/{id}/status",
+    post=op("Record what happened to an overpayment (manager+)", "overpayments",
+            params=[path_param("id")],
+            body=jbody({"status": S(enum=["identified", "refunded", "recouped", "disputed"]),
+                        "note": S()}, ["status"])))
+
+# ── write-off approval ───────────────────────────────────────────────────
+add("/api/v1/write-offs",
+    get=op("Write-off requests awaiting or past a decision", "write-offs",
+           params=[{"name": "status", "in": "query",
+                    "schema": S(enum=["pending", "approved", "rejected"],
+                                default="pending")}]))
+add("/api/v1/write-offs/{id}/approve",
+    post=op("Approve a write-off and write the denial off (manager+)",
+            "write-offs",
+            description="Refused (403) for the person who requested it.",
+            params=[path_param("id")],
+            body={"required": False, "content": {"application/json": {
+                "schema": {"type": "object", "properties": {"note": S()}}}}}))
+add("/api/v1/write-offs/{id}/reject",
+    post=op("Reject a write-off request (manager+)", "write-offs",
+            description="Refused (403) for the person who requested it.",
+            params=[path_param("id")],
+            body=jbody({"note": S()}, ["note"])))
+
+# ── settings (admin) ─────────────────────────────────────────────────────
+add("/api/v1/settings/phi-disclosure",
+    get=op("PHI disclosure level for AI prompts (admin)", "settings"),
+    put=op("Set the PHI disclosure level (admin)", "settings",
+           body=jbody({"level": S(enum=["none", "deidentified",
+                                        "limited_phi", "full_context"])},
+                      ["level"])))
+add("/api/v1/settings/overpayment-refund",
+    get=op("Days from identifying an overpayment to its refund deadline (admin)",
+           "settings"),
+    put=op("Set the overpayment refund window (admin)", "settings",
+           description="Many payers set this by rule (60 days for Medicare); "
+                       "confirm it with compliance staff.",
+           body=jbody({"days": I(minimum=1, maximum=3650)}, ["days"])))
+add("/api/v1/settings/write-off-approval",
+    get=op("Write-off approval threshold for the caller's organization (admin)",
+           "settings"),
+    put=op("Set the write-off approval threshold (admin)", "settings",
+           description="Write-offs at or above this amount need a manager's "
+                       "approval; 0 means every write-off does.",
+           body=jbody({"threshold": N(minimum=0)}, ["threshold"])))
+
 # ── playbooks ────────────────────────────────────────────────────────────
 PLAYBOOK_INPUT = {
     "name": S(), "description": S(), "triggers": OBJ, "recommendation": OBJ,
@@ -705,6 +851,10 @@ doc = {
             ("users", "User administration (admin)"),
             ("notifications", "Deadline digests and escalations"),
             ("playbooks", "Manager-curated deterministic resolution rules"),
+            ("write-offs", "Write-off approval above the organization threshold"),
+            ("overpayments", "Overpayments and their refund deadlines"),
+            ("payers", "Payers and the names and IDs that resolve to them"),
+            ("settings", "Organization and system settings (admin)"),
             ("system", "Health"),
             ("retention", "Audit-log and AI-analysis retention (admin)"),
         ]

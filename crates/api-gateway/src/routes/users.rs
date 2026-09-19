@@ -5,6 +5,7 @@ use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use chrono::{DateTime, NaiveDate, Utc};
 use denial_auth::auth::hash_password;
+use denial_auth::password::check_new_password;
 use denial_auth::rbac::Principal;
 use denial_common::error::AppError;
 use serde::Deserialize;
@@ -585,12 +586,14 @@ pub async fn reset_user_password(
         .ok_or(AppError::NotFound)?;
     let username: String = user.try_get("username").map_err(AppError::Db)?;
 
+    check_new_password(&username, &body.password).map_err(AppError::BadRequest)?;
     let hashed = hash_password(&body.password).map_err(|e| AppError::Internal(e.to_string()))?;
 
     // An admin resetting a password is usually responding to a compromise, so
-    // the sessions opened with the old one must end too.
+    // the sessions opened with the old one must end too. The admin knows the
+    // new one, so the user must replace it at their next sign-in.
     sqlx::query(
-        "UPDATE users SET password_hash = $1, \
+        "UPDATE users SET password_hash = $1, must_change_password = TRUE, \
          sessions_valid_from = date_trunc('second', NOW()), updated_at = NOW() WHERE id = $2",
     )
     .bind(&hashed)

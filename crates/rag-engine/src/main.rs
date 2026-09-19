@@ -1,6 +1,9 @@
 //! RAG Engine Service — embedding generation, vector store, and semantic
 //! retrieval. Ported from `rag-engine/main.py`.
 
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
 use axum::{
     extract::State,
     http::StatusCode,
@@ -33,6 +36,10 @@ struct Config {
     chunk_chars: usize,
     chunk_overlap: usize,
     min_similarity: f64,
+    /// Drop results scoring more than this below the best match.
+    relative_cut: f64,
+    /// A term in more than this share of the scoped chunks is too common to anchor on.
+    anchor_max_share: f64,
     embed_batch: usize,
     vector_search_enabled: bool,
     phi_disclosure_level: PhiDisclosureLevel,
@@ -66,7 +73,9 @@ impl Config {
             embed_base_url: env_or("EMBED_BASE_URL", "http://10.10.10.98:8081"),
             chunk_chars: env_usize("CHUNK_CHARS", 1500),
             chunk_overlap: env_usize("CHUNK_OVERLAP", 200),
-            min_similarity: env_f64("MIN_SIMILARITY", 0.25),
+            min_similarity: env_f64("MIN_SIMILARITY", 0.62),
+            relative_cut: env_f64("RELATIVE_CUT", 0.04),
+            anchor_max_share: env_f64("ANCHOR_MAX_SHARE", 0.25),
             embed_batch: env_usize("EMBED_BATCH", 16),
             vector_search_enabled: env_bool("VECTOR_SEARCH_ENABLED", true),
             phi_disclosure_level: PhiDisclosureLevel::parse(&env_or(
@@ -94,15 +103,122 @@ struct AppState {
 // ── Search ──
 
 /// Semantic search: embed the query, then cosine-rank chunks in pgvector.
+/// Which documents a search may return.
+struct Scope<'a> {
+    organization_id: uuid::Uuid,
+    source_type: Option<&'a str>,
+    payer: Option<&'a str>,
+    payer_id_number: Option<&'a str>,
+    jurisdiction: Option<&'a str>,
+    effective_on: Option<&'a str>,
+}
+
+/// Appends the scope conditions shared by vector and lexical search.
+///
+/// Payer-agnostic documents (NULL payer_name) stay in scope. A document also
+/// matches when its payer name and the claim's payer (by name or payer ID)
+/// are aliases of the same payer, so one payer spelled several ways, or
+/// named by ID, still finds its policies (FB-11). The date of service keeps
+/// out documents not in effect then.
+fn push_scope(qb: &mut QueryBuilder<'_, sqlx::Postgres>, scope: &Scope<'_>) {
+    qb.push(" AND kd.organization_id = ");
+    qb.push_bind(scope.organization_id);
+    if let Some(st) = scope.source_type {
+        qb.push(" AND kd.source_type = ");
+        qb.push_bind(st.to_string());
+    }
+    if let Some(p) = scope.payer {
+        qb.push(" AND (kd.payer_name IS NULL OR lower(kd.payer_name) = lower(");
+        qb.push_bind(p.to_string());
+        qb.push(
+            ") OR normalize_payer_name(kd.payer_name) IN (\
+                 SELECT a2.alias_normalized FROM payer_aliases a1 \
+                 JOIN payer_aliases a2 ON a2.payer_id = a1.payer_id \
+                 WHERE a1.organization_id = ",
+        );
+        qb.push_bind(scope.organization_id);
+        qb.push(" AND a1.alias_normalized IN (normalize_payer_name(");
+        qb.push_bind(p.to_string());
+        qb.push("), normalize_payer_name(");
+        qb.push_bind(scope.payer_id_number.unwrap_or_default().to_string());
+        qb.push("))))");
+    }
+    if let Some(j) = scope.jurisdiction {
+        qb.push(" AND lower(COALESCE(kd.metadata->>'jurisdiction', '')) = lower(");
+        qb.push_bind(j.to_string());
+        qb.push(")");
+    }
+    if let Some(date) = scope.effective_on {
+        // Cast: bound as text, compared with DATE columns.
+        qb.push(" AND (kd.effective_date IS NULL OR kd.effective_date <= ");
+        qb.push_bind(date.to_string());
+        qb.push("::date) AND (kd.expiration_date IS NULL OR kd.expiration_date >= ");
+        qb.push_bind(date.to_string());
+        qb.push("::date)");
+    }
+}
+
+/// Words too common to tell one policy from another; anchors must be terms a
+/// document would only carry if it were about the query.
+const STOP_WORDS: &[&str] = &[
+    "the", "and", "for", "was", "were", "are", "with", "without", "when", "that", "this", "these",
+    "those", "not", "any", "all", "each", "per", "its", "from", "such", "shall", "may", "must",
+    "than", "then", "also", "other", "more", "most", "least", "less", "same", "only", "into",
+    "under", "over", "about", "which", "what", "how", "have", "has", "can", "after", "before",
+    "claim", "claims", "service", "services", "provider", "member", "patient", "payer", "plan",
+    "denied", "denial", "code", "date",
+    // Labels the denial query itself puts in front of each code
+    // (`build_search_query` in the API): they say nothing about the claim, and
+    // anchoring on "icd-10" matched every document that names the code system.
+    "cpt", "icd", "icd-10", "icd10", "carc", "rarc", "hcpcs",
+];
+
+/// The terms a document must mention to be about this query.
+///
+/// A query carrying codes is anchored on the codes alone. A denial's query
+/// also carries its CARC wording ("Non-covered charge"), which is boilerplate
+/// shared by unrelated policies: anchoring on it returned documents for an
+/// ambulance claim no policy in the knowledge base covers, while the codes say
+/// exactly what the claim was for.
+fn anchor_tokens(query: &str) -> Vec<String> {
+    let tokens = query_tokens(query);
+    let codes: Vec<String> = tokens
+        .iter()
+        .filter(|t| t.chars().any(|c| c.is_ascii_digit()))
+        .cloned()
+        .collect();
+    if codes.is_empty() {
+        tokens
+    } else {
+        codes
+    }
+}
+
+/// The query's content words: codes such as `80053` or `M17.11` and terms long
+/// enough to carry meaning. Punctuation inside a code is kept.
+fn query_tokens(query: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    for raw in query.split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-')) {
+        let token = raw.trim_matches(|c| c == '.' || c == '-').to_lowercase();
+        if token.len() < 3 || STOP_WORDS.contains(&token.as_str()) {
+            continue;
+        }
+        if !tokens.contains(&token) {
+            tokens.push(token);
+        }
+    }
+    tokens
+}
+
+/// Matches a token as a whole word, so `20610` does not match `206100`.
+const WORD_MATCH: &str = " ~* ('(^|[^a-z0-9])' || ";
+const WORD_MATCH_END: &str = " || '([^a-z0-9]|$)')";
+
 async fn search_similar(
     state: &AppState,
     query: &str,
     top_k: i64,
-    source_type: Option<&str>,
-    payer: Option<&str>,
-    jurisdiction: Option<&str>,
-    effective_on: Option<&str>,
-    organization_id: uuid::Uuid,
+    scope: &Scope<'_>,
 ) -> Result<Vec<Value>, AppError> {
     let embeddings = state
         .embeddings
@@ -113,63 +229,63 @@ async fn search_similar(
         return Ok(vec![]);
     }
     let vec = format_vector(&embeddings[0]);
+    let tokens = anchor_tokens(query);
 
+    // Three filters, in order. `anchors` are the query terms rare enough in
+    // scope to mean something (a CPT code, "peer-to-peer"); a chunk carrying
+    // none of them is about something else however close its vector sits,
+    // which is what keeps a query no document answers from being handed weak
+    // matches as evidence. Then the absolute floor, then the relative cut:
+    // once there is a best match, anything far below it is noise beside it.
     let mut qb = QueryBuilder::<sqlx::Postgres>::default();
     qb.push(
-        "SELECT kc.id, kc.knowledge_document_id, kc.chunk_index, kc.content, \
-         kc.token_count, kc.metadata, kd.title AS document_title, kd.source_type, \
-         1 - (kc.embedding <=> ",
+        "WITH scope AS (\
+           SELECT kc.id, kc.knowledge_document_id, kc.chunk_index, kc.content, \
+                  kc.token_count, kc.metadata, kc.embedding, \
+                  kd.title AS document_title, kd.source_type \
+           FROM knowledge_chunks kc \
+           JOIN knowledge_documents kd ON kd.id = kc.knowledge_document_id \
+           WHERE kc.embedding IS NOT NULL AND kd.status <> 'archived'",
+    );
+    push_scope(&mut qb, scope);
+    qb.push("), anchors AS (SELECT t FROM unnest(");
+    qb.push_bind(tokens.clone());
+    qb.push("::text[]) AS t WHERE (SELECT count(*) FROM scope s WHERE s.content");
+    qb.push(WORD_MATCH);
+    qb.push("t");
+    qb.push(WORD_MATCH_END);
+    qb.push(") <= ceil(");
+    qb.push_bind(state.cfg.anchor_max_share);
+    qb.push(
+        " * (SELECT count(*) FROM scope))), kept AS (\
+         SELECT s.*, 1 - (s.embedding <=> ",
     );
     qb.push_bind(vec.clone());
     qb.push(
         "::vector) AS similarity_score, \
-         ts_rank_cd(to_tsvector('english', kc.content), websearch_to_tsquery('english', ",
+         LEAST(ts_rank_cd(to_tsvector('english', s.content), websearch_to_tsquery('english', ",
     );
     qb.push_bind(query.to_string());
     qb.push(
-        ")) AS keyword_score \
-         FROM knowledge_chunks kc \
-         JOIN knowledge_documents kd ON kd.id = kc.knowledge_document_id \
-         WHERE kc.embedding IS NOT NULL \
-         AND kd.status <> 'archived'",
+        ")), 1.0) AS keyword_score \
+         FROM scope s \
+         WHERE (NOT EXISTS (SELECT 1 FROM anchors) \
+                OR EXISTS (SELECT 1 FROM anchors a WHERE s.content",
     );
-    qb.push(" AND kd.organization_id = ");
-    qb.push_bind(organization_id);
-    if let Some(st) = source_type {
-        qb.push(" AND kd.source_type = ");
-        qb.push_bind(st.to_string());
-    }
-    if let Some(p) = payer {
-        // Payer-agnostic documents carry a NULL payer_name and stay in scope;
-        // matched loosely on case because payer names arrive in whatever case
-        // the payer sends them.
-        qb.push(" AND (kd.payer_name IS NULL OR lower(kd.payer_name) = lower(");
-        qb.push_bind(p.to_string());
-        qb.push("))");
-    }
-    if let Some(j) = jurisdiction {
-        qb.push(" AND lower(COALESCE(kd.metadata->>'jurisdiction', '')) = lower(");
-        qb.push_bind(j.to_string());
-        qb.push(")");
-    }
-    if let Some(date) = effective_on {
-        qb.push(" AND (kd.effective_date IS NULL OR kd.effective_date <= ");
-        qb.push_bind(date.to_string());
-        qb.push(") AND (kd.expiration_date IS NULL OR kd.expiration_date >= ");
-        qb.push_bind(date.to_string());
-        qb.push(")");
-    }
-    qb.push(" AND (1 - (kc.embedding <=> ");
+    qb.push(WORD_MATCH);
+    qb.push("a.t");
+    qb.push(WORD_MATCH_END);
+    qb.push(")) AND 1 - (s.embedding <=> ");
     qb.push_bind(vec.clone());
     qb.push("::vector) >= ");
     qb.push_bind(state.cfg.min_similarity);
-    qb.push(" OR to_tsvector('english', kc.content) @@ websearch_to_tsquery('english', ");
-    qb.push_bind(query.to_string());
-    qb.push(")) ORDER BY (0.7 * (1 - (kc.embedding <=> ");
-    qb.push_bind(vec);
-    qb.push("::vector)) + 0.3 * LEAST(ts_rank_cd(to_tsvector('english', kc.content), websearch_to_tsquery('english', ");
-    qb.push_bind(query.to_string());
-    qb.push(")), 1.0)) DESC LIMIT ");
+    qb.push(
+        ") SELECT id, knowledge_document_id, chunk_index, content, token_count, metadata, \
+                 document_title, source_type, similarity_score, keyword_score \
+          FROM kept WHERE similarity_score >= (SELECT max(similarity_score) FROM kept) - ",
+    );
+    qb.push_bind(state.cfg.relative_cut);
+    qb.push(" ORDER BY (0.7 * similarity_score + 0.3 * keyword_score) DESC LIMIT ");
     qb.push_bind(top_k);
 
     let rows = qb.build().fetch_all(&state.pool).await?;
@@ -189,12 +305,13 @@ async fn search_similar(
             "document_title": r.try_get::<Option<String>, _>("document_title").ok(),
             "source_type": r.try_get::<Option<String>, _>("source_type").ok(),
             "similarity_score": r.try_get::<f64, _>("similarity_score").unwrap_or(0.0),
-            "keyword_score": r.try_get::<f32, _>("keyword_score").unwrap_or(0.0),
+            "keyword_score": r.try_get::<f64, _>("keyword_score").unwrap_or(0.0),
         }));
     }
     tracing::info!(
-        "Vector search '{}' -> {} chunks",
+        "Vector search '{}' ({} anchors) -> {} chunks",
         &query.chars().take(40).collect::<String>(),
+        tokens.len(),
         results.len()
     );
     Ok(results)
@@ -206,11 +323,7 @@ async fn search_lexical(
     state: &AppState,
     query: &str,
     top_k: i64,
-    source_type: Option<&str>,
-    payer: Option<&str>,
-    jurisdiction: Option<&str>,
-    effective_on: Option<&str>,
-    organization_id: uuid::Uuid,
+    scope: &Scope<'_>,
 ) -> Result<Vec<Value>, AppError> {
     let mut qb = QueryBuilder::<sqlx::Postgres>::default();
     qb.push("SELECT kc.id, kc.knowledge_document_id, kc.chunk_index, kc.content, kc.token_count, kc.metadata, kd.title AS document_title, kd.source_type, 0.0::float8 AS similarity_score, ts_rank_cd(to_tsvector('english', kc.content), websearch_to_tsquery('english', ");
@@ -218,29 +331,7 @@ async fn search_lexical(
     qb.push(")) AS keyword_score FROM knowledge_chunks kc JOIN knowledge_documents kd ON kd.id = kc.knowledge_document_id WHERE kd.status <> 'archived' AND to_tsvector('english', kc.content) @@ websearch_to_tsquery('english', ");
     qb.push_bind(query.to_string());
     qb.push(")");
-    qb.push(" AND kd.organization_id = ");
-    qb.push_bind(organization_id);
-    if let Some(st) = source_type {
-        qb.push(" AND kd.source_type = ");
-        qb.push_bind(st.to_string());
-    }
-    if let Some(p) = payer {
-        qb.push(" AND (kd.payer_name IS NULL OR lower(kd.payer_name) = lower(");
-        qb.push_bind(p.to_string());
-        qb.push("))");
-    }
-    if let Some(j) = jurisdiction {
-        qb.push(" AND lower(COALESCE(kd.metadata->>'jurisdiction', '')) = lower(");
-        qb.push_bind(j.to_string());
-        qb.push(")");
-    }
-    if let Some(date) = effective_on {
-        qb.push(" AND (kd.effective_date IS NULL OR kd.effective_date <= ");
-        qb.push_bind(date.to_string());
-        qb.push(") AND (kd.expiration_date IS NULL OR kd.expiration_date >= ");
-        qb.push_bind(date.to_string());
-        qb.push(")");
-    }
+    push_scope(&mut qb, scope);
     qb.push(" ORDER BY keyword_score DESC LIMIT ");
     qb.push_bind(top_k);
     let rows = qb.build().fetch_all(&state.pool).await?;
@@ -279,6 +370,8 @@ struct Filters {
     jurisdiction: Option<String>,
     effective_on: Option<String>,
     organization_id: Option<uuid::Uuid>,
+    /// The claim's payer ID (835 N1*PR / 837 NM1*PR), tried as an alias too.
+    payer_id_number: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -298,6 +391,9 @@ struct IngestSection {
 
 #[derive(Deserialize)]
 struct PromptRequest {
+    /// A payer that pays after this one, when the claim names one.
+    #[serde(default)]
+    next_payer_name: Option<String>,
     claim_id: String,
     payer_name: String,
     cpt_code: String,
@@ -317,9 +413,63 @@ struct PromptRequest {
 
 // ── Handlers ──
 
+/// Dimensions of `knowledge_chunks.embedding`. A provider returning any other
+/// length would fail every chunk insert and every search.
+const EMBEDDING_DIMENSIONS: usize = 768;
+const EMBEDDING_CHECK_TTL: Duration = Duration::from_secs(30);
+
+static EMBEDDING_CHECK: OnceLock<Mutex<Option<(Instant, Value)>>> = OnceLock::new();
+
+/// The vector length the provider returns, or why it cannot be used.
+fn check_embedding(result: Result<Vec<Vec<f64>>, AppError>) -> Result<usize, String> {
+    let vectors = result.map_err(|error| error.to_string())?;
+    let dimensions = vectors
+        .first()
+        .map(Vec::len)
+        .ok_or("embedding provider returned no vector")?;
+    if dimensions == EMBEDDING_DIMENSIONS {
+        Ok(dimensions)
+    } else {
+        Err(format!(
+            "embedding provider returned {dimensions} dimensions; the index needs {EMBEDDING_DIMENSIONS}"
+        ))
+    }
+}
+
+/// Embeds a probe string, so a stopped server, a wrong URL or a model with the
+/// wrong dimensions is reported here instead of when a document is uploaded.
+async fn embedding_status(state: &AppState) -> Value {
+    if !state.cfg.vector_search_enabled {
+        return json!({"status": "disabled", "detail": "VECTOR_SEARCH_ENABLED=false; lexical search only"});
+    }
+    let cache = EMBEDDING_CHECK.get_or_init(|| Mutex::new(None));
+    if let Some((at, value)) = cache.lock().unwrap().as_ref() {
+        if at.elapsed() < EMBEDDING_CHECK_TTL {
+            return value.clone();
+        }
+    }
+    let input = ["health check".to_string()];
+    let probe = state.embeddings.embed(EmbedKind::Query, &input);
+    let result = match tokio::time::timeout(Duration::from_secs(3), probe).await {
+        Ok(result) => check_embedding(result),
+        Err(_) => Err("embedding provider did not answer within 3 seconds".into()),
+    };
+    let value = match result {
+        Ok(dimensions) => json!({
+            "status": "ok",
+            "detail": format!("{dimensions}-dimension vectors from {}", state.cfg.embedding_model),
+        }),
+        Err(reason) => json!({"status": "down", "detail": reason}),
+    };
+    *cache.lock().unwrap() = Some((Instant::now(), value.clone()));
+    value
+}
+
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
+    let embedding = embedding_status(&state).await;
     Json(json!({
         "status": "healthy",
+        "embedding": embedding,
         "embedding_model": state.cfg.embedding_model,
         "embedding_prefixes": {
             "query": state.cfg.embed_prefixes.query,
@@ -358,30 +508,18 @@ async fn search_knowledge(
     }
     let filters = req.filters.unwrap_or_default();
     let organization_id = filters.organization_id.ok_or(AppError::Forbidden)?;
+    let scope = Scope {
+        organization_id,
+        source_type: filters.source_type.as_deref(),
+        payer: filters.payer.as_deref(),
+        payer_id_number: filters.payer_id_number.as_deref(),
+        jurisdiction: filters.jurisdiction.as_deref(),
+        effective_on: filters.effective_on.as_deref(),
+    };
     let results = if state.cfg.vector_search_enabled {
-        search_similar(
-            &state,
-            &req.query,
-            req.top_k,
-            filters.source_type.as_deref(),
-            filters.payer.as_deref(),
-            filters.jurisdiction.as_deref(),
-            filters.effective_on.as_deref(),
-            organization_id,
-        )
-        .await?
+        search_similar(&state, &req.query, req.top_k, &scope).await?
     } else {
-        search_lexical(
-            &state,
-            &req.query,
-            req.top_k,
-            filters.source_type.as_deref(),
-            filters.payer.as_deref(),
-            filters.jurisdiction.as_deref(),
-            filters.effective_on.as_deref(),
-            organization_id,
-        )
-        .await?
+        search_lexical(&state, &req.query, req.top_k, &scope).await?
     };
     Ok(Json(json!({
         "results": results,
@@ -507,6 +645,7 @@ async fn build_prompt(
         rarc_code: req.rarc_code,
         rarc_definition: req.rarc_definition,
         retrieved_policies: req.retrieved_policies,
+        next_payer_name: req.next_payer_name,
         phi_disclosure_level: req
             .phi_disclosure_level
             .as_deref()
@@ -587,4 +726,69 @@ async fn main() {
     axum::serve(listener, build_router(state))
         .await
         .expect("RAG engine error");
+}
+
+#[cfg(test)]
+mod health_tests {
+    use super::{check_embedding, EMBEDDING_DIMENSIONS};
+    use denial_common::error::AppError;
+
+    #[test]
+    fn a_768_dimension_vector_is_healthy() {
+        assert_eq!(
+            check_embedding(Ok(vec![vec![0.0; EMBEDDING_DIMENSIONS]])),
+            Ok(EMBEDDING_DIMENSIONS)
+        );
+    }
+
+    #[test]
+    fn wrong_dimensions_name_both_sizes() {
+        assert_eq!(
+            check_embedding(Ok(vec![vec![0.0; 384]])),
+            Err("embedding provider returned 384 dimensions; the index needs 768".into())
+        );
+    }
+
+    #[test]
+    fn provider_errors_and_empty_results_are_unhealthy() {
+        assert!(check_embedding(Err(AppError::Upstream(
+            "embedding server 404 Not Found".into()
+        )))
+        .is_err());
+        assert!(check_embedding(Ok(vec![])).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{anchor_tokens, query_tokens};
+
+    #[test]
+    fn a_denial_query_anchors_on_its_codes_not_the_carc_wording() {
+        assert_eq!(
+            anchor_tokens("CPT A0429 CARC 96: Non-covered charge. Ambulance transport"),
+            vec!["a0429"],
+            "the procedure code alone; 96 is too short to be a term"
+        );
+    }
+
+    #[test]
+    fn a_question_without_codes_anchors_on_its_rarer_words() {
+        let tokens = anchor_tokens("prior authorization denied, request a peer-to-peer");
+        assert!(tokens.contains(&"authorization".to_string()));
+        assert!(tokens.contains(&"peer-to-peer".to_string()));
+        assert!(
+            !tokens.contains(&"denied".to_string()),
+            "too common to anchor on"
+        );
+    }
+
+    #[test]
+    fn codes_keep_their_punctuation_and_repeat_once() {
+        assert_eq!(
+            query_tokens("ICD-10 M17.11 the M17.11 knee"),
+            vec!["m17.11", "knee"],
+            "the code system label is not a term, and a repeat adds nothing"
+        );
+    }
 }
