@@ -150,7 +150,10 @@ CREATE TABLE ai_analyses (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     playbook_id UUID,
     denial_id UUID NOT NULL REFERENCES denials(id) ON DELETE CASCADE,
-    claim_id UUID NOT NULL,
+    -- Migration 009: every sibling table references claims with a real FK;
+    -- this one didn't, so an analysis could point at a claim that never
+    -- existed or had since been removed.
+    claim_id UUID NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
     model_name VARCHAR(100),
     prompt_tokens INTEGER,
     completion_tokens INTEGER,
@@ -217,6 +220,13 @@ CREATE TABLE appeals_queue (
 CREATE INDEX idx_appeals_queue_denial_id ON appeals_queue(denial_id);
 CREATE INDEX idx_appeals_queue_assigned_user_id ON appeals_queue(assigned_user_id);
 CREATE INDEX idx_appeals_queue_outcome_status ON appeals_queue(outcome_status);
+-- Migration 009: create_appeal checks for an existing open item and inserts
+-- as two separate statements, so two concurrent submissions could both pass
+-- the check and both insert. Only the database can close that race.
+CREATE UNIQUE INDEX idx_appeals_queue_one_open_per_denial
+    ON appeals_queue (denial_id)
+ WHERE outcome_status IS NULL
+    OR outcome_status NOT IN ('approved', 'overruled', 'resolved', 'denied_again', 'cancelled');
 CREATE INDEX idx_appeals_queue_resolution_type ON appeals_queue(resolution_type);
 CREATE INDEX idx_appeals_queue_created_at ON appeals_queue(created_at);
 
@@ -310,6 +320,10 @@ CREATE TABLE knowledge_documents (
         CHECK (source_type IN ('cms_lcd', 'payer_policy', 'fee_schedule',
                                'contract', 'prior_auth_policy', 'medical_necessity_criteria')),
     payer_id UUID,
+    -- Migration 009: the payer filter the analysis path has always sent was
+    -- silently dropped with nowhere to store it. NULL means it applies to
+    -- every payer (a CMS LCD, a CPT guideline).
+    payer_name VARCHAR(255),
     effective_date DATE,
     expiration_date DATE,
     file_path TEXT,
@@ -321,6 +335,8 @@ CREATE TABLE knowledge_documents (
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+CREATE INDEX idx_knowledge_documents_payer_name
+    ON knowledge_documents (lower(payer_name)) WHERE payer_name IS NOT NULL;
 
 CREATE INDEX idx_knowledge_documents_source_type ON knowledge_documents(source_type);
 CREATE INDEX idx_knowledge_documents_status ON knowledge_documents(status);
