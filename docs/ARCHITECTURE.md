@@ -177,8 +177,12 @@ scope for every denial. Archived documents are excluded, and results below
 
 ### LLM Service (`llm-service/` · `crates/llm-service/`)
 
-Builds the denial prompt, calls llama.cpp, parses the JSON answer, and stores
-prompt, response, model name and token counts in `ai_analyses` for audit.
+Builds the denial prompt, calls llama.cpp through the shared OpenAI-compatible
+`AiProvider`, parses the JSON answer, and stores prompt, response, model name
+and token counts in `ai_analyses` for audit. The gateway selects either its LLM
+or deterministic fallback through an internal `RecommendationProvider` boundary;
+authorization, tenant scoping, evidence validation, and persistence remain in
+the gateway.
 
 `LLM_MODEL=auto` follows whatever model llama.cpp currently has loaded rather
 than trusting a name pinned in `.env`. The host runs one `llama-server` at a

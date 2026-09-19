@@ -9,6 +9,7 @@ use axum::extract::{Query, State};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use denial_auth::rbac::{Principal, PrincipalKind};
+use denial_common::clients::LLMServiceClient;
 use denial_common::error::AppError;
 use denial_db::pgjson::row_to_json;
 use serde::Deserialize;
@@ -86,35 +87,60 @@ fn default_temperature() -> f32 {
     0.3
 }
 
+/// Provider boundary for the primary LLM and deterministic fallback.
+#[allow(async_fn_in_trait)]
+trait RecommendationProvider: Send + Sync {
+    async fn recommend(&self) -> Result<serde_json::Value, AppError>;
+}
+
+struct LlmRecommendationProvider<'a> {
+    client: &'a LLMServiceClient,
+    request: serde_json::Value,
+}
+
+impl RecommendationProvider for LlmRecommendationProvider<'_> {
+    async fn recommend(&self) -> Result<serde_json::Value, AppError> {
+        self.client.analyze_denial(&self.request).await
+    }
+}
+
 /// Safe, explainable fallback when an AI provider is unavailable. This keeps
 /// the denial workflow moving and deliberately prefers reviewable work over a
 /// speculative appeal or write-off.
-fn deterministic_recommendation(cagc: &str, carc: &str, description: &str) -> serde_json::Value {
-    let (category, action, step) = if cagc == "PR" {
-        (
+struct DeterministicRecommendationProvider<'a> {
+    cagc: &'a str,
+    carc: &'a str,
+    description: &'a str,
+}
+
+impl RecommendationProvider for DeterministicRecommendationProvider<'_> {
+    async fn recommend(&self) -> Result<serde_json::Value, AppError> {
+        let (category, action, step) = if self.cagc == "PR" {
+            (
             "patient_responsibility",
             "bill_patient",
             "Move the payer-assigned balance to the patient statement and verify the EOB amount.",
         )
-    } else if matches!(carc, "16" | "17" | "18" | "50" | "96") {
-        ("missing_info", "clinical_documentation", "Review the remittance advice and submit the requested clinical or claim documentation.")
-    } else if matches!(carc, "197" | "198" | "204") {
-        ("lack_of_preauth", "clinical_documentation", "Verify authorization requirements and gather authorization or medical-necessity support before resubmission.")
-    } else {
-        ("other", "coding_correction", "Review the claim, remittance advice, coding, modifiers, and payer edits before corrected resubmission.")
-    };
-    serde_json::json!({
-        "explanation": format!("Deterministic guidance based on {} {}.", carc, description),
-        "denial_category": category,
-        "required_action": action,
-        "root_cause_summary": "AI provider unavailable; generated from the adjustment group and reason code.",
-        "action_plan": {"type": action, "requires": ["remittance advice review"]},
-        "steps": [{"step": 1, "action": step}],
-        "needs_appeal": false,
-        "draft_appeal_letter": "",
-        "confidence_score": 0.45,
-        "provider": "deterministic_rules"
-    })
+        } else if matches!(self.carc, "16" | "17" | "18" | "50" | "96") {
+            ("missing_info", "clinical_documentation", "Review the remittance advice and submit the requested clinical or claim documentation.")
+        } else if matches!(self.carc, "197" | "198" | "204") {
+            ("lack_of_preauth", "clinical_documentation", "Verify authorization requirements and gather authorization or medical-necessity support before resubmission.")
+        } else {
+            ("other", "coding_correction", "Review the claim, remittance advice, coding, modifiers, and payer edits before corrected resubmission.")
+        };
+        Ok(serde_json::json!({
+            "explanation": format!("Deterministic guidance based on {} {}.", self.carc, self.description),
+            "denial_category": category,
+            "required_action": action,
+            "root_cause_summary": "AI provider unavailable; generated from the adjustment group and reason code.",
+            "action_plan": {"type": action, "requires": ["remittance advice review"]},
+            "steps": [{"step": 1, "action": step}],
+            "needs_appeal": false,
+            "draft_appeal_letter": "",
+            "confidence_score": 0.45,
+            "provider": "deterministic_rules"
+        }))
+    }
 }
 
 /// The full ai_analyses column list, with `confidence_score` cast off `numeric`
@@ -502,9 +528,9 @@ async fn generate_analysis_for_request(
         .map(|(id, _)| id.to_string())
         .collect();
 
-    let llm_result = state
-        .llm
-        .analyze_denial(&serde_json::json!({
+    let llm_provider = LlmRecommendationProvider {
+        client: &state.llm,
+        request: serde_json::json!({
             "denial_id": request.denial_id,
             // ai_analyses.claim_id is a UUID FK to claims(id); the human-
             // readable claim number is already baked into the prompt text.
@@ -512,20 +538,23 @@ async fn generate_analysis_for_request(
             "prompt": prompt,
             "allowed_evidence_ids": allowed_evidence_ids,
             "temperature": request.temperature,
-        }))
-        .await;
+        }),
+    };
+    let llm_result = llm_provider.recommend().await;
 
     let llm_result = match llm_result {
         Ok(result) => result,
         Err(error) => {
             tracing::warn!("AI provider unavailable; using deterministic recommendation: {error}");
-            let mut parsed = deterministic_recommendation(
-                cagc.as_deref().unwrap_or(""),
+            let mut parsed = DeterministicRecommendationProvider {
+                cagc: cagc.as_deref().unwrap_or(""),
                 carc,
-                carc_description
+                description: carc_description
                     .as_deref()
                     .unwrap_or("the payer's adjustment reason"),
-            );
+            }
+            .recommend()
+            .await?;
             let playbook = sqlx::query(
                 "SELECT id, name, version, recommendation FROM institutional_playbooks \
                  WHERE organization_id=$1 AND status='approved' \
@@ -626,7 +655,10 @@ async fn generate_analysis_for_request(
 
 #[cfg(test)]
 mod tests {
-    use super::{cited_evidence_ids, resolve_citation_metadata};
+    use super::{
+        cited_evidence_ids, resolve_citation_metadata, DeterministicRecommendationProvider,
+        RecommendationProvider,
+    };
 
     const FIRST: &str = "11111111-1111-1111-1111-111111111111";
     const SECOND: &str = "22222222-2222-2222-2222-222222222222";
@@ -671,6 +703,21 @@ mod tests {
 
         assert_eq!(citation.as_object().unwrap().len(), 4);
         assert!(citation.get("document_title").is_none());
+    }
+
+    #[tokio::test]
+    async fn deterministic_provider_selects_patient_responsibility_guidance() {
+        let recommendation = DeterministicRecommendationProvider {
+            cagc: "PR",
+            carc: "1",
+            description: "Deductible amount",
+        }
+        .recommend()
+        .await
+        .unwrap();
+
+        assert_eq!(recommendation["required_action"], "bill_patient");
+        assert_eq!(recommendation["provider"], "deterministic_rules");
     }
 }
 

@@ -16,9 +16,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
+use denial_ai::chat::{
+    AiProvider, ChatRequest as ChatCompletionRequest, OpenAiCompatibleAiProvider,
+};
 use denial_common::config::{env_or, env_required_secret, env_u64};
 use denial_common::error::AppError;
-use llama::{cached_model, resolve_model, LlamaClient};
+use llama::{cached_model, check_model_available, resolve_model};
 
 /// Environment configuration for this service.
 #[derive(Clone)]
@@ -64,7 +67,7 @@ impl Config {
 #[derive(Clone)]
 struct AppState {
     cfg: Config,
-    llama: LlamaClient,
+    ai: OpenAiCompatibleAiProvider,
     http: reqwest::Client,
 }
 
@@ -245,8 +248,8 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     // a timeout is reported as "model not confirmed" rather than the service
     // being dead, which is what it actually means.
     let probe = async {
-        let resolved = resolve_model(&state.llama, &state.cfg.llm_model).await;
-        let available = state.llama.check_model_available(&resolved).await;
+        let resolved = resolve_model(&state.ai, &state.cfg.llm_model).await;
+        let available = check_model_available(&state.ai, &resolved).await;
         (resolved, available)
     };
     match tokio::time::timeout(Duration::from_secs(2), probe).await {
@@ -271,8 +274,13 @@ async fn chat(
     Json(req): Json<ChatRequest>,
 ) -> Result<Json<ChatResponse>, AppError> {
     let response_text = match state
-        .llama
-        .chat(&req.system, &req.user, req.temperature)
+        .ai
+        .chat(ChatCompletionRequest {
+            model: resolve_model(&state.ai, &state.cfg.llm_model).await,
+            system: req.system.clone(),
+            user: req.user.clone(),
+            temperature: req.temperature,
+        })
         .await
     {
         Ok(t) => t,
@@ -283,7 +291,7 @@ async fn chat(
     };
     let prompt_tokens = word_count(&req.system) + word_count(&req.user);
     let completion_tokens = word_count(&response_text);
-    let model = resolve_model(&state.llama, &state.cfg.llm_model).await;
+    let model = resolve_model(&state.ai, &state.cfg.llm_model).await;
     Ok(Json(ChatResponse {
         model,
         response: response_text,
@@ -309,10 +317,15 @@ async fn analyze_denial(
         .to_string();
 
     let result = async {
-        let model_name = resolve_model(&state.llama, &state.cfg.llm_model).await;
+        let model_name = resolve_model(&state.ai, &state.cfg.llm_model).await;
         let raw_response = match state
-            .llama
-            .chat(&system_prompt, &user_prompt, req.temperature)
+            .ai
+            .chat(ChatCompletionRequest {
+                model: model_name.clone(),
+                system: system_prompt.clone(),
+                user: user_prompt.clone(),
+                temperature: req.temperature,
+            })
             .await
         {
             Ok(r) => r,
@@ -393,9 +406,9 @@ async fn analyze_denial(
 }
 
 async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
-    let body = match state.llama.list_models().await {
+    let body = match state.ai.list_models().await {
         Ok(models) => {
-            let current = resolve_model(&state.llama, &state.cfg.llm_model).await;
+            let current = resolve_model(&state.ai, &state.cfg.llm_model).await;
             serde_json::json!({
                 "models": models,
                 "current_model": current,
@@ -463,16 +476,16 @@ async fn main() {
         );
     }
 
-    let llama = LlamaClient::new(
+    let ai = OpenAiCompatibleAiProvider::new(
+        reqwest::Client::new(),
         &cfg.llama_base_url,
-        &cfg.llm_model,
         cfg.llm_max_tokens,
         cfg.llm_disable_thinking,
         cfg.llm_api_key.as_deref(),
     );
     let state = AppState {
         cfg,
-        llama,
+        ai,
         http: reqwest::Client::new(),
     };
 
