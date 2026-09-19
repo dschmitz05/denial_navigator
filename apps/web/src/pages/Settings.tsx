@@ -49,11 +49,11 @@ function ReferenceCodes({ canEdit }: { canEdit: boolean }) {
   // list being searched, so there is a single selector for the section.
   const [query, setQuery] = useState('')
   const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(10)
   const [results, setResults] = useState<ReferenceResult | null>(null)   // search response for kind+query+page
   const [selected, setSelected] = useState<string[]>([])   // codes checked in the current page
   const [bump, setBump] = useState(0)            // force a re-search after mutations
   const [busyDelete, setBusyDelete] = useState<'delete' | 'clear' | null>(null)  // 'delete' | 'clear'
-  const PAGE_SIZE = 50
 
   const loadSummary = useCallback(async () => {
     try {
@@ -70,11 +70,12 @@ function ReferenceCodes({ canEdit }: { canEdit: boolean }) {
   // Debounced search: typing settles for 300 ms before the request goes out,
   // and a settled list is just a search with an empty query.
   useEffect(() => {
+    const controller = new AbortController()
     const t = setTimeout(async () => {
       try {
-        const params = new URLSearchParams({ page: String(page), page_size: String(PAGE_SIZE) })
+        const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
         if (query.trim()) params.set('q', query.trim())
-        const resp = await fetch(`${API_BASE}/reference/${kind}/search?${params}`)
+        const resp = await fetch(`${API_BASE}/reference/${kind}/search?${params}`, { signal: controller.signal })
         if (resp.ok) {
           setResults(await resp.json())
           setSelected([])
@@ -83,8 +84,11 @@ function ReferenceCodes({ canEdit }: { canEdit: boolean }) {
         // Browsing is a nicety; the import form does not depend on it.
       }
     }, 300)
-    return () => clearTimeout(t)
-  }, [kind, query, page, bump])
+    return () => {
+      clearTimeout(t)
+      controller.abort()
+    }
+  }, [kind, query, page, pageSize, bump])
 
   const invalidate = () => { setPreview(null); setNotice(null) }
 
@@ -202,6 +206,13 @@ function ReferenceCodes({ canEdit }: { canEdit: boolean }) {
                    value={query}
                    onChange={e => { setQuery(e.target.value); setPage(1) }} />
           </div>
+          <label>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 4 }}>Results per page</div>
+            <select className="form-select" value={pageSize}
+                    onChange={e => { setPageSize(Number(e.target.value)); setPage(1) }}>
+              {[10, 25, 50, 100].map(size => <option key={size} value={size}>{size}</option>)}
+            </select>
+          </label>
           {canEdit && results && results.total > 0 && (
             <>
               <button className="btn btn-danger" disabled={selected.length === 0 || !!busyDelete}
