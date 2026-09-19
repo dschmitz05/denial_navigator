@@ -9,13 +9,9 @@ This document describes what the system actually does today. Where a design
 choice is non-obvious, the reason is given — those are the parts that get
 "corrected" back into bugs otherwise.
 
-> **Rewrite in progress.** The backend is being reimplemented in Rust
-> (`crates/`, an axum + sqlx workspace). The Python API gateway has been
-> removed; the remaining Python services (`ediparser/`, `rag-engine/`,
-> `llm-service/`) are still in the tree. The stack runs from
-> `docker-compose.rust.yml`. Behaviour, routes, the
-> database schema and the wire contract are identical — this document
-> describes both, and calls out a difference only where one exists.
+The backend is Rust (`crates/`, an axum + sqlx workspace). The earlier Python
+services it replaced are gone; the stack runs from
+`docker-compose.rust.yml`, the only supported deployment file.
 
 ---
 
@@ -27,7 +23,7 @@ choice is non-obvious, the reason is given — those are the parts that get
                 ▼                                    ▼
         ┌───────────────┐                  ┌────────────────────┐
         │  EDI Parser   │                  │  Frontend (nginx)  │
-        │   :8000/int   │                  │  TLS :3443         │
+        │   internal    │                  │  TLS :443 → :3444  │
         └───────┬───────┘                  └─────────┬──────────┘
                 │ parsed JSON                        │ /api/* proxied
                 └──────────────┐        ┌────────────┘
@@ -50,11 +46,11 @@ choice is non-obvious, the reason is given — those are the parts that get
    nomic-embed-text          Qwen3.x (switchable)
 ```
 
-Only the frontend publishes a port. Every other service is reachable on the
-Docker network alone — the gateway, parser, RAG engine and database are not
-bound to a host interface, so the TLS listener on `:3443` is the entire
-external surface. (The Rust stack additionally binds the gateway to
-`127.0.0.1:18000` for local `curl`; still loopback-only.)
+Only the frontend publishes a port to the outside. Every other service is
+reachable on the Docker network alone — the parser, RAG engine and database
+are not bound to a host interface at all, so nginx's TLS listener, published
+as `3444`, is the external surface. The gateway additionally binds to
+`127.0.0.1:18000`, loopback-only, for local `curl` and scripting.
 
 ---
 
@@ -84,17 +80,18 @@ another service directly.
 |---|---|---|
 | framework | FastAPI on asyncpg, `--workers 4` | axum 0.8 on sqlx, multi-threaded Tokio |
 | auth | PyJWT (HS256), bcrypt cost 12 | `jsonwebtoken` (HS256), `bcrypt` cost 12 |
-| TOTP secret encryption | PyFernet | `crates/common/totp.rs` reimplements the Fernet format (AES-128-CBC + HMAC-SHA256) byte-for-byte, so both read and write the same `users.totp_secret` |
+| TOTP secret encryption | PyFernet | `crates/common/src/totp.rs` reimplements the Fernet format (AES-128-CBC + HMAC-SHA256) byte-for-byte, so both read and write the same `users.totp_secret` |
 
 Layers, outermost first: **audit → access control → CORS → body limit**. Audit
 is outermost deliberately, so a request rejected by access control is still
 recorded. Both are Tower middleware; in the Rust build they are
 `from_fn_with_state` layers over the whole router.
 
-Routes (`routes/` — 17 modules, mounted under `/api/v1`): `auth`, `claims`,
+Routes (`routes/` — 22 modules, mounted under `/api/v1`): `auth`, `claims`,
 `denials`, `analyses`, `appeals`, `ingestion`, `knowledge`, `feedback`,
 `reference`, `audit`, `users`, `notifications`, `playbooks`, `system`,
-`retention`, `settings`, `write-offs`.
+`retention`, `settings`, `write_offs`, `deadlines`, `overpayments`, `payers`,
+`provider_adjustments`, `unanswered`.
 
 The access decision — public paths → identity → MFA confinement → account
 currency → role authorisation — is one function
@@ -133,7 +130,7 @@ its schema by reflection; the Rust build has no equivalent, so `crates/api-gatew
 holds a hand-maintained document (with a generator script) that is compiled
 into the binary.
 
-### EDI Parser (`ediparser/` · `crates/ediparser/`)
+### EDI Parser (`crates/ediparser/`)
 
 Parses X12 835 and 837 into structured JSON. Delimiters are read from the ISA
 rather than assumed, and the ISA must be at the start of the file — searching
@@ -155,7 +152,7 @@ Both directories hold PHI and are pruned on a daily sweep
 (`PARSED_RETENTION_DAYS`, default 30). The database is the record; these files
 are a working copy.
 
-### RAG Engine (`rag-engine/` · `crates/rag-engine/`)
+### RAG Engine (`crates/rag-engine/`)
 
 Chunks policy text, embeds it with `nomic-embed-text` (768-dim) through
 llama.cpp's OpenAI-compatible endpoint, and ranks chunks by cosine distance in
@@ -213,7 +210,7 @@ claim's date of service as `effective_on`, so a policy not yet in effect or
 already expired on that date is not used as evidence.
 `scripts/test_payer_retrieval.sh` covers both.
 
-### LLM Service (`llm-service/` · `crates/llm-service/`)
+### LLM Service (`crates/llm-service/`)
 
 Builds the denial prompt, calls llama.cpp through the shared OpenAI-compatible
 `AiProvider`, parses the JSON answer, and stores prompt, response, model name
@@ -440,38 +437,34 @@ unset, a known placeholder, or (for Fernet) not an exact 32-byte key.
 
 ## Operations
 
+`docker-compose.rust.yml` is the only supported deployment file — the earlier
+Python services this replaced (`docker-compose.yml`, and the top-level
+`ediparser/`, `rag-engine/` and `llm-service/` Python packages) are gone.
+`docs/OPERATIONS.md` covers deployment, upgrades, backup/restore and
+air-gapped hosts in full; this is the shape of it:
+
 ```bash
-./scripts/setup.sh                     # first run (Python stack)
-
-# Python stack (default)
-docker compose ps
-docker compose logs -f <service>
-
-# Rust stack (parallel; distinct ports and volumes)
-printf 'TOTP_FERNET_KEY=%s\n' "$(openssl rand -base64 32)" >> .env   # once
 docker compose -f docker-compose.rust.yml up -d --build
 #   UI  https://localhost:3444/     API  http://127.0.0.1:18000/
 #   docs at https://localhost:3444/docs
+docker compose -f docker-compose.rust.yml ps
+docker compose -f docker-compose.rust.yml logs -f <service>
 docker compose -f docker-compose.rust.yml down        # keep data
 docker compose -f docker-compose.rust.yml down -v     # drop data
 
 ./scripts/backup.sh                    # verified pg_dump
 ./scripts/restore.sh <file>
 ./scripts/eval_model.py                # score a model against known denials
+./scripts/eval_retrieval.py --check    # retrieval quality against labelled queries
 ./scripts/send_deadline_digests.sh     # filing-deadline notifications
 ```
 
-For fast local iteration on the Rust services without rebuilding images,
-`.rust-stack/` runs the four release binaries on the host against a throwaway
-database (`.rust-stack/up.sh` / `down.sh`).
-
-Migrations (Python stack; the Rust `docker-initdb.sh` does this automatically):
-
-```bash
-docker exec -i denial-navigator-postgres \
-  psql -U denial_nav -d denial_navigator -v ON_ERROR_STOP=1 \
-  < database/migrations/0NN_name.sql
-```
+Migrations apply automatically: `database/docker-initdb.sh` loads
+`database/init.sql` on a fresh database, and the API applies any new numbered
+migration under `database/migrations/` with SQLx before it serves traffic (see
+[Database migrations](../README.md#database-migrations)). There is no manual
+migration step in normal operation; running one by hand against a live
+database is only for recovering from a broken deployment.
 
 Health: `GET /api/v1/system/health` reports every dependency with latency, and
 distinguishes essential services from optional ones.
@@ -482,33 +475,33 @@ distinguishes essential services from optional ones.
 
 ```
 denial-navigator/
-├── docker-compose.yml              Python stack (default)
-├── docker-compose.rust.yml         Rust stack (parallel)
+├── docker-compose.rust.yml         the deployment
 ├── Dockerfile.rust                 multi-target build for all four Rust services
 ├── Cargo.toml / Cargo.lock         Rust workspace
 ├── database/
 │   ├── init.sql                    schema, views, triggers
-│   ├── migrations/                 numbered, idempotent
+│   ├── migrations/                 numbered, checksummed
 │   ├── seed/                       CARC/RARC reference data
 │   └── docker-initdb.sh            fresh-container bootstrap
 ├── crates/
 │   ├── common/                     config, db, auth, totp, rbac, audit,
 │   │                               ratelimit, clients, error, pgjson
+│   ├── auth/                       password hashing, JWT, RBAC rules
 │   ├── api-gateway/
-│   │   ├── src/routes/             14 route modules
+│   │   ├── src/routes/             22 route modules
 │   │   ├── src/{middleware,docs,state}.rs
 │   │   ├── openapi/                hand-maintained OpenAPI + generator
 │   │   └── static/docs/            vendored Swagger UI + ReDoc (air-gapped)
 │   ├── ediparser/                  x835, x837, schema, watch
-│   ├── rag-engine/                 chunk, embed, prompt
+│   ├── rag-engine/                 chunk, embed, prompt, retrieval scope
 │   └── llm-service/                llama client
-├── ediparser/ rag-engine/ llm-service/
-│                                   the remaining Python services
 ├── apps/web/
-│   ├── src/pages/                  13 pages
+│   ├── src/pages/                  16 pages
 │   ├── src/lib/                    authFetch, auditText
 │   └── scripts/smoke-render.mjs    npm run smoke
-├── .rust-stack/                    host-run rig for local iteration
 ├── scripts/
+│   ├── test_*.sh                   end-to-end checks against a live stack
+│   ├── eval_retrieval.py           retrieval quality evaluation
+│   └── check_docs_paths.py         fails CI if README.md links a dead file
 └── docs/
 ```

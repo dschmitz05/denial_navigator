@@ -17,6 +17,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: python3 crates/api-gateway/openapi/generate.py --check
+      - run: python3 scripts/check_docs_paths.py
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked
       - run: cargo test --workspace --locked
