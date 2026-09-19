@@ -138,6 +138,7 @@ CREATE TABLE ai_analyses (
     required_action TEXT,
     action_plan JSONB,
     steps JSONB,
+    citations JSONB NOT NULL DEFAULT '[]'::jsonb,
     needs_appeal BOOLEAN DEFAULT FALSE,
     draft_appeal_letter TEXT,
     confidence_score DECIMAL(3, 2),

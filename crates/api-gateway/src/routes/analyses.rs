@@ -13,6 +13,7 @@ use denial_common::error::AppError;
 use denial_db::pgjson::row_to_json;
 use serde::Deserialize;
 use sqlx::{QueryBuilder, Row};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -70,6 +71,8 @@ pub struct StoreAnalysis {
     pub completion_tokens: i64,
     #[serde(default)]
     pub total_tokens: i64,
+    #[serde(default)]
+    pub allowed_evidence_ids: Vec<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -121,8 +124,101 @@ const ANALYSIS_COLUMNS: &str =
     aa.provider_version, aa.prompt_template_version, \
     aa.prompt_tokens, aa.completion_tokens, aa.total_tokens, aa.system_prompt_template, \
     aa.raw_prompt, aa.raw_response, aa.explanation, aa.denial_category, aa.root_cause_summary, \
-    aa.required_action, aa.action_plan, aa.steps, aa.needs_appeal, aa.draft_appeal_letter, \
+    aa.required_action, aa.action_plan, aa.steps, aa.citations, aa.needs_appeal, aa.draft_appeal_letter, \
     aa.confidence_score::float8 AS confidence_score, aa.created_at, aa.updated_at";
+
+/// Keep only unique IDs the model cited from the retrieved-evidence allowlist.
+/// The subsequent database query scopes those IDs to the analyzed claim's
+/// organization before any citation metadata is persisted.
+fn cited_evidence_ids(
+    parsed_result: &serde_json::Value,
+    allowed: &[String],
+) -> Result<Vec<Uuid>, AppError> {
+    let allowed: HashSet<&str> = allowed.iter().map(String::as_str).collect();
+    let mut seen = HashSet::new();
+    let mut ids = Vec::new();
+    let Some(cited) = parsed_result.get("evidence_ids") else {
+        return Ok(ids);
+    };
+    let cited = cited.as_array().ok_or_else(|| {
+        AppError::BadRequest("parsed_result evidence_ids must be an array of strings".into())
+    })?;
+
+    for evidence_id in cited {
+        let evidence_id = evidence_id.as_str().ok_or_else(|| {
+            AppError::BadRequest("parsed_result evidence_ids must be an array of strings".into())
+        })?;
+        if !allowed.contains(evidence_id) {
+            return Err(AppError::BadRequest(
+                "cited evidence was not retrieved for this analysis".into(),
+            ));
+        }
+        let evidence_id = Uuid::parse_str(evidence_id)
+            .map_err(|_| AppError::BadRequest("cited evidence_id must be a UUID".into()))?;
+        if seen.insert(evidence_id) {
+            ids.push(evidence_id);
+        }
+    }
+
+    Ok(ids)
+}
+
+async fn resolve_citations(
+    state: &AppState,
+    claim_id: Uuid,
+    cited_evidence_ids: &[Uuid],
+) -> Result<Vec<serde_json::Value>, AppError> {
+    if cited_evidence_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let rows = sqlx::query(
+        "SELECT kc.id AS evidence_id, kc.knowledge_document_id AS document_id, \
+         kd.source_type, kc.chunk_index \
+         FROM knowledge_chunks kc \
+         JOIN knowledge_documents kd ON kd.id = kc.knowledge_document_id \
+         JOIN claims c ON c.id = $1 \
+         WHERE kc.id = ANY($2) AND kd.organization_id = c.organization_id \
+         ORDER BY array_position($2::uuid[], kc.id)",
+    )
+    .bind(claim_id)
+    .bind(cited_evidence_ids)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(AppError::Db)?;
+
+    if rows.len() != cited_evidence_ids.len() {
+        return Err(AppError::BadRequest(
+            "cited evidence must belong to the claim organization".into(),
+        ));
+    }
+
+    Ok(rows
+        .iter()
+        .map(|row| {
+            resolve_citation_metadata(
+                row.try_get("evidence_id").unwrap_or_default(),
+                row.try_get("document_id").unwrap_or_default(),
+                &row.try_get::<String, _>("source_type").unwrap_or_default(),
+                row.try_get("chunk_index").unwrap_or_default(),
+            )
+        })
+        .collect())
+}
+
+fn resolve_citation_metadata(
+    evidence_id: Uuid,
+    document_id: Uuid,
+    source_type: &str,
+    chunk_index: i32,
+) -> serde_json::Value {
+    serde_json::json!({
+        "evidence_id": evidence_id,
+        "document_id": document_id,
+        "source_type": source_type,
+        "chunk_index": chunk_index,
+    })
+}
 
 pub async fn list_analyses(
     State(state): State<AppState>,
@@ -192,6 +288,8 @@ pub async fn store_analysis(
         .and_then(|p| p.get("id"))
         .and_then(|id| id.as_str())
         .and_then(|id| Uuid::parse_str(id).ok());
+    let cited_evidence_ids = cited_evidence_ids(&a.parsed_result, &a.allowed_evidence_ids)?;
+    let citations = resolve_citations(&state, claim_id, &cited_evidence_ids).await?;
 
     // `parsed_result` is provider-controlled data. A referenced playbook must
     // belong to the same organization as the claim being analyzed, even for a
@@ -224,15 +322,15 @@ pub async fn store_analysis(
             (denial_id, claim_id, playbook_id, model_name, provider_name, provider_version, prompt_template_version, \
              prompt_tokens, completion_tokens, total_tokens, \
              system_prompt_template, raw_prompt, raw_response, \
-             explanation, denial_category, required_action, root_cause_summary, action_plan, steps, \
-             needs_appeal, draft_appeal_letter, confidence_score) \
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::jsonb, $19::jsonb, \
-                  $20, $21, $22) \
-          RETURNING id, denial_id, claim_id, model_name, provider_name, provider_version, prompt_template_version, \
-              prompt_tokens, completion_tokens, \
-              total_tokens, system_prompt_template, raw_prompt, raw_response, explanation, \
-              denial_category, root_cause_summary, required_action, action_plan, steps, \
-              needs_appeal, draft_appeal_letter, confidence_score::float8 AS confidence_score, \
+              explanation, denial_category, required_action, root_cause_summary, action_plan, steps, \
+              citations, needs_appeal, draft_appeal_letter, confidence_score) \
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::jsonb, $19::jsonb, \
+                   $20::jsonb, $21, $22, $23) \
+           RETURNING id, denial_id, claim_id, model_name, provider_name, provider_version, prompt_template_version, \
+               prompt_tokens, completion_tokens, \
+               total_tokens, system_prompt_template, raw_prompt, raw_response, explanation, \
+               denial_category, root_cause_summary, required_action, action_plan, steps, \
+               citations, needs_appeal, draft_appeal_letter, confidence_score::float8 AS confidence_score, \
               created_at, updated_at",
     )
     .bind(denial_id)
@@ -254,6 +352,7 @@ pub async fn store_analysis(
     .bind(get_str("root_cause_summary"))
     .bind(action_plan)
     .bind(steps)
+    .bind(serde_json::to_string(&citations).map_err(|e| AppError::Internal(e.to_string()))?)
     .bind(needs_appeal)
     .bind(draft_appeal_letter)
     .bind(confidence_score)
@@ -463,6 +562,7 @@ async fn generate_analysis_for_request(
                     prompt_tokens: 0,
                     completion_tokens: 0,
                     total_tokens: 0,
+                    allowed_evidence_ids: Vec::new(),
                 }),
             )
             .await?;
@@ -512,6 +612,56 @@ async fn generate_analysis_for_request(
         "stored": llm_result.get("stored"),
         "policy_documents_retrieved": policy_texts.len(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cited_evidence_ids, resolve_citation_metadata};
+
+    const FIRST: &str = "11111111-1111-1111-1111-111111111111";
+    const SECOND: &str = "22222222-2222-2222-2222-222222222222";
+
+    #[test]
+    fn keeps_unique_cited_evidence_in_model_order() {
+        let ids = cited_evidence_ids(
+            &serde_json::json!({ "evidence_ids": [SECOND, FIRST, SECOND] }),
+            &[FIRST.into(), SECOND.into()],
+        )
+        .unwrap();
+
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0].to_string(), SECOND);
+        assert_eq!(ids[1].to_string(), FIRST);
+    }
+
+    #[test]
+    fn rejects_evidence_not_in_retrieval_allowlist() {
+        assert!(cited_evidence_ids(
+            &serde_json::json!({ "evidence_ids": [SECOND] }),
+            &[FIRST.into()],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn fallback_without_evidence_ids_has_no_citations() {
+        assert!(cited_evidence_ids(&serde_json::json!({}), &[FIRST.into()])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn citation_metadata_excludes_document_title() {
+        let citation = resolve_citation_metadata(
+            uuid::uuid!("11111111-1111-1111-1111-111111111111"),
+            uuid::uuid!("22222222-2222-2222-2222-222222222222"),
+            "payer_policy",
+            3,
+        );
+
+        assert_eq!(citation.as_object().unwrap().len(), 4);
+        assert!(citation.get("document_title").is_none());
+    }
 }
 
 /// Queue the same recommendation pipeline for callers that should not hold an

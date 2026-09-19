@@ -7,6 +7,7 @@ type QueueFilters = { status?: string; carc_code?: string; payer_name?: string; 
 type CarcOption = { carc_code: string; description?: string; denial_count?: number }
 type Notice = { error: boolean; text: string }
 type SavedView = { name: string; status?: string; carc?: string; payer?: string; minAmount?: string; maxAmount?: string; minAgeDays?: string; maxAgeDays?: string; owner?: string; facility?: string; search?: string; sort?: string; descending?: boolean }
+type Citation = { evidence_id: string; document_id: string; document_title: string; source_type: string; chunk_index: number }
 
 function formatCurrency(value?: number) {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value || 0)
@@ -120,7 +121,15 @@ export default function Denials() {
       if (resp.ok) {
         loadDenials({ status: statusFilter, carc_code: carcFilter })
         if (selectedDenial?.id === denialId) {
-          setSelectedDenial(prev => (prev ? { ...prev, analysis: result } : prev))
+          try {
+            const detailResponse = await fetch(`${API_BASE}/denials/${denialId}`)
+            const detail = await detailResponse.json()
+            if (!detailResponse.ok) throw new Error(detail?.detail || `Could not refresh denial details (HTTP ${detailResponse.status})`)
+            setSelectedDenial(detail)
+          } catch (err) {
+            console.error('Denial detail refresh failed:', err)
+            setError(err instanceof Error ? `Analysis generated, but ${err.message}` : 'Analysis generated, but denial details could not be refreshed')
+          }
         }
       } else {
         // A failure used to be swallowed entirely, so the button looked inert.
@@ -446,6 +455,18 @@ export default function Denials() {
                               </li>
                             ))}
                           </ol>
+                        </div>
+                      )}
+                      {Array.isArray(selectedDenial.citations) && selectedDenial.citations.length > 0 && (
+                        <div style={{ marginTop: 12 }}>
+                          <strong>References used:</strong>
+                          <ul style={{ marginTop: 6, paddingLeft: 20 }}>
+                            {(selectedDenial.citations as Citation[]).map(citation => (
+                              <li key={citation.evidence_id} style={{ marginBottom: 4 }}>
+                                {citation.document_title} ({citation.source_type}, chunk {citation.chunk_index})
+                              </li>
+                            ))}
+                          </ul>
                         </div>
                       )}
                     </div>

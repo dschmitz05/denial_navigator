@@ -11,6 +11,7 @@ use denial_domain::ACTIVE_DENIAL_STATUSES;
 use denial_engine::recommended_resolution;
 use serde::Deserialize;
 use sqlx::{QueryBuilder, Row};
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -661,7 +662,7 @@ pub async fn get_denial(
          cc.description as carc_description, \
          rc.description as rarc_description, \
          aa.id AS ai_analysis_id, \
-         aa.explanation, aa.action_plan, aa.steps, aa.draft_appeal_letter, \
+          aa.explanation, aa.action_plan, aa.steps, aa.citations, aa.draft_appeal_letter, \
          aa.denial_category, aa.required_action, aa.needs_appeal, \
          aa.confidence_score, \
          aq.id AS appeal_id, aq.outcome_status AS appeal_status, \
@@ -683,6 +684,11 @@ pub async fn get_denial(
     .ok_or(AppError::NotFound)?;
 
     let mut denial = row_to_json(&row);
+    let citations = denial
+        .get("citations")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    denial["citations"] = hydrate_citations(&state, organization_id, &citations).await?;
 
     let cagc: Option<String> = row.try_get("cagc").unwrap_or(None);
     let required_action: Option<String> = row.try_get("required_action").unwrap_or(None);
@@ -697,6 +703,72 @@ pub async fn get_denial(
     denial["recommendation_note"] = serde_json::to_value(recommendation.note).unwrap();
 
     Ok(Json(denial))
+}
+
+fn cited_document_ids(citations: &serde_json::Value) -> Vec<Uuid> {
+    let Some(citations) = citations.as_array() else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    citations
+        .iter()
+        .filter_map(|citation| citation.get("document_id")?.as_str())
+        .filter_map(|document_id| Uuid::parse_str(document_id).ok())
+        .filter(|document_id| seen.insert(*document_id))
+        .collect()
+}
+
+fn hydrate_citation_titles(
+    citations: &serde_json::Value,
+    document_titles: &HashMap<Uuid, String>,
+) -> serde_json::Value {
+    let Some(citations) = citations.as_array() else {
+        return serde_json::json!([]);
+    };
+    serde_json::Value::Array(
+        citations
+            .iter()
+            .filter_map(|citation| {
+                let evidence_id = Uuid::parse_str(citation.get("evidence_id")?.as_str()?).ok()?;
+                let document_id = Uuid::parse_str(citation.get("document_id")?.as_str()?).ok()?;
+                let document_title = document_titles.get(&document_id)?;
+                let source_type = citation.get("source_type")?.as_str()?;
+                let chunk_index = citation.get("chunk_index")?.as_i64()?;
+                Some(serde_json::json!({
+                    "evidence_id": evidence_id,
+                    "document_id": document_id,
+                    "document_title": document_title,
+                    "source_type": source_type,
+                    "chunk_index": chunk_index,
+                }))
+            })
+            .collect(),
+    )
+}
+
+async fn hydrate_citations(
+    state: &AppState,
+    organization_id: Uuid,
+    citations: &serde_json::Value,
+) -> Result<serde_json::Value, AppError> {
+    let document_ids = cited_document_ids(citations);
+    if document_ids.is_empty() {
+        return Ok(serde_json::json!([]));
+    }
+
+    let document_titles: HashMap<Uuid, String> = sqlx::query(
+        "SELECT id, title FROM knowledge_documents WHERE organization_id = $1 AND id = ANY($2)",
+    )
+    .bind(organization_id)
+    .bind(document_ids)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(AppError::Db)?
+    .into_iter()
+    .filter_map(|row| Some((row.try_get("id").ok()?, row.try_get("title").ok()?)))
+    .collect();
+
+    Ok(hydrate_citation_titles(citations, &document_titles))
 }
 
 /// The denial workflow state machine. `denials.status` is a flat set; this
@@ -874,7 +946,8 @@ pub fn router() -> Router<AppState> {
 
 #[cfg(test)]
 mod tests {
-    use super::allowed_transitions;
+    use super::{allowed_transitions, hydrate_citation_titles};
+    use std::collections::HashMap;
 
     #[test]
     fn open_cannot_jump_to_overruled() {
@@ -942,5 +1015,34 @@ mod tests {
     #[test]
     fn unknown_status_allows_nothing() {
         assert!(allowed_transitions("bogus").is_empty());
+    }
+
+    #[test]
+    fn citation_titles_are_hydrated_only_from_scoped_documents() {
+        let allowed_document = uuid::uuid!("11111111-1111-1111-1111-111111111111");
+        let cross_org_document = uuid::uuid!("22222222-2222-2222-2222-222222222222");
+        let citations = serde_json::json!([
+            {
+                "evidence_id": "33333333-3333-3333-3333-333333333333",
+                "document_id": allowed_document,
+                "document_title": "untrusted stored title",
+                "source_type": "payer_policy",
+                "chunk_index": 2,
+            },
+            {
+                "evidence_id": "44444444-4444-4444-4444-444444444444",
+                "document_id": cross_org_document,
+                "document_title": "cross-org title",
+                "source_type": "payer_policy",
+                "chunk_index": 4,
+            }
+        ]);
+        let titles = HashMap::from([(allowed_document, "Scoped payer policy".to_string())]);
+
+        let hydrated = hydrate_citation_titles(&citations, &titles);
+
+        assert_eq!(hydrated.as_array().unwrap().len(), 1);
+        assert_eq!(hydrated[0]["document_title"], "Scoped payer policy");
+        assert_ne!(hydrated[0]["document_title"], "untrusted stored title");
     }
 }
