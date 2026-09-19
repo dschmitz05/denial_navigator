@@ -1,4 +1,7 @@
 -- Normalize the legacy role names to the seven roles in plan §2.2.
+-- The old constraint only allows the legacy names, so drop it before renaming.
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+
 UPDATE users SET role = CASE role
     WHEN 'admin' THEN 'system_admin'
     WHEN 'rcm_director' THEN 'revenue_cycle_manager'
@@ -22,7 +25,6 @@ WHERE role NOT IN (
     'billing_specialist', 'coding_specialist', 'auditor', 'read_only'
 );
 
-ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
 ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN (
     'system_admin', 'security_admin', 'revenue_cycle_manager',
     'billing_specialist', 'coding_specialist', 'auditor', 'read_only'
