@@ -1,0 +1,16 @@
+# Gitleaks config for Denial Navigator (FB-18).
+#
+# Extends gitleaks' default rule set rather than replacing it, and adds one
+# narrow allowlist for a real false positive: scripts/test_*.sh create a
+# throwaway local account against a running dev stack and delete it again in
+# their cleanup trap, using a fixed, obviously-synthetic password so a failed
+# run's leftover account is recognizable (`Payer-Test-2026`,
+# `Deadline-Test-2026`, and so on — see docs/OPERATIONS.md). Scoped to that one
+# path and value shape so it cannot hide an unrelated real secret.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Synthetic per-script test passwords in the end-to-end test scripts"
+paths = ['''scripts/test_.*\.sh$''']
+regexes = ['''[A-Z][A-Za-z]*-[A-Za-z]+(-[A-Za-z]+)?-20\d\d''']
