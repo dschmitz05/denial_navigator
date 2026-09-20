@@ -58,6 +58,7 @@ function LoginScreen() {
     const result = await login(username, password, organizationId)
     if ('organizations' in result) return result
     if ('mfa' in result) return result
+    if ('passwordChangeToken' in result) return result
     navigate('/')
     return result
   }
