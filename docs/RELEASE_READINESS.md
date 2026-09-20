@@ -26,15 +26,18 @@ dirty worktree.
 ## Supported X12 scope
 
 835 remittance parsing supports ISA/GS/ST envelopes, BPR, TRN, CLP, CAS,
-SVC, LQ, PLB, SE/GE/IEA and normalizes claim/service adjustments, CARC/RARC,
+SVC, QTY, LQ, PLB, SE/GE/IEA and normalizes claim/service adjustments, CARC/RARC,
 and patient-responsibility amounts. 837 parsing identifies institutional and
-professional transactions and correlates only exact claim numbers.
+professional transactions and uses a scored, corroborated claim correlation;
+ambiguous matches are not silently merged.
 
 ## Known limitations
 
 - Scanned PDFs require OCR before knowledge ingestion.
 - S3 event notifications are not included yet; the SFTP and S3-compatible
   polling importers and a Helm chart are available.
-- OIDC/Keycloak and multi-organization tenant isolation remain deployment
-  roadmap work; local JWT/TOTP roles protect the current single deployment.
+- Multi-organization tenant isolation is enforced through active organization
+  memberships and organization-scoped queries. OIDC is supported through the
+  production issuer profile; operators must configure their own issuer and
+  maintain its availability.
 - AI recommendations are advisory and may fall back to deterministic rules.
