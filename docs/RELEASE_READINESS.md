@@ -33,7 +33,8 @@ ambiguous matches are not silently merged.
 
 ## Known limitations
 
-- Scanned PDFs require OCR before knowledge ingestion.
+- Scanned/image-only PDFs are OCR'd automatically (pdftoppm + tesseract) when
+  no embedded text layer is found, capped at 60 pages per document.
 - S3 event notifications are not included yet; the SFTP and S3-compatible
   polling importers and a Helm chart are available.
 - Multi-organization tenant isolation is enforced through active organization
