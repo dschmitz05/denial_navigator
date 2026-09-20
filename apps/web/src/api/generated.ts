@@ -14,9 +14,13 @@ export interface ApiOperations {
   "POST /api/v1/appeals": { body: { "denial_id": string; "resolution_type": string; "notes"?: string } };
   "POST /api/v1/appeals/bulk": { body: { "denial_ids": Array<string>; "resolution_type": string } };
   "GET /api/v1/appeals/{appeal_id}": { path: { "appeal_id": string } };
-  "PATCH /api/v1/appeals/{appeal_id}": { path: { "appeal_id": string }; body: { "outcome_status"?: string; "notes"?: string; "payer_response"?: string; "final_outcome"?: string } };
+  "PATCH /api/v1/appeals/{appeal_id}": { path: { "appeal_id": string }; body: { "outcome_status"?: string; "notes"?: string; "payer_response"?: string; "final_outcome"?: string; "submission_method"?: "portal" | "fax" | "mail" | "email"; "payer_confirmation_number"?: string } };
   "POST /api/v1/appeals/{appeal_id}/assign": { path: { "appeal_id": string }; body: { "assigned_user_id"?: string } };
   "GET /api/v1/appeals/{appeal_id}/letter": { path: { "appeal_id": string } };
+  "GET /api/v1/appeals/{appeal_id}/packet": { path: { "appeal_id": string } };
+  "POST /api/v1/appeals/{appeal_id}/packet": { path: { "appeal_id": string } };
+  "POST /api/v1/appeals/{appeal_id}/packet/approve": { path: { "appeal_id": string } };
+  "GET /api/v1/appeals/{appeal_id}/packet/download": { path: { "appeal_id": string } };
   "GET /api/v1/audit": { query?: { "action"?: string; "resource_type"?: string; "user_id"?: string; "username"?: string; "start_date"?: string; "end_date"?: string; "limit"?: number; "offset"?: number } };
   "GET /api/v1/audit/actors": Record<string, never>;
   "GET /api/v1/audit/stats": Record<string, never>;
@@ -50,6 +54,10 @@ export interface ApiOperations {
   "GET /api/v1/denials/resolution-timing": Record<string, never>;
   "GET /api/v1/denials/{denial_id}": { path: { "denial_id": string } };
   "PATCH /api/v1/denials/{denial_id}": { path: { "denial_id": string }; body: { "status"?: string; "appeal_deadline"?: string } };
+  "GET /api/v1/denials/{denial_id}/attachments": { path: { "denial_id": string } };
+  "POST /api/v1/denials/{denial_id}/attachments": { path: { "denial_id": string }; body: FormData };
+  "GET /api/v1/denials/{denial_id}/attachments/{attachment_id}": { path: { "denial_id": string; "attachment_id": string } };
+  "DELETE /api/v1/denials/{denial_id}/attachments/{attachment_id}": { path: { "denial_id": string; "attachment_id": string } };
   "GET /api/v1/denials/{denial_id}/interactions": { path: { "denial_id": string } };
   "POST /api/v1/denials/{denial_id}/interactions": { path: { "denial_id": string }; body: { "channel": string; "summary": string; "occurred_at"?: string; "reference_number"?: string; "representative"?: string; "follow_up_on"?: string } };
   "POST /api/v1/denials/{denial_id}/interactions/{interaction_id}/complete": { path: { "denial_id": string; "interaction_id": string } };

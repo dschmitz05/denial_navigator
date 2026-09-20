@@ -1,5 +1,6 @@
 mod docs;
 mod middleware;
+mod pdf;
 mod reprocessing;
 mod routes;
 mod state;

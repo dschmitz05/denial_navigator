@@ -489,6 +489,27 @@ unset, a known placeholder, or (for Fernet) not an exact 32-byte key.
   only reorders — it never removes an item from either list.
   `scripts/test_expected_recovery_sort.sh` covers the fallback chain and the
   ordering.
+- **Denial attachments and appeal packets** (`routes/attachments.rs`,
+  `crate::pdf`; FB-15). Files attach to a denial (visit notes, an
+  authorization, a remittance excerpt) through the shared `ObjectStorage`
+  backend, keyed by `denial_attachments.id` — same pattern as a knowledge
+  document's source file. Every read goes through the existing request-audit
+  middleware, so a download is already logged. `POST /appeals/{id}/packet`
+  assembles a PDF from the claim/remittance summary, the draft appeal letter
+  (or the analysis explanation if none was drafted) and the denial's
+  attachment index, written by a small hand-rolled PDF layer (`crate::pdf`):
+  Helvetica only, word-wrapped, paginated, Latin-1-safe (non-encodable
+  characters are substituted rather than corrupting the file — lopdf, a
+  transitive dependency via the PDF-reading path, writes PDFs too, so this
+  needed no new dependency). One packet per appeal, replaced (not versioned)
+  on regeneration, which always resets it to `draft`. Approving it only marks
+  the content reviewed; it does not submit anything. `submission_method` and
+  `payer_confirmation_number` (`PATCH /appeals/{id}`) record what actually
+  happened with the payer, separately from the packet's review state — and
+  setting them requires an approved packet for that appeal, so a submission
+  can never be recorded against content nobody reviewed.
+  `scripts/test_attachments_and_packet.sh` covers attachment round-tripping,
+  the packet lifecycle and that precondition end to end.
 - **Bulk queueing resolves the whole batch in one query** instead of three per
   denial, and reports partial success rather than failing the batch.
 - **The connection pool** is created once at startup with a liveness check;

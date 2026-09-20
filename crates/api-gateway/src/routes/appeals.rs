@@ -21,7 +21,7 @@ use serde::Deserialize;
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::routes::write_offs;
+use crate::routes::{attachments, write_offs};
 use crate::state::AppState;
 use denial_db::pgjson::row_to_json;
 
@@ -47,6 +47,10 @@ pub struct AppealUpdate {
     pub payer_response: Option<NaiveDate>,
     pub payer_response_text: Option<String>,
     pub final_outcome: Option<String>,
+    /// How the packet actually went to the payer (FB-15) - distinct from
+    /// submitted_at/payer_response, which track the appeal's outcome.
+    pub submission_method: Option<String>,
+    pub payer_confirmation_number: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -627,6 +631,37 @@ pub async fn update_appeal(
     if body.final_outcome.is_some() {
         sets.push(format!("final_outcome = ${}", sets.len() + 1));
     }
+    if let Some(ref m) = body.submission_method {
+        if !["portal", "fax", "mail", "email"].contains(&m.as_str()) {
+            return Err(AppError::Unprocessable(
+                "submission_method must be portal, fax, mail or email".into(),
+            ));
+        }
+        // A submission recorded against a packet nobody reviewed is worse
+        // than no record at all: it looks like the filing was checked when
+        // it wasn't. Require the packet to have been generated and approved
+        // first.
+        let approved: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM appeal_packets \
+             WHERE appeal_id = $1 AND organization_id = $2 AND status = 'approved')",
+        )
+        .bind(appeal_id)
+        .bind(organization_id)
+        .fetch_one(pool)
+        .await
+        .map_err(AppError::Db)?;
+        if !approved {
+            return Err(AppError::BadRequest(
+                "submission_method requires an approved packet for this appeal \
+                 (generate one, then POST /appeals/{id}/packet/approve)"
+                    .into(),
+            ));
+        }
+        sets.push(format!("submission_method = ${}", sets.len() + 1));
+    }
+    if body.payer_confirmation_number.is_some() {
+        sets.push(format!("payer_confirmation_number = ${}", sets.len() + 1));
+    }
 
     if sets.is_empty() {
         return Err(AppError::BadRequest("No fields to update".into()));
@@ -651,6 +686,12 @@ pub async fn update_appeal(
         q = q.bind(v);
     }
     if let Some(ref v) = body.final_outcome {
+        q = q.bind(v);
+    }
+    if let Some(ref v) = body.submission_method {
+        q = q.bind(v);
+    }
+    if let Some(ref v) = body.payer_confirmation_number {
         q = q.bind(v);
     }
     q = q.bind(appeal_id);
@@ -1119,6 +1160,18 @@ pub fn router() -> Router<AppState> {
         .route("/{appeal_id}", get(get_appeal).patch(update_appeal))
         .route("/{appeal_id}/letter", get(get_appeal_letter))
         .route("/{appeal_id}/assign", post(assign_appeal))
+        .route(
+            "/{appeal_id}/packet",
+            get(attachments::get_packet).post(attachments::generate_packet),
+        )
+        .route(
+            "/{appeal_id}/packet/download",
+            get(attachments::download_packet),
+        )
+        .route(
+            "/{appeal_id}/packet/approve",
+            post(attachments::approve_packet),
+        )
 }
 
 #[cfg(test)]

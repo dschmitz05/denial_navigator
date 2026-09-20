@@ -214,7 +214,12 @@ CREATE TABLE appeals_queue (
     final_outcome TEXT,
     notes TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    -- FB-15: how and when the packet actually went to the payer, distinct
+    -- from submitted_at/payer_response, which track the appeal's outcome.
+    submission_method VARCHAR(20)
+        CHECK (submission_method IN ('portal', 'fax', 'mail', 'email')),
+    payer_confirmation_number VARCHAR(100)
 );
 
 CREATE INDEX idx_appeals_queue_denial_id ON appeals_queue(denial_id);
@@ -227,6 +232,7 @@ CREATE UNIQUE INDEX idx_appeals_queue_one_open_per_denial
     ON appeals_queue (denial_id)
  WHERE outcome_status IS NULL
     OR outcome_status NOT IN ('approved', 'overruled', 'resolved', 'denied_again', 'cancelled');
+
 CREATE INDEX idx_appeals_queue_resolution_type ON appeals_queue(resolution_type);
 CREATE INDEX idx_appeals_queue_created_at ON appeals_queue(created_at);
 
@@ -607,6 +613,37 @@ CREATE TABLE claim_followups (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX idx_claim_followups_claim ON claim_followups (claim_id, created_at DESC);
+
+-- FB-15: files attached to a denial (visit notes, authorizations, a
+-- remittance excerpt). The bytes live in object storage keyed by this row's
+-- id, same pattern as knowledge_documents' source files.
+CREATE TABLE denial_attachments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL REFERENCES organizations(id),
+    denial_id UUID NOT NULL REFERENCES denials(id) ON DELETE CASCADE,
+    filename VARCHAR(255) NOT NULL,
+    content_type VARCHAR(100) NOT NULL,
+    size_bytes BIGINT NOT NULL,
+    storage_key TEXT NOT NULL,
+    uploaded_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_denial_attachments_denial ON denial_attachments (denial_id, created_at DESC);
+
+-- One packet per appeal, replaced (not versioned) on regeneration; 'draft'
+-- until a user reviews and approves the content (not the same as submitting
+-- it to the payer).
+CREATE TABLE appeal_packets (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL REFERENCES organizations(id),
+    appeal_id UUID NOT NULL UNIQUE REFERENCES appeals_queue(id) ON DELETE CASCADE,
+    storage_key TEXT NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'approved')),
+    generated_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    approved_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    approved_at TIMESTAMPTZ
+);
 
 -- FB-16: structured log of payer calls/portal actions on a denial, so a
 -- reference number, representative name or promised follow-up date is

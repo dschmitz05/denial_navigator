@@ -5,7 +5,11 @@
 -- reached, what reference number they gave, what they promised and by
 -- when — was never recorded anywhere but a free-text note. An appeal or an
 -- escalation later depends on exactly that detail.
-CREATE TABLE payer_interactions (
+-- IF NOT EXISTS throughout: rag-engine's snapshot-tail startup path re-runs
+-- every migration file's raw SQL once, unconditionally, after loading
+-- init.sql on a fresh database (see crates/db/src/migrations.rs), and
+-- init.sql already carries this table. Every migration must tolerate that.
+CREATE TABLE IF NOT EXISTS payer_interactions (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     organization_id UUID NOT NULL REFERENCES organizations(id),
     denial_id UUID NOT NULL REFERENCES denials(id) ON DELETE CASCADE,
@@ -23,8 +27,8 @@ CREATE TABLE payer_interactions (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_payer_interactions_denial ON payer_interactions (denial_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_payer_interactions_denial ON payer_interactions (denial_id, occurred_at DESC);
 -- Backs the "due follow-ups" digest query: due, not yet completed, per org.
-CREATE INDEX idx_payer_interactions_follow_up_due
+CREATE INDEX IF NOT EXISTS idx_payer_interactions_follow_up_due
     ON payer_interactions (organization_id, follow_up_on)
     WHERE follow_up_on IS NOT NULL AND follow_up_completed_at IS NULL;

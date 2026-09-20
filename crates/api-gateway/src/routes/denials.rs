@@ -15,7 +15,7 @@ use sqlx::{QueryBuilder, Row};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-use crate::routes::{deadlines, interactions, write_offs};
+use crate::routes::{attachments, deadlines, interactions, write_offs};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -1027,6 +1027,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/{denial_id}/interactions/{interaction_id}/complete",
             axum::routing::post(interactions::complete_follow_up),
+        )
+        .route(
+            "/{denial_id}/attachments",
+            get(attachments::list_attachments).post(attachments::upload_attachment),
+        )
+        .route(
+            "/{denial_id}/attachments/{attachment_id}",
+            get(attachments::download_attachment).delete(attachments::delete_attachment),
         )
 }
 

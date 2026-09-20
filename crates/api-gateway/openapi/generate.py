@@ -407,6 +407,25 @@ add("/api/v1/denials/{denial_id}/interactions",
 add("/api/v1/denials/{denial_id}/interactions/{interaction_id}/complete",
     post=op("Mark a promised follow-up done", "denials",
             params=[path_param("denial_id"), path_param("interaction_id")]))
+add("/api/v1/denials/{denial_id}/attachments",
+    get=op("A denial's attached files", "denials", params=[path_param("denial_id")]),
+    post=op("Attach a file to a denial (visit notes, an authorization, a "
+            "remittance excerpt)", "denials",
+            description="Max 25 MB. Every download is audit-logged like any "
+                        "other read.",
+            params=[path_param("denial_id")],
+            body=multipart({"file": S(format="binary")}, ["file"]),
+            responses=CREATED))
+add("/api/v1/denials/{denial_id}/attachments/{attachment_id}",
+    get=op("Download an attachment", "denials",
+           description="Returns the file bytes with its original content "
+                       "type and filename.",
+           params=[path_param("denial_id"), path_param("attachment_id")],
+           responses={"200": {"description": "The file.", "content": {
+               "application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}},
+               "404": {"$ref": "#/components/responses/NotFound"}}),
+    delete=op("Remove an attachment", "denials",
+              params=[path_param("denial_id"), path_param("attachment_id")]))
 
 # ── analyses ──────────────────────────────────────────────────────────────
 add("/api/v1/analyses",
@@ -502,15 +521,23 @@ add("/api/v1/appeals/bulk",
 add("/api/v1/appeals/{appeal_id}",
     get=op("One worklist item", "appeals",
            params=[path_param("appeal_id")]),
-    patch=op("Update outcome / notes / assignment", "appeals",
+    patch=op("Update outcome / notes / assignment / submission record", "appeals",
              description="Closing a write_off item successfully at or above the "
                          "organization's approval threshold returns 202 with "
                          "status pending_approval and changes nothing until a "
-                         "manager approves it (see write-offs).",
+                         "manager approves it (see write-offs). "
+                         "submission_method and payer_confirmation_number "
+                         "record how and when the packet actually went to "
+                         "the payer; setting submission_method requires an "
+                         "approved packet for this appeal (400 otherwise), "
+                         "so a submission can never be recorded against "
+                         "content nobody reviewed.",
              params=[path_param("appeal_id")],
              body=jbody({"outcome_status": S(), "notes": S(),
                          "payer_response": S(format="date"),
-                         "final_outcome": S()})))
+                         "final_outcome": S(),
+                         "submission_method": S(enum=["portal", "fax", "mail", "email"]),
+                         "payer_confirmation_number": S()})))
 add("/api/v1/appeals/{appeal_id}/letter",
     get=op("The drafted appeal letter for this item", "appeals",
            params=[path_param("appeal_id")]))
@@ -518,6 +545,30 @@ add("/api/v1/appeals/{appeal_id}/assign",
     post=op("Assign the item to a user (manager+)", "appeals",
             params=[path_param("appeal_id")],
             body=jbody({"assigned_user_id": S(format="uuid", nullable=True)})))
+add("/api/v1/appeals/{appeal_id}/packet",
+    get=op("The appeal packet's status", "appeals",
+           params=[path_param("appeal_id")]),
+    post=op("(Re)generate the appeal packet", "appeals",
+            description="A PDF assembling the claim/remittance summary, the "
+                        "draft appeal letter (or the analysis explanation if "
+                        "no letter was drafted) and an index of the denial's "
+                        "attachments. Replaces any previous packet for this "
+                        "appeal and resets its status to draft, since "
+                        "regenerating changes content a prior approval "
+                        "reviewed.",
+            params=[path_param("appeal_id")]))
+add("/api/v1/appeals/{appeal_id}/packet/download",
+    get=op("Download the packet PDF", "appeals",
+           params=[path_param("appeal_id")],
+           responses={"200": {"description": "The PDF.", "content": {
+               "application/pdf": {"schema": {"type": "string", "format": "binary"}}}},
+               "404": {"$ref": "#/components/responses/NotFound"}}))
+add("/api/v1/appeals/{appeal_id}/packet/approve",
+    post=op("Mark the packet content reviewed", "appeals",
+            description="Not a submission record - see PATCH /appeals/{id} "
+                        "for submission_method and payer_confirmation_number, "
+                        "which track what actually happened with the payer.",
+            params=[path_param("appeal_id")]))
 
 # ── ingestion ────────────────────────────────────────────────────────────
 add("/api/v1/ingestion/upload",
