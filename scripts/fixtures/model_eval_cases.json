@@ -1,0 +1,5 @@
+[
+  {"id":"synthetic-pr-1","claim_number":"SYN-EVAL-001","payer_name":"ACME Health Plan","cagc":"PR","carc_code":"1","rarc_code":null,"cpt_code":"99213","icd_10_codes":["E11.9"],"carc_description":"Deductible amount","rarc_description":null},
+  {"id":"synthetic-auth-197","claim_number":"SYN-EVAL-002","payer_name":"ACME Health Plan","cagc":"CO","carc_code":"197","rarc_code":null,"cpt_code":"97110","icd_10_codes":["M25.551"],"carc_description":"Authorization absent","rarc_description":null},
+  {"id":"synthetic-bundle-97","claim_number":"SYN-EVAL-003","payer_name":"SYNTHETIC PAYER","cagc":"CO","carc_code":"97","rarc_code":null,"cpt_code":"97110","icd_10_codes":["M25.551"],"carc_description":"Payment included in another service","rarc_description":null}
+]

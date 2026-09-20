@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare reasoning models on YOUR denials, not on benchmarks.
+"""Compare reasoning models on checked-in synthetic denial cases.
 
 Swapping the model behind an RCM system is not a quality question in the
 abstract: what matters is whether it returns parseable JSON, whether its
@@ -7,7 +7,7 @@ category and its recommended action agree, and whether it gets patient
 responsibility right — because that last one is the difference between billing
 a patient and writing off money you were entitled to collect.
 
-Deliberately READ-ONLY. It reads denials, asks the rag-engine to build the same
+Deliberately READ-ONLY. It loads only checked-in synthetic cases, asks the rag-engine to build the same
 prompt the application would, and calls llama.cpp directly — bypassing
 /analyses/generate so nothing is stored. Running an evaluation must not litter
 the database with analyses nobody asked for.
@@ -35,7 +35,6 @@ from pathlib import Path
 # Imported inside run() rather than here: `compare` only reads two JSON files
 # and should work on the host, where the container's dependencies are absent.
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://denial_nav:denial_nav_pass@postgres:5432/denial_navigator")
 RAG_ENGINE_URL = os.environ.get("RAG_ENGINE_URL", "http://rag-engine:8000")
 LLAMA_BASE_URL = os.environ.get("LLAMA_BASE_URL", "http://10.10.10.98:8080")
 LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "2048"))
@@ -58,39 +57,14 @@ RECOVERABLE = {
 }
 
 
-async def fetch_cases(conn, limit, denial_ids=None):
+def fetch_cases(limit, denial_ids=None):
     """The denials to evaluate, with the context the prompt needs."""
+    path = Path(__file__).with_name("fixtures") / "model_eval_cases.json"
+    cases = json.loads(path.read_text())
     if denial_ids:
-        rows = await conn.fetch(
-            """
-            SELECT d.id, d.cagc, d.carc_code, d.rarc_code, d.cpt_code,
-                   c.claim_number, c.payer_name, c.icd_10_codes,
-                   cc.description AS carc_description, rc.description AS rarc_description
-              FROM denials d
-              JOIN claims c ON c.id = d.claim_id
-              LEFT JOIN carc_codes cc ON cc.code = d.carc_code
-              LEFT JOIN rarc_codes rc ON rc.code = d.rarc_code
-             WHERE d.id = ANY($1::uuid[])
-             ORDER BY d.id
-            """,
-            denial_ids,
-        )
-    else:
-        rows = await conn.fetch(
-            """
-            SELECT d.id, d.cagc, d.carc_code, d.rarc_code, d.cpt_code,
-                   c.claim_number, c.payer_name, c.icd_10_codes,
-                   cc.description AS carc_description, rc.description AS rarc_description
-              FROM denials d
-              JOIN claims c ON c.id = d.claim_id
-              LEFT JOIN carc_codes cc ON cc.code = d.carc_code
-              LEFT JOIN rarc_codes rc ON rc.code = d.rarc_code
-             ORDER BY d.created_at
-             LIMIT $1
-            """,
-            limit,
-        )
-    return [dict(r) for r in rows]
+        wanted = set(denial_ids)
+        cases = [case for case in cases if case["id"] in wanted]
+    return cases[:limit]
 
 
 async def build_prompt(client, case, policies):
@@ -168,14 +142,9 @@ def score(parsed, case):
 
 
 async def run(args):
-    import asyncpg
     import httpx
 
-    conn = await asyncpg.connect(DATABASE_URL)
-    try:
-        cases = await fetch_cases(conn, args.limit, args.denial_ids)
-    finally:
-        await conn.close()
+    cases = fetch_cases(args.limit, args.denial_ids)
 
     if not cases:
         print("No denials to evaluate. Ingest a file first.", file=sys.stderr)

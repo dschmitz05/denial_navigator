@@ -2,8 +2,9 @@
 # ============================================================
 # Denial Navigator — compare reasoning models on your own denials
 #
-# Runs inside the api container, which already has the dependencies and can
-# reach postgres, the rag-engine and the llama.cpp host.
+# Runs inside the api container, which can reach the rag-engine and llama.cpp
+# host. Cases are copied from checked-in synthetic fixtures; PostgreSQL is not
+# read during evaluation.
 #
 # One model at a time:
 #
@@ -17,8 +18,7 @@
 #
 #   ./scripts/eval_model.sh run --denial-ids $(./scripts/eval_model.sh ids eval/results/A.json)
 #
-# Nothing is written to the database - this reads denials and calls the model
-# directly, so evaluating does not create analyses nobody asked for.
+# Nothing is written to or read from the database.
 # ============================================================
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -36,6 +36,8 @@ fi
 CONTAINER="${API_CONTAINER:-denial-navigator-api}"
 
 docker cp "$ROOT/scripts/eval_model.py" "$CONTAINER:/tmp/eval_model.py" >/dev/null
+docker exec "$CONTAINER" mkdir -p /tmp/fixtures
+docker cp "$ROOT/scripts/fixtures/model_eval_cases.json" "$CONTAINER:/tmp/fixtures/model_eval_cases.json" >/dev/null
 docker exec "$CONTAINER" mkdir -p /tmp/eval-results
 
 docker exec "$CONTAINER" python /tmp/eval_model.py "$@" --out-dir /tmp/eval-results
