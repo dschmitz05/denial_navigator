@@ -25,21 +25,21 @@ function Layout({ children, showNav = true }: LayoutProps) {
   }
 
   const navItems: NavigationItem[] = [
-    { path: '/', label: 'Dashboard', icon: '📊' },
-    ...(can.ingestFiles() ? [{ path: '/upload', label: 'Upload', icon: '📁' }] : []),
-    { path: '/claims', label: 'Claims', icon: '📋' },
-    { path: '/denials', label: 'Denials', icon: '🚫' },
-    { path: '/appeals', label: 'Appeals', icon: '⚖️' },
-    { path: '/worklist', label: 'Worklist', icon: '🛠️' },
-    { path: '/unanswered', label: 'No Response', icon: '📭' },
-    { path: '/overpayments', label: 'Overpayments', icon: '💸' },
-    { path: '/knowledge', label: 'Knowledge Base', icon: '📚' },
-    { path: '/insights', label: 'AI Insights', icon: '📈' },
-    ...(can.managePlaybooks() ? [{ path: '/playbooks', label: 'Playbooks', icon: '📘' }] : []),
-    ...(can.viewAudit() ? [{ path: '/audit', label: 'Audit Log', icon: '🔍' }] : []),
-    ...(can.manageUsers() ? [{ path: '/users', label: 'Users', icon: '👥' }] : []),
-    { path: '/profile', label: 'My Profile', icon: '👤' },
-    { path: '/settings', label: 'Settings', icon: '⚙️' },
+    { path: '/', label: 'Dashboard', icon: 'OV' },
+    ...(can.ingestFiles() ? [{ path: '/upload', label: 'Upload', icon: 'UP' }] : []),
+    { path: '/claims', label: 'Claims', icon: 'CL' },
+    { path: '/denials', label: 'Denials', icon: 'DN' },
+    { path: '/appeals', label: 'Appeals', icon: 'AP' },
+    { path: '/worklist', label: 'Worklist', icon: 'WL' },
+    { path: '/unanswered', label: 'No Response', icon: 'NR' },
+    { path: '/overpayments', label: 'Overpayments', icon: 'OP' },
+    { path: '/knowledge', label: 'Knowledge Base', icon: 'KB' },
+    { path: '/insights', label: 'AI Insights', icon: 'AI' },
+    ...(can.managePlaybooks() ? [{ path: '/playbooks', label: 'Playbooks', icon: 'PB' }] : []),
+    ...(can.viewAudit() ? [{ path: '/audit', label: 'Audit Log', icon: 'AU' }] : []),
+    ...(can.manageUsers() ? [{ path: '/users', label: 'Users', icon: 'US' }] : []),
+    { path: '/profile', label: 'My Profile', icon: 'ME' },
+    { path: '/settings', label: 'Settings', icon: 'ST' },
   ]
 
   return (
@@ -47,29 +47,35 @@ function Layout({ children, showNav = true }: LayoutProps) {
       {showNav && (
         <aside className="sidebar">
           <div className="sidebar-header">
-            <h1>🧭 OpenClaim Navigator</h1>
-            <p>{user?.full_name || user?.username}</p>
-            <span style={{ fontSize: '0.7rem', color: 'var(--gray-400)', textTransform: 'uppercase', letterSpacing: 1 }}>
-              {user?.role?.replace(/_/g, ' ')}
-            </span>
+            <div className="sidebar-logo" aria-hidden="true">DN</div>
+            <div className="sidebar-product">
+              <h1>Denial Navigator</h1>
+              <p>Revenue cycle workspace</p>
+            </div>
           </div>
           <nav className="sidebar-nav">
+            <p className="sidebar-nav-label">Workspace</p>
             {navItems.map(item => (
               <Link
                 key={item.path}
                 to={item.path}
                 className={location.pathname === item.path || (item.path !== '/' && location.pathname.startsWith(item.path)) ? 'active' : ''}
               >
-                <span className="icon">{item.icon}</span>
+                <span className="icon" aria-hidden="true">{item.icon}</span>
                 <span>{item.label}</span>
               </Link>
             ))}
           </nav>
-          <NotificationBell />
-          <div style={{ padding: 16, borderTop: '1px solid var(--sidebar-border)' }}>
-            <button className="btn" onClick={handleLogout} style={{ width: '100%', textAlign: 'center' }}>
-              🚪 Sign Out
-            </button>
+          <div className="sidebar-footer">
+            <NotificationBell />
+            <div className="sidebar-user">
+              <div className="sidebar-avatar" aria-hidden="true">{(user?.full_name || user?.username || '?').slice(0, 1).toUpperCase()}</div>
+              <div>
+                <strong>{user?.full_name || user?.username}</strong>
+                <span>{user?.role?.replace(/_/g, ' ')}</span>
+              </div>
+            </div>
+            <button className="sidebar-signout" onClick={handleLogout}>Sign out <span aria-hidden="true">→</span></button>
           </div>
         </aside>
       )}
