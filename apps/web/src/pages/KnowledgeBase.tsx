@@ -212,7 +212,14 @@ export default function KnowledgeBase() {
 
   return (
     <div className="page-body">
-      <div className="filters-bar">
+      <section className="workspace-heading">
+        <div>
+          <p>Evidence library</p>
+          <h1>Keep payer guidance current.</h1>
+          <span>Search, review, and maintain the policy evidence behind every recommendation.</span>
+        </div>
+      </section>
+      <div className="filters-bar denials-filters">
         <select className="form-select" value={sourceFilter} onChange={e => setSourceFilter(e.target.value)}>
           <option value="">All Types</option>
           <option value="cms_lcd">CMS LCD</option>
