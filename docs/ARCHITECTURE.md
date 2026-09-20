@@ -42,7 +42,7 @@ services it replaced are gone; the stack runs from
               │                     │
               ▼                     ▼
    llama.cpp embeddings      llama.cpp chat
-   10.10.10.98:8081          10.10.10.98:8080
+   EMBED_BASE_URL            LLAMA_BASE_URL
    nomic-embed-text          Qwen3.x (switchable)
 ```
 

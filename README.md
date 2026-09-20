@@ -73,8 +73,8 @@ Two model servers run outside Compose and are configured by URL:
 
 | Backend | Default | Used for |
 |---------|---------|----------|
-| llama.cpp | `http://10.10.10.98:8080` | Reasoning (`LLM_MODEL`) |
-| llama.cpp (embeddings) | `http://10.10.10.98:8081` | Embeddings (`EMBEDDING_MODEL`) |
+| llama.cpp | `LLAMA_BASE_URL` | Reasoning (`LLM_MODEL`) |
+| llama.cpp (embeddings) | `EMBED_BASE_URL` | Embeddings (`EMBEDDING_MODEL`) |
 
 They are deliberately separate servers: the chat server answers `/v1/embeddings`
 with `501 does not support embeddings`, so a second llama.cpp instance running
