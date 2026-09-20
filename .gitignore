@@ -73,6 +73,8 @@ dropzone/
 # Large reference-data import samples and scratch remittances used during the
 # rewrite; test inputs, not source.
 /icd10_october2026_0.csv
+/lcd.csv
+/lcd_documents/
 /.835cg.pdf
 /.835cg.txt
 /.835fields.tmp
