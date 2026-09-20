@@ -305,7 +305,14 @@ export default function Denials() {
   return (
     <div className="page-body">
       <AiStatusBanner />
-      <div className="filters-bar">
+      <section className="workspace-heading">
+        <div>
+          <p>Denial recovery</p>
+          <h1>Find the next best action.</h1>
+          <span>Filter by urgency, payer, ownership, or reason code to focus the queue.</span>
+        </div>
+      </section>
+      <div className="filters-bar denials-filters">
         <select className="form-select" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
           <option value="">Active Only</option>
           <option value="open">Open</option>
