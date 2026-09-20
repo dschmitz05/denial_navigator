@@ -6,6 +6,7 @@ mod routes;
 mod state;
 
 use std::net::SocketAddr;
+use std::time::Instant;
 
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -28,6 +29,27 @@ async fn health() -> impl IntoResponse {
 
 async fn health_live() -> impl IntoResponse {
     Json(serde_json::json!({"status": "live"}))
+}
+
+async fn metrics(axum::extract::State(state): axum::extract::State<AppState>) -> Response {
+    Response::builder()
+        .header("content-type", "text/plain; version=0.0.4")
+        .body(state.metrics.prometheus().into())
+        .expect("static metrics response")
+}
+
+async fn metrics_middleware(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let started = Instant::now();
+    let response = next.run(req).await;
+    state.metrics.record(
+        response.status().as_u16(),
+        started.elapsed().as_micros() as u64,
+    );
+    response
 }
 
 async fn health_ready(
@@ -90,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health))
         .route("/health/live", get(health_live))
         .route("/health/ready", get(health_ready))
+        .route("/metrics", get(metrics))
         .merge(docs::routes())
         .nest("/api/v1", routes::api_router())
         // Uploads (EDI files, reference-code CSVs, policy PDFs) stream through
@@ -98,6 +121,10 @@ async fn main() -> anyhow::Result<()> {
         // than disabling the limit outright.
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            metrics_middleware,
+        ))
         .layer(axum::middleware::from_fn(security_headers))
         .layer(cors)
         .layer(axum::middleware::from_fn_with_state(

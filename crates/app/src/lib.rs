@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,6 +39,31 @@ pub struct AppState {
     pub digest_horizon_days: u64,
     pub default_retention_days: u64,
     pub min_retention_days: u64,
+    pub metrics: Arc<GatewayMetrics>,
+}
+
+/// Low-cardinality, Prometheus-compatible gateway telemetry. Paths are not
+/// labels, preventing claim IDs or query content from entering metrics.
+pub struct GatewayMetrics {
+    requests: AtomicU64,
+    errors: AtomicU64,
+    duration_micros: AtomicU64,
+}
+
+impl GatewayMetrics {
+    pub fn record(&self, status: u16, micros: u64) {
+        self.requests.fetch_add(1, Ordering::Relaxed);
+        if status >= 500 {
+            self.errors.fetch_add(1, Ordering::Relaxed);
+        }
+        self.duration_micros.fetch_add(micros, Ordering::Relaxed);
+    }
+    pub fn prometheus(&self) -> String {
+        let requests = self.requests.load(Ordering::Relaxed);
+        let errors = self.errors.load(Ordering::Relaxed);
+        let seconds = self.duration_micros.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+        format!("# HELP openclaim_http_requests_total HTTP requests handled\n# TYPE openclaim_http_requests_total counter\nopenclaim_http_requests_total {requests}\n# HELP openclaim_http_server_errors_total HTTP 5xx responses\n# TYPE openclaim_http_server_errors_total counter\nopenclaim_http_server_errors_total {errors}\n# HELP openclaim_http_request_duration_seconds_total Total HTTP request duration\n# TYPE openclaim_http_request_duration_seconds_total counter\nopenclaim_http_request_duration_seconds_total {seconds}\n")
+    }
 }
 
 impl AppState {
@@ -105,6 +131,11 @@ impl AppState {
             digest_horizon_days,
             default_retention_days,
             min_retention_days,
+            metrics: Arc::new(GatewayMetrics {
+                requests: AtomicU64::new(0),
+                errors: AtomicU64::new(0),
+                duration_micros: AtomicU64::new(0),
+            }),
         })
     }
 }

@@ -119,6 +119,9 @@ const PUBLIC_EXACT: &[&str] = &[
     "/health",
     "/health/live",
     "/health/ready",
+    // Prometheus scrape endpoint: intentionally aggregate-only, with no path,
+    // tenant, user, or patient labels.
+    "/metrics",
     "/docs",
     "/redoc",
     "/openapi.json",
