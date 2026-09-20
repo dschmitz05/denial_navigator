@@ -21,3 +21,12 @@ deployment, complete and retain evidence for each item below.
   and container-image update procedures.
 - [ ] Validate authorization with least-privilege accounts and review the
   threat model after any new integration or data flow.
+- [ ] Document BAA/data-processing approval for every provider that can
+  receive PHI; confirm all model and embedding access remains in the approved boundary.
+- [ ] Segment browser/proxy, gateway, database/object store, and model-service
+  networks with deny-by-default firewall or security-group rules.
+- [ ] Configure HIDS/EDR, security-log review, DLP/export controls, and an
+  incident-response owner with tested containment and breach-notification procedures.
+- [ ] Define and test RPO/RTO, immutable/offsite backups, legal-hold, and key
+  rotation/recovery procedures.
+- [ ] Require MFA for PHI access and enforce an idle/session-timeout policy.
