@@ -4389,6 +4389,136 @@
         }
       }
     },
+    "/api/v1/knowledge/lcd-import": {
+      "post": {
+        "summary": "Stage a CMS bulk LCD CSV export for import (manager+)",
+        "tags": [
+          "knowledge"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Parses the CSV, splits it into one document per LCD (CMS's export is a bulk file, not a single policy), and stages the filtered result server-side. Returns a job_id; call POST /knowledge/lcd-import/{job_id}/batch repeatedly to actually index them. Max 100 MB. Defaults to status=A (active) only.",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "A"
+            }
+          },
+          {
+            "name": "keyword",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated, OR'd, matched against the LCD title."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  }
+                },
+                "required": [
+                  "file"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/knowledge/lcd-import/{job_id}/batch": {
+      "post": {
+        "summary": "Index the next batch of a staged LCD import (manager+)",
+        "tags": [
+          "knowledge"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Call repeatedly until the response's `done` is true. Resumable: safe to retry after a failure, since it always continues from the job's saved progress.",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Resource id."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 3
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/api/v1/knowledge/reindex": {
       "post": {
         "summary": "Re-embed one batch of chunks with stale embedding provenance (manager+)",

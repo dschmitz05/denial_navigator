@@ -10,6 +10,7 @@ pub mod feedback;
 pub mod ingestion;
 pub mod interactions;
 pub mod knowledge;
+pub mod lcd_import;
 pub mod notifications;
 pub mod organizations;
 pub mod overpayments;
@@ -37,6 +38,7 @@ pub fn api_router() -> Router<AppState> {
         .nest("/appeals", appeals::router())
         .nest("/ingestion", ingestion::router())
         .nest("/knowledge", knowledge::router())
+        .nest("/knowledge/lcd-import", lcd_import::router())
         .nest("/feedback", feedback::router())
         .nest("/reference", reference::router())
         .nest("/audit", audit::router())

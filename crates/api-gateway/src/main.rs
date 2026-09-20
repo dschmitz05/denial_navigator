@@ -129,11 +129,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/metrics", get(metrics))
         .merge(docs::routes())
         .nest("/api/v1", routes::api_router())
-        // Uploads (EDI files, reference-code CSVs, policy PDFs) stream through
-        // handlers that each enforce their own byte cap; axum's 2 MB default
-        // would reject them long before that. Keep a generous ceiling rather
-        // than disabling the limit outright.
-        .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
+        // Uploads (EDI files, reference-code CSVs, policy PDFs, LCD bulk
+        // import) stream through handlers that each enforce their own byte
+        // cap; axum's 2 MB default would reject them long before that. Keep a
+        // generous ceiling rather than disabling the limit outright - above
+        // the highest real app-level cap (the LCD bulk-import CSV, 100 MB).
+        .layer(axum::extract::DefaultBodyLimit::max(105 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

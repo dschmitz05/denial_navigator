@@ -75,7 +75,9 @@ def slugify(title: str, max_len: int = 60) -> str:
 
 
 def build_document(row: dict[str, str]) -> str:
-    parts = [row.get("title", "").strip() or "(untitled LCD)"]
+    # Some titles carry markup too, e.g. "Vitamin B<sub>12</sub> Injections".
+    title_raw = row.get("title", "").strip()
+    parts = [strip_html(title_raw) if title_raw else "(untitled LCD)"]
     meta_bits = []
     if row.get("determination_number"):
         meta_bits.append(f"Determination number: {row['determination_number']}")

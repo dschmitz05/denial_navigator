@@ -80,6 +80,8 @@ export interface ApiOperations {
   "DELETE /api/v1/knowledge/documents/{document_id}": { path: { "document_id": string }; query?: { "purge"?: boolean } };
   "POST /api/v1/knowledge/documents/{document_id}/content": { path: { "document_id": string }; body: { "content": string } };
   "POST /api/v1/knowledge/documents/{document_id}/supersede": { path: { "document_id": string }; body: { "new_document_id": string } };
+  "POST /api/v1/knowledge/lcd-import": { query?: { "status"?: string; "keyword"?: string; "limit"?: number }; body: FormData };
+  "POST /api/v1/knowledge/lcd-import/{job_id}/batch": { path: { "job_id": string }; query?: { "limit"?: number } };
   "POST /api/v1/knowledge/reindex": { body: { "limit"?: number } };
   "POST /api/v1/knowledge/search": { body: { "query": string; "top_k"?: number; "filters"?: Record<string, unknown> } };
   "GET /api/v1/notifications": { query?: { "unread_only"?: boolean; "limit"?: number } };

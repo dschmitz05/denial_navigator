@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
+import LcdImportPanel from '../components/LcdImportPanel'
 
 const API_BASE = '/api/v1'
 const EXPIRING_SOON_DAYS = 30
@@ -42,6 +43,7 @@ export default function KnowledgeBase() {
   const [busyId, setBusyId] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
   const [showForm, setShowForm] = useState(false)
+  const [showLcdImport, setShowLcdImport] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<SearchResult[]>([])
   const [searching, setSearching] = useState(false)
@@ -249,9 +251,16 @@ export default function KnowledgeBase() {
               <input type="file" accept=".pdf,.txt,.md,application/pdf,text/plain,text/markdown"
                      style={{ display: 'none' }} onChange={handleUpload} disabled={indexing} />
             </label>
+            <button className="btn" onClick={() => setShowLcdImport(!showLcdImport)}>
+              {showLcdImport ? '✕ Cancel' : '⬆ Bulk import LCDs (CSV)'}
+            </button>
           </>
         )}
       </div>
+
+      {mayCurate && showLcdImport && (
+        <LcdImportPanel onDone={loadDocuments} />
+      )}
 
       {notice && (
         <div className="card" style={{ marginBottom: 12, borderLeft: `4px solid ${notice.error ? 'var(--danger)' : 'var(--success)'}` }}>

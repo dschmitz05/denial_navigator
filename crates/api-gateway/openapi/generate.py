@@ -102,6 +102,7 @@ ROUTE_PREFIXES = {
     "appeals": "/api/v1/appeals",
     "ingestion": "/api/v1/ingestion",
     "knowledge": "/api/v1/knowledge",
+    "lcd_import": "/api/v1/knowledge/lcd-import",
     "feedback": "/api/v1/feedback",
     "reference": "/api/v1/reference",
     "audit": "/api/v1/audit",
@@ -663,6 +664,26 @@ add("/api/v1/knowledge/reindex",
                         "mismatches, so it converges regardless of where a previous call "
                         "stopped.",
             body=jbody({"limit": I(default=25)})))
+add("/api/v1/knowledge/lcd-import",
+    post=op("Stage a CMS bulk LCD CSV export for import (manager+)", "knowledge",
+            description="Parses the CSV, splits it into one document per LCD "
+                        "(CMS's export is a bulk file, not a single policy), "
+                        "and stages the filtered result server-side. Returns "
+                        "a job_id; call POST /knowledge/lcd-import/{job_id}/batch "
+                        "repeatedly to actually index them. Max 100 MB. "
+                        "Defaults to status=A (active) only.",
+            params=[{"name": "status", "in": "query", "schema": S(default="A")},
+                    {"name": "keyword", "in": "query", "schema": S(),
+                     "description": "Comma-separated, OR'd, matched against the LCD title."},
+                    {"name": "limit", "in": "query", "schema": I()}],
+            body=multipart({"file": S(format="binary")}, ["file"])))
+add("/api/v1/knowledge/lcd-import/{job_id}/batch",
+    post=op("Index the next batch of a staged LCD import (manager+)", "knowledge",
+            description="Call repeatedly until the response's `done` is true. "
+                        "Resumable: safe to retry after a failure, since it "
+                        "always continues from the job's saved progress.",
+            params=[path_param("job_id"),
+                    {"name": "limit", "in": "query", "schema": I(default=3)}]))
 
 # ── feedback ─────────────────────────────────────────────────────────────
 add("/api/v1/feedback",
