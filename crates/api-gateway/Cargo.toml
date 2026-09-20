@@ -32,6 +32,7 @@ url = { workspace = true }
 ipnet = { workspace = true }
 base64 = { workspace = true }
 csv = { workspace = true }
+html-escape = { workspace = true }
 sha2 = { workspace = true }
 pdf-extract = "0.12"
 lopdf = "0.42"

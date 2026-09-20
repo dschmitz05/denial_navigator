@@ -71,26 +71,41 @@ struct JobState {
 /// CMS's fields are well-formed HTML fragments, not attacker-controlled
 /// markup that needs a real parser - a tag-stripping pass is sufficient.
 fn strip_html(value: &str) -> String {
+    // A tag boundary must become a space, not nothing: this field's real
+    // source is "<li>Covered</li><li>Not covered</li>", and dropping the
+    // tags without inserting a separator runs adjacent list items,
+    // paragraphs and inline markup (<sup>, <br>, ...) into one unbroken
+    // word - the actual cause of the reported "text is missing / not
+    // readable" reports, not any content actually being lost.
     let mut out = String::with_capacity(value.len());
     let mut in_tag = false;
     for c in value.chars() {
         match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
+            '<' => {
+                if !in_tag {
+                    out.push(' ');
+                }
+                in_tag = true;
+            }
+            '>' => {
+                in_tag = false;
+                out.push(' ');
+            }
             _ if !in_tag => out.push(c),
             _ => {}
         }
     }
-    let decoded = out
-        .replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'");
+    // decode_html_entities covers the full HTML5 named + numeric entity
+    // table - CMS's export alone uses over 80 distinct named entities
+    // (accented letters, Greek letters, typographic quotes, &ge;/&le;/
+    // &plusmn; in clinical criteria) plus numeric references, not the
+    // handful worth hardcoding by hand.
+    let decoded = html_escape::decode_html_entities(&out);
+    // Collapse the whitespace the tag-boundary spacing above introduced,
+    // one line at a time so a real paragraph break in the source is kept.
     decoded
         .lines()
-        .map(str::trim)
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
         .filter(|l| !l.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
@@ -440,7 +455,55 @@ mod tests {
         let headers = reader.headers().unwrap().clone();
         let record = reader.records().next().unwrap().unwrap();
         let doc = build_document(&headers, &record);
-        assert_eq!(doc.title, "Vitamin B12 Injections");
+        // A tag boundary always becomes a space (see strip_html), even an
+        // inline one like <sub> - a harmless extra space here is the
+        // trade-off for never running two list items or paragraphs
+        // together into one unreadable word.
+        assert_eq!(doc.title, "Vitamin B 12 Injections");
         assert!(!doc.content.contains('<'), "content: {}", doc.content);
+    }
+
+    #[test]
+    fn adjacent_list_items_stay_separated_instead_of_running_together() {
+        let mut reader = csv::ReaderBuilder::new().from_reader(
+            "lcd_id,title,indication,status\n\
+             33252,Test,<p>Covered:</p><ul><li>Condition A</li><li>Condition B</li></ul>,A\n"
+                .as_bytes(),
+        );
+        let headers = reader.headers().unwrap().clone();
+        let record = reader.records().next().unwrap().unwrap();
+        let doc = build_document(&headers, &record);
+        assert!(
+            doc.content.contains("Condition A") && doc.content.contains("Condition B"),
+            "content: {}",
+            doc.content
+        );
+        assert!(
+            !doc.content.contains("Condition ACondition B"),
+            "list items ran together: {}",
+            doc.content
+        );
+    }
+
+    #[test]
+    fn decodes_entities_beyond_the_five_basic_ones() {
+        let mut reader = csv::ReaderBuilder::new().from_reader(
+            "lcd_id,title,indication,status\n\
+             33252,Test,HbA1c &ge; 9&#37; and age &lt; 65 &mdash; the patient&rsquo;s history,A\n"
+                .as_bytes(),
+        );
+        let headers = reader.headers().unwrap().clone();
+        let record = reader.records().next().unwrap().unwrap();
+        let doc = build_document(&headers, &record);
+        assert!(
+            doc.content.contains("HbA1c ≥ 9% and age < 65"),
+            "content: {}",
+            doc.content
+        );
+        assert!(
+            doc.content.contains("patient’s history"),
+            "content: {}",
+            doc.content
+        );
     }
 }

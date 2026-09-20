@@ -699,6 +699,48 @@ pub async fn supersede_document(
     Ok(Json(row_to_json(&row)))
 }
 
+/// Chunks overlap by design (`CHUNK_OVERLAP`, better retrieval at a chunk
+/// boundary), so joining them naively for display shows that overlap as
+/// duplicated text - a sentence appears to repeat itself mid-paragraph,
+/// reading as garbled rather than merely imperfect. Finds the longest
+/// matching run between the end of what's accumulated and the start of the
+/// next chunk and skips past it, so continuous text stays continuous; a
+/// genuine section break (no real overlap) still gets the original "\n\n"
+/// separator.
+fn merge_overlapping_chunks(chunks: &[String]) -> String {
+    const MAX_OVERLAP_CHECK: usize = 400;
+    const MIN_OVERLAP: usize = 20;
+
+    let mut result = String::new();
+    for chunk in chunks {
+        if result.is_empty() {
+            result.push_str(chunk);
+            continue;
+        }
+        let tail: Vec<char> = {
+            let mut t: Vec<char> = result.chars().rev().take(MAX_OVERLAP_CHECK).collect();
+            t.reverse();
+            t
+        };
+        let head: Vec<char> = chunk.chars().take(MAX_OVERLAP_CHECK).collect();
+        let max_check = tail.len().min(head.len());
+
+        let overlap = (MIN_OVERLAP..=max_check)
+            .rev()
+            .find(|&len| tail[tail.len() - len..] == head[..len])
+            .unwrap_or(0);
+
+        if overlap > 0 {
+            let rest: String = chunk.chars().skip(overlap).collect();
+            result.push_str(&rest);
+        } else {
+            result.push_str("\n\n");
+            result.push_str(chunk);
+        }
+    }
+    result
+}
+
 pub async fn get_document(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -729,7 +771,7 @@ pub async fn get_document(
 
     let created_at: Option<DateTime<Utc>> = doc.try_get("created_at").ok().flatten();
     let chunk_count: i64 = doc.try_get("chunk_count").unwrap_or(0);
-    let joined = chunks
+    let chunk_texts: Vec<String> = chunks
         .iter()
         .map(|c| {
             c.try_get::<Option<String>, _>("content")
@@ -737,8 +779,8 @@ pub async fn get_document(
                 .flatten()
                 .unwrap_or_default()
         })
-        .collect::<Vec<_>>()
-        .join("\n\n");
+        .collect();
+    let joined = merge_overlapping_chunks(&chunk_texts);
     let content = if chunks.is_empty() {
         "(no content — indexing may still be in progress)".to_string()
     } else {
@@ -776,4 +818,38 @@ pub fn router() -> Router<AppState> {
         )
         .route("/search", post(search_knowledge))
         .route("/reindex", post(reindex))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_overlapping_chunks;
+
+    #[test]
+    fn skips_the_overlap_instead_of_duplicating_it() {
+        let chunks = vec![
+            "The quick brown fox jumps over the lazy dog near the riverbank".to_string(),
+            "over the lazy dog near the riverbank at sunset every evening".to_string(),
+        ];
+        let merged = merge_overlapping_chunks(&chunks);
+        assert_eq!(
+            merged,
+            "The quick brown fox jumps over the lazy dog near the riverbank at sunset every evening"
+        );
+    }
+
+    #[test]
+    fn keeps_the_separator_when_there_is_no_real_overlap() {
+        let chunks = vec![
+            "First section content.".to_string(),
+            "Second section content.".to_string(),
+        ];
+        let merged = merge_overlapping_chunks(&chunks);
+        assert_eq!(merged, "First section content.\n\nSecond section content.");
+    }
+
+    #[test]
+    fn a_single_chunk_is_returned_unchanged() {
+        let chunks = vec!["Only chunk.".to_string()];
+        assert_eq!(merge_overlapping_chunks(&chunks), "Only chunk.");
+    }
 }
