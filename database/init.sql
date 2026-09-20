@@ -608,6 +608,28 @@ CREATE TABLE claim_followups (
 );
 CREATE INDEX idx_claim_followups_claim ON claim_followups (claim_id, created_at DESC);
 
+-- FB-16: structured log of payer calls/portal actions on a denial, so a
+-- reference number, representative name or promised follow-up date is
+-- recorded rather than left in a free-text note.
+CREATE TABLE payer_interactions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    organization_id UUID NOT NULL REFERENCES organizations(id),
+    denial_id UUID NOT NULL REFERENCES denials(id) ON DELETE CASCADE,
+    channel VARCHAR(20) NOT NULL CHECK (channel IN ('phone', 'portal', 'fax', 'mail', 'email', 'other')),
+    occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    reference_number VARCHAR(100),
+    representative VARCHAR(255),
+    summary TEXT NOT NULL,
+    follow_up_on DATE,
+    follow_up_completed_at TIMESTAMPTZ,
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_payer_interactions_denial ON payer_interactions (denial_id, occurred_at DESC);
+CREATE INDEX idx_payer_interactions_follow_up_due
+    ON payer_interactions (organization_id, follow_up_on)
+    WHERE follow_up_on IS NOT NULL AND follow_up_completed_at IS NULL;
+
 -- ============================================================
 -- 13. Payer appeal filing windows
 -- ============================================================

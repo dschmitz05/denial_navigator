@@ -7,6 +7,7 @@ pub mod deadlines;
 pub mod denials;
 pub mod feedback;
 pub mod ingestion;
+pub mod interactions;
 pub mod knowledge;
 pub mod notifications;
 pub mod overpayments;

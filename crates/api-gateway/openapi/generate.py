@@ -390,6 +390,23 @@ add("/api/v1/denials/{denial_id}",
              params=[path_param("denial_id")],
              body=jbody({"status": S(),
                          "appeal_deadline": S(format="date")})))
+add("/api/v1/denials/{denial_id}/interactions",
+    get=op("A denial's payer-interaction history, most recent first", "denials",
+           params=[path_param("denial_id")]),
+    post=op("Record a payer call or portal action", "denials",
+            description="channel is phone, portal, fax, mail, email or other. "
+                        "follow_up_on, if the payer promised a date to check "
+                        "back by, surfaces this in the deadline digest until "
+                        "it is marked complete.",
+            params=[path_param("denial_id")],
+            body=jbody({"channel": S(), "summary": S(),
+                        "occurred_at": S(format="date-time"),
+                        "reference_number": S(), "representative": S(),
+                        "follow_up_on": S(format="date")},
+                       ["channel", "summary"])))
+add("/api/v1/denials/{denial_id}/interactions/{interaction_id}/complete",
+    post=op("Mark a promised follow-up done", "denials",
+            params=[path_param("denial_id"), path_param("interaction_id")]))
 
 # ── analyses ──────────────────────────────────────────────────────────────
 add("/api/v1/analyses",

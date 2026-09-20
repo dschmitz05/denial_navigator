@@ -50,6 +50,9 @@ export interface ApiOperations {
   "GET /api/v1/denials/resolution-timing": Record<string, never>;
   "GET /api/v1/denials/{denial_id}": { path: { "denial_id": string } };
   "PATCH /api/v1/denials/{denial_id}": { path: { "denial_id": string }; body: { "status"?: string; "appeal_deadline"?: string } };
+  "GET /api/v1/denials/{denial_id}/interactions": { path: { "denial_id": string } };
+  "POST /api/v1/denials/{denial_id}/interactions": { path: { "denial_id": string }; body: { "channel": string; "summary": string; "occurred_at"?: string; "reference_number"?: string; "representative"?: string; "follow_up_on"?: string } };
+  "POST /api/v1/denials/{denial_id}/interactions/{interaction_id}/complete": { path: { "denial_id": string; "interaction_id": string } };
   "GET /api/v1/feedback": { query?: { "ai_analysis_id"?: string; "accepted"?: boolean; "limit"?: number } };
   "POST /api/v1/feedback": { body: { "ai_analysis_id": string; "user_id"?: string; "rating"?: number; "accepted"?: boolean; "user_edits"?: Record<string, unknown>; "action_taken"?: string; "was_paid_on_resubmit"?: boolean; "resubmit_result"?: string; "feedback_text"?: string } };
   "GET /api/v1/feedback/analytics": Record<string, never>;

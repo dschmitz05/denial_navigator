@@ -463,6 +463,17 @@ unset, a known placeholder, or (for Fernet) not an exact 32-byte key.
   contacts (`claim_followups`). Its first 835 takes it off the list. Claims
   from before migration 043 have no submission time and are not listed.
   `scripts/test_unanswered_claims.sh` covers it.
+- **A denial's payer calls and portal actions are a structured log, not a
+  free-text note** (`routes/interactions.rs`, `payer_interactions`; FB-16).
+  `payer_contact` was always a resolution type and a follow-up action, but the
+  reference number, representative and any promised follow-up date an appeal
+  or an escalation later depends on had nowhere to go. Recorded per denial
+  with a channel (phone, portal, fax, mail, email, other); a `follow_up_on`
+  date, if the payer promised one, puts the denial on the digest
+  (`payer_followup_digest`, owned by whoever logged the call, not the
+  appeal's assignee) until it is marked complete. Shown on the denial detail
+  page. `scripts/test_payer_interactions.sh` covers logging, the digest and
+  completion.
 - **Bulk queueing resolves the whole batch in one query** instead of three per
   denial, and reports partial success rather than failing the batch.
 - **The connection pool** is created once at startup with a liveness check;

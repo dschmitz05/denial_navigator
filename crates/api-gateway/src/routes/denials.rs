@@ -15,7 +15,7 @@ use sqlx::{QueryBuilder, Row};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-use crate::routes::{deadlines, write_offs};
+use crate::routes::{deadlines, interactions, write_offs};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -1020,6 +1020,14 @@ pub fn router() -> Router<AppState> {
             axum::routing::delete(deadlines::delete_rule),
         )
         .route("/{denial_id}", get(get_denial).patch(update_denial))
+        .route(
+            "/{denial_id}/interactions",
+            get(interactions::list_interactions).post(interactions::record_interaction),
+        )
+        .route(
+            "/{denial_id}/interactions/{interaction_id}/complete",
+            axum::routing::post(interactions::complete_follow_up),
+        )
 }
 
 #[cfg(test)]

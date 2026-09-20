@@ -271,6 +271,77 @@ pub async fn generate_digests(
         created += result.rows_affected() as i64;
     }
 
+    // ── payer-interaction follow-ups due (FB-16) ──
+    // Owned by whoever logged the call, not the appeal's assignee: the
+    // person who told a payer "I'll check back" is who needs reminding, and
+    // an unassigned denial can still have a promised follow-up date.
+    let follow_ups = sqlx::query(&format!(
+        "SELECT pi.organization_id, pi.user_id, \
+                COUNT(*) FILTER (WHERE pi.follow_up_on < CURRENT_DATE)  AS overdue, \
+                COUNT(*) FILTER (WHERE pi.follow_up_on >= CURRENT_DATE) AS upcoming, \
+                MIN(pi.follow_up_on) AS soonest, \
+                json_agg(json_build_object( \
+                    'denial_id', pi.denial_id, \
+                    'follow_up_on', pi.follow_up_on, \
+                    'summary', pi.summary \
+                ) ORDER BY pi.follow_up_on) AS items \
+           FROM payer_interactions pi \
+          WHERE pi.follow_up_on IS NOT NULL AND pi.follow_up_completed_at IS NULL \
+            AND pi.user_id IS NOT NULL \
+            AND pi.follow_up_on <= CURRENT_DATE + INTERVAL '{horizon} days' \
+          GROUP BY pi.organization_id, pi.user_id"
+    ))
+    .fetch_all(&state.pool)
+    .await
+    .map_err(AppError::Db)?;
+
+    for row in &follow_ups {
+        let org_id: Uuid = row
+            .try_get("organization_id")
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let owner_id: Uuid = row
+            .try_get("user_id")
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let overdue: i64 = row.try_get("overdue").unwrap_or(0);
+        let upcoming: i64 = row.try_get("upcoming").unwrap_or(0);
+        let soonest: Option<NaiveDate> = row.try_get("soonest").ok().flatten();
+        let items: serde_json::Value = row
+            .try_get::<Option<serde_json::Value>, _>("items")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| serde_json::json!([]));
+
+        let title = if overdue > 0 {
+            format!("{overdue} overdue payer follow-up(s) and {upcoming} due within {horizon} days")
+        } else {
+            format!("{upcoming} payer follow-up(s) due within {horizon} days")
+        };
+        let body = format!(
+            "Soonest promised {}.",
+            soonest.map(|d| d.to_string()).unwrap_or_default(),
+        );
+        let payload = serde_json::json!({
+            "overdue": overdue,
+            "upcoming": upcoming,
+            "items": items,
+        });
+
+        let result = sqlx::query(
+            "INSERT INTO notifications (organization_id, user_id, kind, title, body, payload) \
+             VALUES ($1, $2, 'payer_followup_digest', $3, $4, $5::jsonb) \
+             ON CONFLICT (organization_id, user_id, kind, for_date) DO NOTHING",
+        )
+        .bind(org_id)
+        .bind(owner_id)
+        .bind(&title)
+        .bind(&body)
+        .bind(payload.to_string())
+        .execute(&state.pool)
+        .await
+        .map_err(AppError::Db)?;
+        created += result.rows_affected() as i64;
+    }
+
     // ── unowned overdue work goes to that org's managers ──
     // Scoping the aggregate and the fan-out per organization keeps a manager's
     // escalation from mixing another tenant's overdue counts and amounts.

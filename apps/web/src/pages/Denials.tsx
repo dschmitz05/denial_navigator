@@ -9,6 +9,13 @@ type CarcOption = { carc_code: string; description?: string; denial_count?: numb
 type Notice = { error: boolean; text: string }
 type SavedView = { name: string; status?: string; carc?: string; payer?: string; minAmount?: string; maxAmount?: string; minAgeDays?: string; maxAgeDays?: string; owner?: string; facility?: string; search?: string; sort?: string; descending?: boolean }
 type Citation = { evidence_id: string; document_id: string; document_title: string; source_type: string; chunk_index: number }
+type PayerInteraction = {
+  id: string; channel: string; occurred_at: string; reference_number?: string | null
+  representative?: string | null; summary: string; follow_up_on?: string | null
+  follow_up_completed_at?: string | null; user_name?: string | null
+}
+
+const INTERACTION_CHANNELS = ['phone', 'portal', 'fax', 'mail', 'email', 'other']
 
 function formatCurrency(value?: number) {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value || 0)
@@ -45,6 +52,9 @@ export default function Denials() {
   const [notice, setNotice] = useState<Notice | null>(null)
   const [queueing, setQueueing] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [interactions, setInteractions] = useState<PayerInteraction[]>([])
+  const [interactionForm, setInteractionForm] = useState({ channel: 'phone', reference_number: '', representative: '', summary: '', follow_up_on: '' })
+  const [loggingInteraction, setLoggingInteraction] = useState(false)
   const savedViews: SavedView[] = JSON.parse(localStorage.getItem('openclaim.denialViews') || '[]')
 
   const saveCurrentView = () => {
@@ -239,6 +249,50 @@ export default function Denials() {
     const data = await resp.json()
     setSelectedDenial(data)
     setShowDetail(true)
+    loadInteractions(denial.id)
+  }
+
+  const loadInteractions = (denialId: string) => {
+    fetch(`${API_BASE}/denials/${denialId}/interactions`)
+      .then(r => r.json())
+      .then((data: unknown) => setInteractions(Array.isArray(data) ? data as PayerInteraction[] : []))
+      .catch(() => setInteractions([]))
+  }
+
+  const handleLogInteraction = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault()
+    if (!selectedDenial || !interactionForm.summary.trim()) return
+    setLoggingInteraction(true)
+    setNotice(null)
+    try {
+      const resp = await fetch(`${API_BASE}/denials/${selectedDenial.id}/interactions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channel: interactionForm.channel,
+          summary: interactionForm.summary.trim(),
+          reference_number: interactionForm.reference_number.trim() || undefined,
+          representative: interactionForm.representative.trim() || undefined,
+          follow_up_on: interactionForm.follow_up_on || undefined,
+        }),
+      })
+      const data = await resp.json()
+      if (!resp.ok) {
+        setNotice({ error: true, text: data?.detail || `Could not log interaction (HTTP ${resp.status})` })
+      } else {
+        setInteractionForm({ channel: 'phone', reference_number: '', representative: '', summary: '', follow_up_on: '' })
+        loadInteractions(selectedDenial.id)
+      }
+    } catch (err) {
+      setNotice({ error: true, text: err instanceof Error ? err.message : 'Could not log interaction' })
+    }
+    setLoggingInteraction(false)
+  }
+
+  const handleCompleteFollowUp = async (interaction: PayerInteraction) => {
+    if (!selectedDenial) return
+    await fetch(`${API_BASE}/denials/${selectedDenial.id}/interactions/${interaction.id}/complete`, { method: 'POST' })
+    loadInteractions(selectedDenial.id)
   }
 
   const carcChoices = carcFilter && !carcOptions.some(o => o.carc_code === carcFilter)
@@ -598,13 +652,76 @@ export default function Denials() {
 
               {/* Appeal Letter */}
               {selectedDenial.draft_appeal_letter && (
-                <div>
+                <div style={{ marginBottom: 20 }}>
                   <h4 style={{ marginBottom: 8 }}>📝 Draft Appeal Letter</h4>
                   <div className="appeal-letter">
                     {selectedDenial.draft_appeal_letter}
                   </div>
                 </div>
               )}
+
+              {/* Payer interaction log (FB-16) */}
+              <div>
+                <h4 style={{ marginBottom: 8 }}>☎️ Payer Interactions</h4>
+                {interactions.length === 0 ? (
+                  <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>No calls or portal actions logged yet.</p>
+                ) : (
+                  <div style={{ marginBottom: 12 }}>
+                    {interactions.map(i => (
+                      <div key={i.id} style={{ padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
+                          <span>
+                            <span className="badge" style={{ textTransform: 'capitalize' }}>{i.channel}</span>
+                            {' '}{new Date(i.occurred_at).toLocaleString()}
+                            {i.user_name ? ` · ${i.user_name}` : ''}
+                            {i.representative ? ` · rep: ${i.representative}` : ''}
+                            {i.reference_number ? ` · ref: ${i.reference_number}` : ''}
+                          </span>
+                        </div>
+                        <div style={{ marginTop: 4 }}>{i.summary}</div>
+                        {i.follow_up_on && (
+                          <div style={{ marginTop: 4, fontSize: '0.85rem' }}>
+                            {i.follow_up_completed_at ? (
+                              <span style={{ color: 'var(--success-text)' }}>
+                                ✓ Follow-up done ({new Date(i.follow_up_completed_at).toLocaleDateString()})
+                              </span>
+                            ) : (
+                              <span style={{ color: 'var(--warning-text)' }}>
+                                Follow up by {new Date(i.follow_up_on).toLocaleDateString()}
+                                <button className="btn btn-sm" style={{ marginLeft: 8 }}
+                                        onClick={() => handleCompleteFollowUp(i)}>
+                                  Mark done
+                                </button>
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <form onSubmit={handleLogInteraction} style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+                  <select className="form-select" value={interactionForm.channel}
+                          onChange={e => setInteractionForm({ ...interactionForm, channel: e.target.value })}>
+                    {INTERACTION_CHANNELS.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                  <input className="form-input" style={{ maxWidth: 160 }} placeholder="Representative"
+                         value={interactionForm.representative}
+                         onChange={e => setInteractionForm({ ...interactionForm, representative: e.target.value })} />
+                  <input className="form-input" style={{ maxWidth: 140 }} placeholder="Reference #"
+                         value={interactionForm.reference_number}
+                         onChange={e => setInteractionForm({ ...interactionForm, reference_number: e.target.value })} />
+                  <input className="form-input" style={{ maxWidth: 160 }} type="date" title="Follow up by"
+                         value={interactionForm.follow_up_on}
+                         onChange={e => setInteractionForm({ ...interactionForm, follow_up_on: e.target.value })} />
+                  <input className="form-input" style={{ minWidth: 220, flex: 1 }} placeholder="What happened / what was said"
+                         value={interactionForm.summary}
+                         onChange={e => setInteractionForm({ ...interactionForm, summary: e.target.value })} />
+                  <button type="submit" className="btn btn-primary btn-sm" disabled={loggingInteraction || !interactionForm.summary.trim()}>
+                    {loggingInteraction ? 'Logging…' : 'Log'}
+                  </button>
+                </form>
+              </div>
             </div>
             <div className="modal-footer">
               <button className="btn" onClick={() => setShowDetail(false)}>Close</button>
