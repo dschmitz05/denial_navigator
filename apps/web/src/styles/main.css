@@ -965,6 +965,23 @@ tr:hover td { background: #f4f9fd; }
 .form-input, .form-select, .form-textarea { min-height: 38px; border-color: #d4e0ec; border-radius: 8px; color: #1f3e5d; }
 .form-input:focus, .form-select:focus, .form-textarea:focus { border-color: #2781d9; box-shadow: 0 0 0 3px rgba(39, 129, 217, .13); }
 .filters-bar { gap: 10px; padding: 12px; border: 1px solid #e0e9f2; border-radius: 10px; background: rgba(255,255,255,.72); }
+.dashboard-hero {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  margin: 0 0 27px;
+  padding: 27px 29px;
+  overflow: hidden;
+  border: 1px solid #dce9f5;
+  border-radius: 14px;
+  background: radial-gradient(circle at 92% 5%, rgba(106, 206, 232, .25), transparent 20rem), linear-gradient(105deg, #eef7ff, #f9fcff);
+}
+.dashboard-eyebrow { color: #1771b8; font-size: .66rem; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+.dashboard-hero h1 { margin: 7px 0 8px; color: #12365c; font-size: clamp(1.7rem, 3vw, 2.25rem); line-height: 1.1; letter-spacing: -.04em; }
+.dashboard-hero p:last-child { max-width: 650px; color: #607995; font-size: .9rem; line-height: 1.55; }
+.dashboard-export { flex: 0 0 auto; background: rgba(255,255,255,.85); }
+.dashboard-export span { color: #1771b8; font-size: 1.1rem; font-weight: 800; }
 
 :root[data-theme="dark"] .app-container, :root[data-theme="dark"] .main-content { background: #202a37; }
 :root[data-theme="dark"] .page-header { border-color: #39495d; background: rgba(35, 46, 60, .88); }
@@ -974,6 +991,9 @@ tr:hover td { background: #f4f9fd; }
 :root[data-theme="dark"] td, :root[data-theme="dark"] .form-group label { color: #cbd9e8; }
 :root[data-theme="dark"] tr:hover td { background: #29394a; }
 :root[data-theme="dark"] .filters-bar { border-color: #3a4a5e; background: #263444; }
+:root[data-theme="dark"] .dashboard-hero { border-color: #3a5268; background: radial-gradient(circle at 92% 5%, rgba(46, 154, 181, .2), transparent 20rem), #263444; }
+:root[data-theme="dark"] .dashboard-hero h1 { color: #edf5ff; }
+:root[data-theme="dark"] .dashboard-hero p:last-child { color: #b4c8dd; }
 :root[data-theme="dark"] .form-input, :root[data-theme="dark"] .form-select, :root[data-theme="dark"] .form-textarea { border-color: #485c72; background: #263444; color: #edf5ff; }
 
 @media (max-width: 768px) {
@@ -986,4 +1006,5 @@ tr:hover td { background: #f4f9fd; }
   .main-content { margin-left: 66px; }
   .page-header { min-height: 66px; padding: 15px 18px; }
   .page-body { padding: 20px 18px 34px; }
+  .dashboard-hero { align-items: flex-start; flex-direction: column; padding: 22px; }
 }

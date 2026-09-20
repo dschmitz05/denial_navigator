@@ -115,9 +115,14 @@ export default function Dashboard() {
 
   return (
     <div className="page-body">
-      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
-        <button className="btn" onClick={exportClaims}>⇩ Export claims CSV</button>
-      </div>
+      <section className="dashboard-hero">
+        <div>
+          <p className="dashboard-eyebrow">Revenue cycle overview</p>
+          <h1>Keep recovery work moving.</h1>
+          <p>See today’s exposure, the work nearest its deadline, and where your team can make the biggest impact.</p>
+        </div>
+        <button className="btn dashboard-export" onClick={exportClaims}><span aria-hidden="true">↓</span> Export claims CSV</button>
+      </section>
       <div className="stats-grid">
         <StatCard
           label="Total Claims"
