@@ -51,6 +51,13 @@ export default function UnansweredClaims() {
 
   return (
     <div className="page-body">
+      <section className="workspace-heading">
+        <div>
+          <p>Follow-up queue</p>
+          <h1>Don’t let a response go missing.</h1>
+          <span>Surface claims that need payer follow-up and keep the next outreach visible.</span>
+        </div>
+      </section>
       <div className="card">
         <div className="card-header"><h3>📭 No response from payer</h3></div>
         <div className="card-body">

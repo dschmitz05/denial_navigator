@@ -50,6 +50,13 @@ export default function Insights() {
 
   return (
     <div className="page-body">
+      <section className="workspace-heading">
+        <div>
+          <p>Learning loop</p>
+          <h1>Measure what improves recovery.</h1>
+          <span>Use verified outcomes to understand which recommendations and actions are delivering value.</span>
+        </div>
+      </section>
       {/* Say plainly when there is not enough data to conclude anything. A
           confident-looking percentage over four outcomes is misleading. */}
       {thin && (

@@ -56,6 +56,13 @@ export default function Overpayments() {
   const overdue = items.filter(i => i.overdue)
   return (
     <div className="page-body">
+      <section className="workspace-heading">
+        <div>
+          <p>Payment integrity</p>
+          <h1>Resolve overpayments with clarity.</h1>
+          <span>Review potential duplicates and payment variances before they become avoidable exposure.</span>
+        </div>
+      </section>
       <div className="card">
         <div className="card-header"><h3>💸 Overpayments</h3></div>
         <div className="card-body">
