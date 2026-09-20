@@ -314,7 +314,10 @@ CREATE TABLE carc_codes (
     effective_date DATE NOT NULL DEFAULT CURRENT_DATE,
     expiration_date DATE,
     is_active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    -- The reference-import feature added this after the table predated it;
+    -- how a reviewer sees which codes a refresh touched.
+    updated_at TIMESTAMPTZ
 );
 
 CREATE INDEX idx_carc_codes_is_active ON carc_codes(is_active);
@@ -329,10 +332,86 @@ CREATE TABLE rarc_codes (
     effective_date DATE NOT NULL DEFAULT CURRENT_DATE,
     expiration_date DATE,
     is_active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ
 );
 
 CREATE INDEX idx_rarc_codes_is_active ON rarc_codes(is_active);
+
+-- ============================================================
+-- 7a. ICD-10, CPT, HCPCS Level II, and Modifier reference tables
+--
+-- Diagnosis codes arrive on claims as a bare list (claims.icd_10_codes),
+-- procedure codes on denials as bare text (denials.cpt_code), and modifier
+-- codes as denials.modifier_1/modifier_2 - nothing in the app could tell you
+-- what E11.9, 99213, or LT means. These four tables give those codes a home
+-- so the same CSV import used for CARC/RARC keeps them current. They start
+-- empty and are populated by the first import; the published lists are
+-- large (ICD-10-CM is ~70,000 codes), so they are not seeded here.
+-- ============================================================
+CREATE TABLE icd10_codes (
+    code           VARCHAR(20) PRIMARY KEY,
+    description    TEXT NOT NULL,
+    is_active      BOOLEAN NOT NULL DEFAULT TRUE,
+    effective_date DATE,
+    expiration_date DATE,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ
+);
+
+CREATE TABLE cpt_codes (
+    code           VARCHAR(20) PRIMARY KEY,
+    description    TEXT NOT NULL,
+    is_active      BOOLEAN NOT NULL DEFAULT TRUE,
+    effective_date DATE,
+    expiration_date DATE,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ
+);
+
+CREATE TABLE modifier_codes (
+    code           VARCHAR(20) PRIMARY KEY,
+    description    TEXT NOT NULL,
+    is_active      BOOLEAN NOT NULL DEFAULT TRUE,
+    effective_date DATE,
+    expiration_date DATE,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ
+);
+
+CREATE TABLE hcpcs_codes (
+    code           VARCHAR(20) PRIMARY KEY,
+    description    TEXT NOT NULL,
+    is_active      BOOLEAN NOT NULL DEFAULT TRUE,
+    effective_date DATE,
+    expiration_date DATE,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ
+);
+
+-- ============================================================
+-- 7b. Reference-list import log
+--
+-- CARC/RARC/ICD-10/CPT/HCPCS/modifier lists are all imported through the
+-- same CSV upload path (Settings -> Reference codes). This records who
+-- imported which file, what it changed, and when.
+-- ============================================================
+CREATE TABLE reference_imports (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    kind VARCHAR(10) NOT NULL
+        CHECK (kind IN ('carc', 'rarc', 'icd10', 'cpt', 'modifier', 'hcpcs')),
+    filename TEXT,
+    rows_parsed INTEGER NOT NULL DEFAULT 0,
+    rows_added INTEGER NOT NULL DEFAULT 0,
+    rows_updated INTEGER NOT NULL DEFAULT 0,
+    rows_deactivated INTEGER NOT NULL DEFAULT 0,
+    codes_not_in_file INTEGER NOT NULL DEFAULT 0,
+    row_errors JSONB NOT NULL DEFAULT '[]',
+    imported_by VARCHAR(100),
+    imported_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_reference_imports_kind_time ON reference_imports (kind, imported_at DESC);
 
 -- ============================================================
 -- 8. Knowledge Documents (RAG Source Material)
