@@ -471,10 +471,22 @@ add("/api/v1/analyses/generate-jobs/{job_id}",
 # ── appeals / worklist ───────────────────────────────────────────────────
 add("/api/v1/appeals",
     get=op("The worklist: appeals and non-appeal work", "appeals",
-           params=[{"name": "status", "in": "query", "schema": S()},
+           description="`sort=expected_recovery` orders by open amount x "
+                       "historical overturn rate for (payer, CARC) x a "
+                       "deadline-urgency factor (1.0-2.0); each row carries "
+                       "overturn_rate, overturn_rate_basis (payer_carc, carc "
+                       "or prior) and urgency_factor so the UI can show how "
+                       "the number was built. Never removes an item, only "
+                       "reorders. Default sort is created_at.",
+           params=[{"name": "outcome_status", "in": "query", "schema": S()},
                    {"name": "resolution_type", "in": "query", "schema": S()},
-                   {"name": "assigned", "in": "query", "schema": S(),
-                    "description": "'me', 'unassigned', or a user id."},
+                   {"name": "category", "in": "query",
+                    "schema": S(enum=["appeal", "worklist"])},
+                   {"name": "assigned_user_id", "in": "query",
+                    "schema": S(format="uuid")},
+                   {"name": "sort", "in": "query",
+                    "schema": S(enum=["created_at", "expected_recovery"])},
+                   {"name": "descending", "in": "query", "schema": B()},
                    P_LIMIT, P_OFFSET]),
     post=op("Queue a denial for a resolution", "appeals",
             body=jbody({"denial_id": S(format="uuid"),

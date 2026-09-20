@@ -18,11 +18,12 @@ use denial_domain::{
     ALL_RESOLUTION_TYPES, APPEAL_RESOLUTION_TYPES, TERMINAL_DENIAL_STATUSES, TERMINAL_WORK_OUTCOMES,
 };
 use serde::Deserialize;
-use sqlx::{Column, Row};
+use sqlx::Row;
 use uuid::Uuid;
 
 use crate::routes::write_offs;
 use crate::state::AppState;
+use denial_db::pgjson::row_to_json;
 
 const SPECIALIST: &str = "billing_specialist";
 const SUCCESS_OUTCOMES: &[&str] = &["approved", "overruled", "resolved"];
@@ -54,6 +55,10 @@ pub struct ListAppealsQuery {
     pub resolution_type: Option<String>,
     pub category: Option<String>,
     pub assigned_user_id: Option<String>,
+    /// "created_at" (default) or "expected_recovery" (FB-17).
+    pub sort: Option<String>,
+    #[serde(default)]
+    pub descending: bool,
     #[serde(default = "default_limit")]
     pub limit: i64,
     #[serde(default)]
@@ -135,58 +140,6 @@ async fn resolve_assignee(
     } else {
         Err(AppError::NotFound)
     }
-}
-
-fn row_to_json(row: &sqlx::postgres::PgRow) -> serde_json::Value {
-    let mut map = serde_json::Map::new();
-    for col in row.columns().iter() {
-        let name = col.name();
-        let val = row
-            .try_get::<Option<String>, _>(name)
-            .map(|v| {
-                v.map(serde_json::Value::String)
-                    .unwrap_or(serde_json::Value::Null)
-            })
-            .or_else(|_| {
-                row.try_get::<Option<i64>, _>(name).map(|v| {
-                    v.map(serde_json::Value::from)
-                        .unwrap_or(serde_json::Value::Null)
-                })
-            })
-            .or_else(|_| {
-                row.try_get::<Option<f64>, _>(name).map(|v| {
-                    v.map(serde_json::Value::from)
-                        .unwrap_or(serde_json::Value::Null)
-                })
-            })
-            .or_else(|_| {
-                row.try_get::<Option<bool>, _>(name).map(|v| {
-                    v.map(serde_json::Value::Bool)
-                        .unwrap_or(serde_json::Value::Null)
-                })
-            })
-            .or_else(|_| {
-                row.try_get::<Option<Uuid>, _>(name).map(|v| {
-                    v.map(|v| serde_json::Value::String(v.to_string()))
-                        .unwrap_or(serde_json::Value::Null)
-                })
-            })
-            .or_else(|_| {
-                row.try_get::<Option<NaiveDate>, _>(name).map(|v| {
-                    v.map(|v| serde_json::Value::String(v.to_string()))
-                        .unwrap_or(serde_json::Value::Null)
-                })
-            })
-            .or_else(|_| {
-                row.try_get::<Option<DateTime<Utc>>, _>(name).map(|v| {
-                    v.map(|v| serde_json::Value::String(v.to_rfc3339()))
-                        .unwrap_or(serde_json::Value::Null)
-                })
-            })
-            .unwrap_or(serde_json::Value::Null);
-        map.insert(name.to_string(), val);
-    }
-    serde_json::Value::Object(map)
 }
 
 fn parse_json_field(val: &mut serde_json::Value) {
@@ -278,6 +231,19 @@ pub(crate) async fn record_audit(
 
 // ── Handlers ────────────────────────────────────────────────────────────
 
+/// No feedback at all for either (payer, CARC) or CARC alone: a neutral
+/// midpoint rather than 0, so an item is never sorted to the bottom purely
+/// for lacking history.
+const PRIOR_OVERTURN_RATE: f64 = 0.5;
+
+/// Expected recovery (FB-17) = open amount x historical overturn rate for
+/// (payer, CARC) x a deadline-urgency factor. The rate falls back from
+/// (payer, CARC) to CARC-wide to `PRIOR_OVERTURN_RATE` as evidence runs out;
+/// `overturn_rate_basis` says which one applied. Urgency scales 1.0 (30+
+/// days to the appeal deadline, or none) up to 2.0 (at or past it) — a
+/// deadline does not multiply value away, it only breaks ties among
+/// comparably valuable items. Sorting by this never removes an item from the
+/// list; it only reorders what's already there.
 pub async fn list_appeals(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -291,21 +257,74 @@ pub async fn list_appeals(
             ));
         }
     }
+    if let Some(ref s) = params.sort {
+        if s != "created_at" && s != "expected_recovery" {
+            return Err(AppError::BadRequest(
+                "sort must be 'created_at' or 'expected_recovery'".into(),
+            ));
+        }
+    }
 
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-        "SELECT aq.*, d.cpt_code, d.carc_code, d.charge_amount, \
-         c.claim_number, c.patient_name, c.payer_name, \
-         aa.needs_appeal, \
-         assignee.username AS assigned_username \
-         FROM appeals_queue aq \
-         JOIN denials d ON d.id = aq.denial_id \
-         JOIN claims c ON c.id = d.claim_id \
-         LEFT JOIN ai_analyses aa ON aa.id = aq.ai_analysis_id \
-         LEFT JOIN users assignee ON assignee.id = aq.assigned_user_id",
+        "WITH payer_carc_outcomes AS ( \
+             SELECT c.payer_name, d.carc_code, \
+                    AVG(CASE WHEN fl.was_paid_on_resubmit THEN 1.0 ELSE 0.0 END) AS rate \
+             FROM feedback_loop fl \
+             JOIN ai_analyses aa ON aa.id = fl.ai_analysis_id \
+             JOIN denials d ON d.id = aa.denial_id \
+             JOIN claims c ON c.id = d.claim_id \
+             WHERE c.organization_id = ",
+    );
+    qb.push_bind(organization_id);
+    qb.push(
+        " AND fl.was_paid_on_resubmit IS NOT NULL \
+             GROUP BY c.payer_name, d.carc_code \
+         ), carc_outcomes AS ( \
+             SELECT d.carc_code, \
+                    AVG(CASE WHEN fl.was_paid_on_resubmit THEN 1.0 ELSE 0.0 END) AS rate \
+             FROM feedback_loop fl \
+             JOIN ai_analyses aa ON aa.id = fl.ai_analysis_id \
+             JOIN denials d ON d.id = aa.denial_id \
+             JOIN claims c ON c.id = d.claim_id \
+             WHERE c.organization_id = ",
+    );
+    qb.push_bind(organization_id);
+    qb.push(
+        " AND fl.was_paid_on_resubmit IS NOT NULL \
+             GROUP BY d.carc_code \
+         ), scored AS ( \
+             SELECT aq.*, c.organization_id, d.cpt_code, d.carc_code, d.charge_amount, d.appeal_deadline, \
+             c.claim_number, c.patient_name, c.payer_name, \
+             aa.needs_appeal, \
+             assignee.username AS assigned_username, \
+             COALESCE(pco.rate, co.rate, ",
+    );
+    qb.push_bind(PRIOR_OVERTURN_RATE);
+    qb.push(
+        ")::float8 AS overturn_rate, \
+             CASE WHEN pco.rate IS NOT NULL THEN 'payer_carc' \
+                  WHEN co.rate IS NOT NULL THEN 'carc' \
+                  ELSE 'prior' END AS overturn_rate_basis, \
+             -- 1.0 at 30+ days out or no deadline, up to 2.0 at/past it.
+             (2.0 - LEAST(GREATEST(COALESCE(d.appeal_deadline - CURRENT_DATE, 30), 0), 30) \
+                    ::float8 / 30.0)::float8 AS urgency_factor \
+             FROM appeals_queue aq \
+             JOIN denials d ON d.id = aq.denial_id \
+             JOIN claims c ON c.id = d.claim_id \
+             LEFT JOIN ai_analyses aa ON aa.id = aq.ai_analysis_id \
+             LEFT JOIN users assignee ON assignee.id = aq.assigned_user_id \
+             LEFT JOIN payer_carc_outcomes pco \
+                 ON pco.payer_name = c.payer_name AND pco.carc_code = d.carc_code \
+             LEFT JOIN carc_outcomes co ON co.carc_code = d.carc_code \
+         ) \
+         SELECT scored.*, \
+             (COALESCE(charge_amount, 0) * overturn_rate * urgency_factor)::float8 \
+                 AS expected_recovery \
+         FROM scored",
     );
 
     let mut need_where = false;
-    qb.push(" WHERE c.organization_id = ");
+    qb.push(" WHERE organization_id = ");
     qb.push_bind(organization_id);
     let push_prefix = |qb: &mut sqlx::QueryBuilder<sqlx::Postgres>, need_where: &mut bool| {
         if *need_where {
@@ -318,18 +337,18 @@ pub async fn list_appeals(
 
     if let Some(ref s) = params.outcome_status {
         push_prefix(&mut qb, &mut need_where);
-        qb.push("aq.outcome_status = ");
+        qb.push("outcome_status = ");
         qb.push_bind(s.clone());
     }
     if let Some(ref rt) = params.resolution_type {
         push_prefix(&mut qb, &mut need_where);
-        qb.push("aq.resolution_type = ");
+        qb.push("resolution_type = ");
         qb.push_bind(rt.clone());
     }
     match params.category.as_deref() {
         Some("appeal") => {
             push_prefix(&mut qb, &mut need_where);
-            qb.push("aq.resolution_type = ANY(");
+            qb.push("resolution_type = ANY(");
             qb.push_bind(
                 APPEAL_RESOLUTION_TYPES
                     .iter()
@@ -340,7 +359,7 @@ pub async fn list_appeals(
         }
         Some("worklist") => {
             push_prefix(&mut qb, &mut need_where);
-            qb.push("(aq.resolution_type IS NULL OR NOT (aq.resolution_type = ANY(");
+            qb.push("(resolution_type IS NULL OR NOT (resolution_type = ANY(");
             qb.push_bind(
                 APPEAL_RESOLUTION_TYPES
                     .iter()
@@ -353,15 +372,15 @@ pub async fn list_appeals(
     }
     if let Some(ref uid) = params.assigned_user_id {
         push_prefix(&mut qb, &mut need_where);
-        qb.push("aq.assigned_user_id = ");
+        qb.push("assigned_user_id = ");
         qb.push_bind(uid.clone());
     }
 
     if let Some(owner) = queue_owner(&principal) {
         push_prefix(&mut qb, &mut need_where);
-        qb.push("(aq.assigned_user_id = ");
+        qb.push("(assigned_user_id = ");
         qb.push_bind(owner);
-        qb.push(" OR aq.assigned_user_id IS NULL)");
+        qb.push(" OR assigned_user_id IS NULL)");
     }
 
     if params.outcome_status.is_none() {
@@ -371,7 +390,7 @@ pub async fn list_appeals(
             qb.push(" AND (");
         }
         qb.push(
-            "aq.outcome_status IS NULL OR aq.outcome_status NOT IN \
+            "outcome_status IS NULL OR outcome_status NOT IN \
              ('approved', 'overruled', 'resolved', 'denied_again', 'cancelled')",
         );
         if !need_where {
@@ -380,7 +399,17 @@ pub async fn list_appeals(
     }
 
     let limit = params.limit.clamp(1, 500);
-    qb.push(" ORDER BY aq.created_at ASC LIMIT ");
+    match params.sort.as_deref() {
+        Some("expected_recovery") => {
+            qb.push(" ORDER BY expected_recovery ");
+            qb.push(if params.descending { "DESC" } else { "ASC" });
+        }
+        _ => {
+            qb.push(" ORDER BY created_at ");
+            qb.push(if params.descending { "DESC" } else { "ASC" });
+        }
+    }
+    qb.push(" LIMIT ");
     qb.push_bind(limit);
     qb.push(" OFFSET ");
     qb.push_bind(params.offset.max(0));

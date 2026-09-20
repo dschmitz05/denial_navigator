@@ -10,7 +10,7 @@ export interface ApiOperations {
   "GET /api/v1/analyses/generate-jobs/{job_id}": { path: { "job_id": string } };
   "GET /api/v1/analyses/status": Record<string, never>;
   "POST /api/v1/analyses/store": { body: { "denial_id": string; "claim_id": string; "model_name": string; "raw_prompt": string; "raw_response": string; "parsed_result": Record<string, unknown>; "prompt_tokens"?: number; "completion_tokens"?: number; "total_tokens"?: number } };
-  "GET /api/v1/appeals": { query?: { "status"?: string; "resolution_type"?: string; "assigned"?: string; "limit"?: number; "offset"?: number } };
+  "GET /api/v1/appeals": { query?: { "outcome_status"?: string; "resolution_type"?: string; "category"?: "appeal" | "worklist"; "assigned_user_id"?: string; "sort"?: "created_at" | "expected_recovery"; "descending"?: boolean; "limit"?: number; "offset"?: number } };
   "POST /api/v1/appeals": { body: { "denial_id": string; "resolution_type": string; "notes"?: string } };
   "POST /api/v1/appeals/bulk": { body: { "denial_ids": Array<string>; "resolution_type": string } };
   "GET /api/v1/appeals/{appeal_id}": { path: { "appeal_id": string } };

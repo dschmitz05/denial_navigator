@@ -474,6 +474,21 @@ unset, a known placeholder, or (for Fernet) not an exact 32-byte key.
   appeal's assignee) until it is marked complete. Shown on the denial detail
   page. `scripts/test_payer_interactions.sh` covers logging, the digest and
   completion.
+- **The queue can sort by expected recovery, not just age or amount**
+  (`routes/appeals.rs::list_appeals`, `?sort=expected_recovery`; FB-17).
+  `expected_recovery = open amount x overturn rate x urgency factor`. The
+  overturn rate is the share of `feedback_loop.was_paid_on_resubmit` that
+  were `TRUE` for this exact (payer, CARC); it falls back to the CARC-wide
+  rate, then to a 0.5 prior, when there isn't enough history — never to zero,
+  so a lack of data never sorts an item to the bottom. The urgency factor
+  scales from 1.0 (30+ days to the appeal deadline, or none) up to 2.0 (at or
+  past it); a deadline never multiplies value away, it only breaks ties.
+  Every row carries `overturn_rate`, `overturn_rate_basis`
+  (`payer_carc`/`carc`/`prior`) and `urgency_factor` alongside the total, so
+  Appeals and Worklist can show how the number was built on hover. Sorting
+  only reorders — it never removes an item from either list.
+  `scripts/test_expected_recovery_sort.sh` covers the fallback chain and the
+  ordering.
 - **Bulk queueing resolves the whole batch in one query** instead of three per
   denial, and reports partial success rather than failing the batch.
 - **The connection pool** is created once at startup with a liveness check;

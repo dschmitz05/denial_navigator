@@ -9,6 +9,7 @@ type Appeal = {
   id: string; denial_id: string; claim_number?: string; patient_name?: string; payer_name?: string; cpt_code?: string
   resolution_type?: string; assigned_user_id?: string | null; assigned_username?: string | null; needs_appeal?: boolean
   charge_amount?: number; outcome_status?: string | null; ai_analysis_id?: string | null
+  expected_recovery?: number; overturn_rate?: number; overturn_rate_basis?: 'payer_carc' | 'carc' | 'prior'; urgency_factor?: number
 }
 type Letter = { draft_appeal_letter?: string; needs_appeal?: boolean; explanation?: string; claim_number?: string; patient_name?: string; date_of_birth?: string; payer_name?: string; payer_id_number?: string; service_from?: string; cpt_code?: string; icd_10_codes?: string[] }
 type Notice = { error: boolean; text: string }
@@ -29,6 +30,10 @@ export default function Appeals() {
   const [showDetail, setShowDetail] = useState(false)
   const [letterData, setLetterData] = useState<Letter | null>(null)
   const [outcomeFilter, setOutcomeFilter] = useState('')
+  // Expected recovery = open amount x historical overturn rate for this
+  // payer/CARC x a deadline-urgency factor (FB-17) — never hides an item,
+  // only reorders what's already shown.
+  const [sort, setSort] = useState<'created_at' | 'expected_recovery'>('created_at')
   const [loading, setLoading] = useState(true)
   const [updating, setUpdating] = useState(false)
   const [feedback, setFeedback] = useState<Feedback>({ rating: 0, was_paid_on_resubmit: null, feedback_text: '' })
@@ -39,12 +44,13 @@ export default function Appeals() {
   // Only managers can assign, so only they need the user list.
   const assignableUsers = useAssignableUsers(can.assignWork())
 
-  const loadAppeals = (filters: { outcome_status?: string } = {}) => {
+  const loadAppeals = (filters: { outcome_status?: string; sort?: string } = {}) => {
     // category=appeal keeps this tab to work that actually challenges the
     // payer. Corrected claims, records requests, payer calls and write-offs
     // are denial work, not appeals, and live on the Worklist tab.
     const params = new URLSearchParams({ limit: '50', category: 'appeal' })
     if (filters.outcome_status) params.set('outcome_status', filters.outcome_status)
+    if (filters.sort === 'expected_recovery') { params.set('sort', 'expected_recovery'); params.set('descending', 'true') }
 
     fetch(`${API_BASE}/appeals?${params}`)
       .then(r => r.json())
@@ -55,8 +61,8 @@ export default function Appeals() {
   // Reload on selection. The Filter button was the only way to apply this.
   useEffect(() => {
     setLoading(true)
-    loadAppeals({ outcome_status: outcomeFilter })
-  }, [outcomeFilter])
+    loadAppeals({ outcome_status: outcomeFilter, sort })
+  }, [outcomeFilter, sort])
 
   const handleUpdateOutcome = async (appealId: string, newStatus: string) => {
     setUpdating(true)
@@ -66,7 +72,7 @@ export default function Appeals() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ outcome_status: newStatus }),
       })
-      loadAppeals({ outcome_status: outcomeFilter })
+      loadAppeals({ outcome_status: outcomeFilter, sort })
     } catch (err) {
       console.error('Update failed:', err)
     }
@@ -151,6 +157,11 @@ export default function Appeals() {
           <option value="denied_again">Denied Again</option>
           <option value="cancelled">Cancelled</option>
         </select>
+        <select className="form-select" value={sort} onChange={e => setSort(e.target.value as 'created_at' | 'expected_recovery')}
+                title="Expected recovery = open amount x historical overturn rate for this payer/CARC x deadline urgency">
+          <option value="created_at">Sort: Oldest first</option>
+          <option value="expected_recovery">Sort: Expected recovery</option>
+        </select>
         <button className="btn" onClick={() => setOutcomeFilter('')}>Clear</button>
       </div>
 
@@ -173,13 +184,14 @@ export default function Appeals() {
                 <th>Owner</th>
                 <th>AI Says</th>
                 <th>Amount</th>
+                {sort === 'expected_recovery' && <th>Expected Recovery</th>}
                 <th>Status</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               {appeals.length === 0 ? (
-                <tr><td colSpan={10} style={{ textAlign: 'center', padding: 20, color: 'var(--gray-500)' }}>
+                <tr><td colSpan={sort === 'expected_recovery' ? 11 : 10} style={{ textAlign: 'center', padding: 20, color: 'var(--gray-500)' }}>
                   No appeals in the queue. Denials queued as a corrected claim, clinical
                   documentation, a payer call or a write-off are on the Worklist tab.
                 </td></tr>
@@ -192,9 +204,17 @@ export default function Appeals() {
                     <td>{a.cpt_code || '—'}</td>
                     <td>{a.resolution_type?.replace(/_/g, ' ')}</td>
                       <AssigneeCell item={a} users={assignableUsers}
-                                    onAssigned={() => loadAppeals({ outcome_status: outcomeFilter })} />
+                                    onAssigned={() => loadAppeals({ outcome_status: outcomeFilter, sort })} />
                     <td><span style={{ color: a.needs_appeal ? 'var(--success)' : 'var(--danger)', fontSize: '0.85rem' }}>{a.needs_appeal ? '✅ Yes' : '❌ No'}</span></td>
                     <td>{formatCurrency(a.charge_amount)}</td>
+                    {sort === 'expected_recovery' && (
+                      <td title={a.expected_recovery == null ? undefined
+                        : `${formatCurrency(a.charge_amount)} open x ${Math.round((a.overturn_rate || 0) * 100)}% `
+                        + `overturn rate (${(a.overturn_rate_basis || 'prior').replace('_', '/')}) x `
+                        + `${(a.urgency_factor || 1).toFixed(2)} deadline urgency`}>
+                        {a.expected_recovery == null ? '—' : formatCurrency(a.expected_recovery)}
+                      </td>
+                    )}
                     <td><span className={`badge badge-${(a.outcome_status || 'queued').replace(/_/g, '-')}`}>{a.outcome_status || 'queued'}</span></td>
                     <td>
                       <button className="btn btn-sm" onClick={() => { setSelectedAppeal(a); setShowDetail(true); handleViewLetter(a.id) }}>

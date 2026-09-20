@@ -7,7 +7,12 @@ import AiStatusBanner from '../components/AiStatusBanner'
 
 const API_BASE = '/api/v1'
 
-type WorkItem = { id: string; denial_id?: string; claim_number?: string; patient_name?: string; payer_name?: string; cpt_code?: string; carc_code?: string; resolution_type?: string; assigned_user_id?: string | null; assigned_username?: string | null; charge_amount?: number; outcome_status?: string | null; ai_analysis_id?: string | null }
+type WorkItem = {
+  id: string; denial_id?: string; claim_number?: string; patient_name?: string; payer_name?: string; cpt_code?: string; carc_code?: string
+  resolution_type?: string; assigned_user_id?: string | null; assigned_username?: string | null; charge_amount?: number
+  outcome_status?: string | null; ai_analysis_id?: string | null
+  expected_recovery?: number; overturn_rate?: number; overturn_rate_basis?: 'payer_carc' | 'carc' | 'prior'; urgency_factor?: number
+}
 type WorkDetail = WorkItem & { carc_description?: string; service_from?: string; explanation?: string; root_cause_summary?: string; required_action?: string; steps?: Array<string | { action?: string }>; needs_appeal?: boolean }
 type Notice = { error: boolean; text: string }
 type Feedback = { rating: number; feedback_text: string }
@@ -90,6 +95,10 @@ export default function Worklist() {
   const [showDetail, setShowDetail] = useState(false)
   const [outcomeFilter, setOutcomeFilter] = useState('')
   const [typeFilter, setTypeFilter] = useState('')
+  // Expected recovery = open amount x historical overturn rate for this
+  // payer/CARC x a deadline-urgency factor (FB-17) — never hides an item,
+  // only reorders what's already shown.
+  const [sort, setSort] = useState<'created_at' | 'expected_recovery'>('created_at')
   const [loading, setLoading] = useState(true)
   const [updating, setUpdating] = useState(false)
   const [notice, setNotice] = useState<Notice | null>(null)
@@ -99,13 +108,14 @@ export default function Worklist() {
   // Only managers can assign, so only they need the user list.
   const assignableUsers = useAssignableUsers(can.assignWork())
 
-  const loadItems = (filters: { outcome_status?: string; resolution_type?: string } = {}) => {
+  const loadItems = (filters: { outcome_status?: string; resolution_type?: string; sort?: string } = {}) => {
     // category=worklist is the server-side rule: everything that is not an
     // appeal. The Appeals tab asks the same endpoint for category=appeal, so
     // an item can never show up on both or fall between them.
     const params = new URLSearchParams({ limit: '50', category: 'worklist' })
     if (filters.outcome_status) params.set('outcome_status', filters.outcome_status)
     if (filters.resolution_type) params.set('resolution_type', filters.resolution_type)
+    if (filters.sort === 'expected_recovery') { params.set('sort', 'expected_recovery'); params.set('descending', 'true') }
 
     fetch(`${API_BASE}/appeals?${params}`)
       .then(r => r.json())
@@ -115,8 +125,8 @@ export default function Worklist() {
 
   useEffect(() => {
     setLoading(true)
-    loadItems({ outcome_status: outcomeFilter, resolution_type: typeFilter })
-  }, [outcomeFilter, typeFilter])
+    loadItems({ outcome_status: outcomeFilter, resolution_type: typeFilter, sort })
+  }, [outcomeFilter, typeFilter, sort])
 
   const openItem = async (item: WorkItem) => {
     setSelected(item)
@@ -149,10 +159,10 @@ export default function Worklist() {
         const data = await resp.json().catch(() => ({}))
         setNotice({ error: false, text: typeof data.detail === 'string' ? data.detail : 'Sent for manager approval.' })
         setShowDetail(false)
-        loadItems({ outcome_status: outcomeFilter, resolution_type: typeFilter })
+        loadItems({ outcome_status: outcomeFilter, resolution_type: typeFilter, sort })
         return false
       }
-      loadItems({ outcome_status: outcomeFilter, resolution_type: typeFilter })
+      loadItems({ outcome_status: outcomeFilter, resolution_type: typeFilter, sort })
       const refreshed = await resp.json()
       setSelected(prev => (prev ? { ...prev, outcome_status: typeof refreshed.outcome_status === 'string' ? refreshed.outcome_status : prev.outcome_status } : prev))
       return true
@@ -232,11 +242,16 @@ export default function Worklist() {
           <option value="resolved">Resolved</option>
           <option value="cancelled">Cancelled</option>
         </select>
+        <select className="form-select" value={sort} onChange={e => setSort(e.target.value as 'created_at' | 'expected_recovery')}
+                title="Expected recovery = open amount x historical overturn rate for this payer/CARC x deadline urgency">
+          <option value="created_at">Sort: Oldest first</option>
+          <option value="expected_recovery">Sort: Expected recovery</option>
+        </select>
         <button className="btn" onClick={() => { setOutcomeFilter(''); setTypeFilter('') }}>Clear</button>
       </div>
 
       {can.approveWriteOffs() && (
-        <WriteOffApprovals onDecided={() => loadItems({ outcome_status: outcomeFilter, resolution_type: typeFilter })} />
+        <WriteOffApprovals onDecided={() => loadItems({ outcome_status: outcomeFilter, resolution_type: typeFilter, sort })} />
       )}
 
       {notice && (
@@ -258,15 +273,16 @@ export default function Worklist() {
                 <th>Work Type</th>
                 <th>Owner</th>
                 <th>Amount</th>
+                {sort === 'expected_recovery' && <th>Expected Recovery</th>}
                 <th>Status</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={10} style={{ textAlign: 'center', padding: 20 }}>Loading…</td></tr>
+                <tr><td colSpan={sort === 'expected_recovery' ? 11 : 10} style={{ textAlign: 'center', padding: 20 }}>Loading…</td></tr>
               ) : items.length === 0 ? (
-                <tr><td colSpan={10} style={{ textAlign: 'center', padding: 20, color: 'var(--gray-500)' }}>
+                <tr><td colSpan={sort === 'expected_recovery' ? 11 : 10} style={{ textAlign: 'center', padding: 20, color: 'var(--gray-500)' }}>
                   Nothing in the worklist. Denials queued as a corrected claim, clinical
                   documentation, a payer call or a write-off land here — appeals go to the Appeals tab.
                 </td></tr>
@@ -282,8 +298,16 @@ export default function Worklist() {
                       <td>{item.carc_code || '—'}</td>
                       <td>{t.icon} {t.label}</td>
                       <AssigneeCell item={item} users={assignableUsers}
-                                    onAssigned={() => loadItems({ outcome_status: outcomeFilter, resolution_type: typeFilter })} />
+                                    onAssigned={() => loadItems({ outcome_status: outcomeFilter, resolution_type: typeFilter, sort })} />
                       <td>{formatCurrency(item.charge_amount)}</td>
+                      {sort === 'expected_recovery' && (
+                        <td title={item.expected_recovery == null ? undefined
+                          : `${formatCurrency(item.charge_amount)} open x ${Math.round((item.overturn_rate || 0) * 100)}% `
+                          + `overturn rate (${(item.overturn_rate_basis || 'prior').replace('_', '/')}) x `
+                          + `${(item.urgency_factor || 1).toFixed(2)} deadline urgency`}>
+                          {item.expected_recovery == null ? '—' : formatCurrency(item.expected_recovery)}
+                        </td>
+                      )}
                       <td><span className={`badge badge-${(item.outcome_status || 'queued').replace(/_/g, '-')}`}>
                         {(item.outcome_status || 'queued').replace(/_/g, ' ')}
                       </span></td>
