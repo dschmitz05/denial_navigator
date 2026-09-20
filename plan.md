@@ -1942,26 +1942,26 @@ Do not add AI before this slice works well.
 
 ### Slice A task order
 
-- [ ] Create monorepo/workspace.
-- [ ] Create Compose PostgreSQL environment.
-- [ ] Create migrations for organizations/users/imports/source files/claims/service lines/adjustments/remarks/denial cases/audit events.
-- [ ] Seed one development organization/user.
-- [ ] Implement local object storage.
-- [ ] Implement X12 tokenizer.
-- [ ] Implement minimal 835 parser: ISA/GS/ST/BPR/TRN/CLP/CAS/SVC/LQ/SE/GE/IEA.
-- [ ] Add synthetic 835 fixture.
-- [ ] Implement upload endpoint.
-- [ ] Implement background parse job.
-- [ ] Implement denial detector.
-- [ ] Seed CARC/RARC sample dictionary for synthetic fixture.
-- [ ] Implement denial list endpoint.
-- [ ] Implement denial detail endpoint.
-- [ ] Generate TS client.
-- [ ] Build queue page.
-- [ ] Build detail page.
-- [ ] Implement assignment/resolution mutation.
-- [ ] Add audit events.
-- [ ] Add Playwright E2E test.
+- [x] Create monorepo/workspace.
+- [x] Create Compose PostgreSQL environment.
+- [x] Create migrations for organizations/users/imports/source files/claims/service lines/adjustments/remarks/denial cases/audit events.
+- [x] Seed one development organization/user.
+- [x] Implement local object storage.
+- [x] Implement X12 tokenizer.
+- [x] Implement minimal 835 parser: ISA/GS/ST/BPR/TRN/CLP/CAS/SVC/LQ/SE/GE/IEA.
+- [x] Add synthetic 835 fixture.
+- [x] Implement upload endpoint.
+- [x] Implement background parse job.
+- [x] Implement denial detector.
+- [x] Seed CARC/RARC sample dictionary for synthetic fixture.
+- [x] Implement denial list endpoint.
+- [x] Implement denial detail endpoint.
+- [x] Generate TS client.
+- [x] Build queue page.
+- [x] Build detail page.
+- [x] Implement assignment/resolution mutation.
+- [x] Add audit events.
+- [x] Add Playwright E2E test.
 
 ---
 
