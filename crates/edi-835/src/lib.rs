@@ -278,6 +278,18 @@ fn parse_claims(
                     }
                 }
             }
+            "QTY" => {
+                // 835 QTY carries a payer-reported quantity (for example,
+                // approved/denied units). Keep qualifier and value rather
+                // than assuming it means SVC05 billed units.
+                if let Some(l) = line.as_mut() {
+                    let value = seg.el(2);
+                    if !value.is_empty() {
+                        l.quantity_qualifier = opt(seg.el(1));
+                        l.reported_quantity = Some(to_float(value));
+                    }
+                }
+            }
             "REF" => {
                 if seg.el(1) == "6R" {
                     if let Some(l) = line.as_mut() {
@@ -416,6 +428,8 @@ fn parse_service_line(seg: &Segment, line_number: i64) -> ParsedServiceLine {
         paid_amount: to_float(seg.el(3)),
         revenue_code: opt(seg.el(4)),
         units: one_or(to_float(seg.el(5))),
+        reported_quantity: None,
+        quantity_qualifier: None,
         allowed_amount: None,
         service_date: None,
         control_number: None,
@@ -661,6 +675,20 @@ SE*12*0009~GE*1*9~IEA*1*000000009~";
             "reversal CAS lines must not become denials: {:?}",
             result.denials
         );
+    }
+
+    #[test]
+    fn service_line_qty_is_preserved_separately_from_svc_units() {
+        let edi = "ISA*00*          *00*          *ZZ*PAYER          *ZZ*PROVIDER       *240201*0800*^*00501*000000011*0*P*:~\
+GS*HP*PAYER*PROVIDER*20240201*0800*11*X*005010X221A1~ST*835*0011~\
+BPR*I*80.00*C*ACH*CCP*01*011000015*DA*1*1**01*021000021*DA*2*20240205~TRN*1*EFT11*1~\
+CLP*PAT011*1*100.00*80.00*20.00*MC*PCN11*11*1~SVC*HC:99213*100.00*80.00**1~QTY*CA*3~\
+SE*6*0011~GE*1*11~IEA*1*000000011~";
+        let result = parse(edi).expect("835 with QTY parses");
+        let line = &result.claims[0].service_lines[0];
+        assert_eq!(line.service_line.units, 1.0);
+        assert_eq!(line.service_line.quantity_qualifier.as_deref(), Some("CA"));
+        assert_eq!(line.service_line.reported_quantity, Some(3.0));
     }
 
     fn envelope(body: &str) -> String {

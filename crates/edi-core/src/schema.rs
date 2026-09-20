@@ -113,6 +113,12 @@ pub struct ParsedServiceLine {
     pub revenue_code: Option<String>,
     #[serde(skip_serializing_if = "is_default_f64")]
     pub units: f64,
+    /// Quantity explicitly reported in an 835 QTY segment. This is distinct
+    /// from SVC05 units, which is the billed-service quantity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reported_quantity: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quantity_qualifier: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_amount: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -137,6 +143,8 @@ impl Default for ParsedServiceLine {
             paid_amount: 0.0,
             revenue_code: None,
             units: 1.0,
+            reported_quantity: None,
+            quantity_qualifier: None,
             allowed_amount: None,
             service_date: None,
             control_number: None,
