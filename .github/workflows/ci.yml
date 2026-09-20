@@ -54,13 +54,18 @@ jobs:
           # itself succeeded. The gate here is Trivy's scan of the tree, not
           # a downloadable SBOM artifact.
           upload-artifact: false
-      - uses: aquasecurity/trivy-action@v0.28.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: '1'
+      # aquasecurity/trivy-action is a composite action that calls
+      # aquasecurity/setup-trivy internally; that nested action call is
+      # silently skipped on this runner (a known nektos/act limitation -
+      # https://github.com/nektos/act/issues/107), so "Install Trivy" never
+      # ran and the scan step then failed with "trivy: command not found".
+      # Installing and running it directly sidesteps the nested-action
+      # resolution entirely, with the same scan-type/severity/exit-code the
+      # marketplace action would have passed through as flags/env either way.
+      - name: Install Trivy
+        run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+      - name: Run Trivy
+        run: trivy fs --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 .
 
   dependencies:
     runs-on: ubuntu-latest
