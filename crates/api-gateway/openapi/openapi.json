@@ -3793,6 +3793,44 @@
         }
       }
     },
+    "/api/v1/ingestion/s3-events": {
+      "post": {
+        "summary": "Receive an S3-compatible bucket's event notification",
+        "tags": [
+          "ingestion"
+        ],
+        "security": [],
+        "description": "Push-based complement to the S3 polling importer. Point an S3-compatible bucket's webhook notification (e.g. MinIO's `mc event add --event put`) at this URL with `Authorization: Bearer <S3_EVENT_WEBHOOK_TOKEN>`; unset that variable and the endpoint 404s. Accepts the de facto standard AWS S3 event notification JSON shape and forwards it to the ediparser, which downloads and parses any matching object immediately instead of waiting for the next poll.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "Records": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "description": "S3 event notification payload."
+        },
+        "responses": {
+          "200": {
+            "description": "received/processed counts"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
     "/api/v1/ingestion/store": {
       "post": {
         "summary": "Store an already-parsed result (called by the parser)",

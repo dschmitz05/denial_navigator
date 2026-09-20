@@ -914,6 +914,47 @@ async fn already_ingested(
     .map_err(AppError::Db)
 }
 
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut different = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        different |= x ^ y;
+    }
+    different == 0
+}
+
+/// Entry point for an S3-compatible bucket's event notification webhook (a
+/// MinIO/Garage-style `Authorization: Bearer <token>` target, not the
+/// user JWT or sibling-service key this gateway otherwise requires — see the
+/// `PUBLIC_EXACT` note in `denial_auth::rbac`). Configuring this is optional;
+/// without it, the ediparser's own polling loop still picks up new objects.
+/// The payload is forwarded to the ediparser as-is; it alone knows which
+/// bucket/prefix/extensions are actually configured for import.
+pub async fn s3_event_webhook(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(payload): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let expected = state
+        .config
+        .s3_event_webhook_token
+        .as_deref()
+        .ok_or(AppError::NotFound)?;
+    let supplied = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    match supplied {
+        Some(token) if constant_time_eq(token.as_bytes(), expected.as_bytes()) => {}
+        _ => return Err(AppError::Unauthorized),
+    }
+
+    let result = state.ediparser.notify_s3_event(&payload).await?;
+    Ok(Json(result))
+}
+
 // ── Handlers ────────────────────────────────────────────────────────────
 
 pub async fn upload_file(
@@ -1294,6 +1335,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/upload", post(upload_file))
         .route("/ingest", post(ingest_file))
+        .route("/s3-events", post(s3_event_webhook))
         .route("/log", post(list_ingestion_log))
         .route("/history", get(get_ingestion_history))
         .route("/store", post(store_parsed_data))
@@ -1307,6 +1349,13 @@ pub fn router() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn constant_time_eq_matches_only_identical_tokens() {
+        assert!(constant_time_eq(b"webhook-secret", b"webhook-secret"));
+        assert!(!constant_time_eq(b"webhook-secret", b"wrong-secret"));
+        assert!(!constant_time_eq(b"short", b"much-longer-value"));
+    }
 
     fn fields<'a>(
         svc_from: Option<&'a str>,

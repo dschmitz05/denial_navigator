@@ -34,6 +34,15 @@ Use a separate read-only credential restricted to the configured bucket and
 prefix. This importer is independent from the object-store configuration used
 for knowledge-source artifacts, so its least-privilege policy remains small.
 
+For lower latency than polling, point the bucket's event notifications at
+`POST /api/v1/ingestion/s3-events` (e.g. MinIO's `mc event add
+myminio/<bucket> arn:minio:sqs::webhook:webhook --event put --prefix
+<S3_IMPORT_PREFIX>`, configured with a webhook target). Set
+`S3_EVENT_WEBHOOK_TOKEN` on the gateway and configure the same value as the
+bucket's webhook auth token; the endpoint 404s if the variable is unset. The
+polling loop keeps running regardless, so a missed or misconfigured webhook
+delivery is never a silent gap - just a slower one.
+
 Uploaded knowledge source artifacts are retained beneath
 `OBJECT_STORAGE_LOCAL_PATH` (default `./data/objects`). Place that path on an
 encrypted, access-controlled volume; permanent document purges remove its

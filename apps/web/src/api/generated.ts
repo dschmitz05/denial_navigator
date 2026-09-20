@@ -70,6 +70,7 @@ export interface ApiOperations {
   "POST /api/v1/ingestion/log": { body: Record<string, unknown> };
   "GET /api/v1/ingestion/provider-adjustments": { query?: { "claim_number"?: string; "reason_code"?: string; "limit"?: number } };
   "GET /api/v1/ingestion/provider-adjustments/summary": Record<string, never>;
+  "POST /api/v1/ingestion/s3-events": { body: { "Records"?: Array<Record<string, unknown>> } };
   "POST /api/v1/ingestion/store": { body: { "file_name": string; "file_hash": string; "file_size"?: number; "claims": Array<Record<string, unknown>>; "denials": Array<Record<string, unknown>> } };
   "POST /api/v1/ingestion/upload": { body: FormData };
   "GET /api/v1/knowledge/documents": { query?: { "source_type"?: string; "status"?: string; "expiry"?: "expiring_soon" | "expired_active"; "expiring_within_days"?: number; "limit"?: number } };

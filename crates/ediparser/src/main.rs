@@ -950,6 +950,53 @@ fn is_edi_object(key: &ObjectKey) -> bool {
         .is_some_and(is_sftp_edi_file)
 }
 
+/// Download and process one S3 key already known to look like an EDI file.
+/// Shared by the poll loop and the event-notification webhook so both paths
+/// go through identical download/stage/parse/cleanup handling.
+async fn process_s3_key(state: &AppState, cfg: &S3ImportConfig, key: ObjectKey) -> bool {
+    let get_config = cfg.clone();
+    let get_key = key.clone();
+    let bytes = tokio::task::spawn_blocking(move || {
+        let storage = get_config.storage()?;
+        storage
+            .get(&get_key)
+            .map_err(|_| AppError::Internal("S3 object download failed".into()))
+    })
+    .await
+    .map_err(|_| AppError::Internal("S3 import task failed".into()));
+    let bytes = match bytes {
+        Ok(Ok(bytes)) if bytes.len() <= MAX_FILE_SIZE => bytes,
+        Ok(Ok(_)) => {
+            tracing::warn!("S3 object skipped because it exceeds the EDI size limit");
+            return false;
+        }
+        Ok(Err(error)) | Err(error) => {
+            tracing::warn!(
+                "S3 object download failed: {}",
+                denial_common::logging::safe_error(error)
+            );
+            return false;
+        }
+    };
+
+    let file_name = key.as_str().rsplit('/').next().unwrap_or_default();
+    let download_path =
+        PathBuf::from(&state.cfg.output_path).join(format!(".s3-download-{}", Uuid::new_v4()));
+    if std::fs::write(&download_path, bytes).is_err() {
+        tracing::warn!("S3 object could not be staged for parsing");
+        return false;
+    }
+    let source_path = format!("s3://{}/{}", cfg.bucket, key.as_str());
+    let result =
+        process_file_from_source(state, &download_path, &source_path, Some(file_name)).await;
+    let _ = std::fs::remove_file(&download_path);
+    let processed = result.get("status").and_then(Value::as_str) == Some("completed");
+    if !processed {
+        tracing::warn!("S3 object processing failed");
+    }
+    processed
+}
+
 async fn poll_s3(state: &AppState, cfg: &S3ImportConfig) -> Result<usize, AppError> {
     let list_config = cfg.clone();
     let keys = tokio::task::spawn_blocking(move || {
@@ -963,46 +1010,8 @@ async fn poll_s3(state: &AppState, cfg: &S3ImportConfig) -> Result<usize, AppErr
 
     let mut processed = 0;
     for key in keys.into_iter().filter(is_edi_object) {
-        let get_config = cfg.clone();
-        let get_key = key.clone();
-        let bytes = tokio::task::spawn_blocking(move || {
-            let storage = get_config.storage()?;
-            storage
-                .get(&get_key)
-                .map_err(|_| AppError::Internal("S3 object download failed".into()))
-        })
-        .await
-        .map_err(|_| AppError::Internal("S3 import task failed".into()))?;
-        let bytes = match bytes {
-            Ok(bytes) if bytes.len() <= MAX_FILE_SIZE => bytes,
-            Ok(_) => {
-                tracing::warn!("S3 object skipped because it exceeds the EDI size limit");
-                continue;
-            }
-            Err(error) => {
-                tracing::warn!(
-                    "S3 object download failed: {}",
-                    denial_common::logging::safe_error(error)
-                );
-                continue;
-            }
-        };
-
-        let file_name = key.as_str().rsplit('/').next().unwrap_or_default();
-        let download_path =
-            PathBuf::from(&state.cfg.output_path).join(format!(".s3-download-{}", Uuid::new_v4()));
-        if std::fs::write(&download_path, bytes).is_err() {
-            tracing::warn!("S3 object could not be staged for parsing");
-            continue;
-        }
-        let source_path = format!("s3://{}/{}", cfg.bucket, key.as_str());
-        let result =
-            process_file_from_source(state, &download_path, &source_path, Some(file_name)).await;
-        let _ = std::fs::remove_file(&download_path);
-        if result.get("status").and_then(Value::as_str) == Some("completed") {
+        if process_s3_key(state, cfg, key).await {
             processed += 1;
-        } else {
-            tracing::warn!("S3 object processing failed");
         }
     }
     Ok(processed)
@@ -1042,6 +1051,120 @@ async fn s3_loop(state: AppState, cfg: S3ImportConfig) {
     }
 }
 
+// ── S3 event-notification webhook ──
+//
+// A push-based complement to `poll_s3`: an S3-compatible bucket configured
+// with a webhook notification target (MinIO's `mc event add --event put`,
+// Garage, etc.) can call this instead of waiting up to `poll_seconds` for the
+// next sweep. The polling loop keeps running regardless, so a missed or
+// misconfigured webhook delivery is never a silent gap - just a slower one.
+//
+// The shape matches the de facto standard AWS S3 event notification JSON
+// that MinIO and other S3-compatible stores also emit.
+
+#[derive(serde::Deserialize)]
+struct S3EventNotification {
+    #[serde(rename = "Records", default)]
+    records: Vec<S3EventRecord>,
+}
+
+#[derive(serde::Deserialize)]
+struct S3EventRecord {
+    #[serde(rename = "eventName", default)]
+    event_name: String,
+    s3: S3EventEntity,
+}
+
+#[derive(serde::Deserialize)]
+struct S3EventEntity {
+    bucket: S3EventBucket,
+    object: S3EventObject,
+}
+
+#[derive(serde::Deserialize)]
+struct S3EventBucket {
+    name: String,
+}
+
+#[derive(serde::Deserialize)]
+struct S3EventObject {
+    key: String,
+}
+
+/// Object keys in S3 event notifications are percent-encoded per the AWS
+/// spec (unlike `application/x-www-form-urlencoded`, `+` is literal, not a
+/// space), so a general-purpose form decoder would corrupt any key
+/// containing one.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(&value[i + 1..i + 3], 16) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+async fn s3_event_webhook(
+    State(state): State<AppState>,
+    Json(payload): Json<S3EventNotification>,
+) -> Result<Json<Value>, AppError> {
+    let cfg = state
+        .cfg
+        .s3
+        .clone()
+        .ok_or_else(|| AppError::BadRequest("S3 import is not enabled".into()))?;
+
+    let mut processed = 0;
+    let mut matched = 0;
+    for record in payload.records {
+        if !record.event_name.starts_with("s3:ObjectCreated:") {
+            continue;
+        }
+        if record.s3.bucket.name != cfg.bucket {
+            continue;
+        }
+        let decoded_key = percent_decode(&record.s3.object.key);
+        if !decoded_key.starts_with(&cfg.prefix) {
+            continue;
+        }
+        let Ok(key) = ObjectKey::parse(decoded_key) else {
+            continue;
+        };
+        if !is_edi_object(&key) {
+            continue;
+        }
+        matched += 1;
+        if process_s3_key(&state, &cfg, key).await {
+            processed += 1;
+        }
+    }
+
+    set_source_health(
+        &state,
+        "S3-compatible bucket",
+        "ok",
+        format!("Connected; {processed} file(s) processed via webhook"),
+    )
+    .await;
+    if processed > 0 {
+        tracing::info!("S3 event webhook processed {processed} file(s)");
+    }
+
+    Ok(Json(json!({
+        "received": matched,
+        "processed": processed,
+    })))
+}
+
 async fn retention_loop(cfg: Config) {
     let mut interval = tokio::time::interval(Duration::from_secs(86400));
     loop {
@@ -1062,6 +1185,7 @@ fn build_router(state: AppState) -> Router {
         .route("/ingest-dropzone", post(ingest_dropzone))
         .route("/files", get(list_files))
         .route("/output/{file_name}", get(get_output))
+        .route("/s3-events", post(s3_event_webhook))
         .layer(axum::middleware::from_fn_with_state(
             key,
             denial_common::internal_auth::require_internal_key,
@@ -1184,4 +1308,47 @@ async fn main() {
     axum::serve(listener, build_router(state))
         .await
         .expect("ediparser error");
+}
+
+#[cfg(test)]
+mod s3_event_tests {
+    use super::*;
+
+    #[test]
+    fn percent_decode_reads_encoded_bytes_and_leaves_plus_literal() {
+        assert_eq!(
+            percent_decode("inbound/835%20remit%2B2026.edi"),
+            "inbound/835 remit+2026.edi"
+        );
+    }
+
+    #[test]
+    fn percent_decode_passes_through_malformed_escapes_unchanged() {
+        assert_eq!(percent_decode("100%off.edi"), "100%off.edi");
+    }
+
+    #[test]
+    fn parses_a_real_s3_object_created_notification() {
+        let body = r#"{
+            "Records": [{
+                "eventName": "s3:ObjectCreated:Put",
+                "s3": {
+                    "bucket": {"name": "denials"},
+                    "object": {"key": "inbound/remit.835"}
+                }
+            }]
+        }"#;
+        let event: S3EventNotification = serde_json::from_str(body).unwrap();
+        assert_eq!(event.records.len(), 1);
+        let record = &event.records[0];
+        assert_eq!(record.event_name, "s3:ObjectCreated:Put");
+        assert_eq!(record.s3.bucket.name, "denials");
+        assert_eq!(record.s3.object.key, "inbound/remit.835");
+    }
+
+    #[test]
+    fn missing_records_key_deserializes_to_an_empty_list() {
+        let event: S3EventNotification = serde_json::from_str("{}").unwrap();
+        assert!(event.records.is_empty());
+    }
 }

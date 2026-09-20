@@ -171,6 +171,10 @@ pub struct GatewayConfig {
     pub rate_limit: RateLimitConfig,
     pub cors_origins: Vec<String>,
     pub oidc_userinfo_url: Option<String>,
+    /// Shared secret an S3-compatible bucket's webhook notification presents
+    /// as `Authorization: Bearer <token>` on `/api/v1/ingestion/s3-events`.
+    /// `None` disables the endpoint entirely.
+    pub s3_event_webhook_token: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -234,6 +238,7 @@ impl GatewayConfig {
             oidc_userinfo_url: std::env::var("OIDC_USERINFO_URL")
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
+            s3_event_webhook_token: env_optional_secret("S3_EVENT_WEBHOOK_TOKEN"),
         }
     }
 }

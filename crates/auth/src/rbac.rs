@@ -127,6 +127,10 @@ const PUBLIC_EXACT: &[&str] = &[
     "/openapi.json",
     "/favicon.ico",
     "/api/v1/auth/login",
+    // Authenticated separately, by a bearer token an S3-compatible bucket's
+    // webhook notification presents (see `ingestion::s3_event_webhook`), not
+    // by the JWT/service-key scheme this table otherwise gates.
+    "/api/v1/ingestion/s3-events",
 ];
 
 const WRITE_METHODS: &[&str] = &["POST", "PUT", "PATCH", "DELETE"];

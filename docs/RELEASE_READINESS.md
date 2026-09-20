@@ -35,8 +35,10 @@ ambiguous matches are not silently merged.
 
 - Scanned/image-only PDFs are OCR'd automatically (pdftoppm + tesseract) when
   no embedded text layer is found, capped at 60 pages per document.
-- S3 event notifications are not included yet; the SFTP and S3-compatible
-  polling importers and a Helm chart are available.
+- S3 event notifications are supported via a webhook
+  (`POST /api/v1/ingestion/s3-events`, gated by `S3_EVENT_WEBHOOK_TOKEN`) in
+  addition to the SFTP and S3-compatible polling importers; a Helm chart is
+  also available.
 - Multi-organization tenant isolation is enforced through active organization
   memberships and organization-scoped queries. OIDC is supported through the
   production issuer profile; operators must configure their own issuer and

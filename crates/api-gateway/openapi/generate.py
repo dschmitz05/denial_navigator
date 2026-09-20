@@ -593,6 +593,21 @@ add("/api/v1/ingestion/log",
             "ingestion", body=jbody({}, desc="Optional filter object.")))
 add("/api/v1/ingestion/history",
     get=op("Ingestion history", "ingestion", params=[P_LIMIT]))
+add("/api/v1/ingestion/s3-events",
+    post=op("Receive an S3-compatible bucket's event notification", "ingestion",
+            security=[],
+            description="Push-based complement to the S3 polling importer. "
+                        "Point an S3-compatible bucket's webhook notification "
+                        "(e.g. MinIO's `mc event add --event put`) at this URL "
+                        "with `Authorization: Bearer <S3_EVENT_WEBHOOK_TOKEN>`; "
+                        "unset that variable and the endpoint 404s. Accepts the "
+                        "de facto standard AWS S3 event notification JSON shape "
+                        "and forwards it to the ediparser, which downloads and "
+                        "parses any matching object immediately instead of "
+                        "waiting for the next poll.",
+            body=jbody({"Records": ARR(OBJ)}, desc="S3 event notification payload."),
+            responses={"200": {"description": "received/processed counts"},
+                       "404": {"$ref": "#/components/responses/NotFound"}}))
 
 # ── knowledge base ───────────────────────────────────────────────────────
 add("/api/v1/knowledge/documents",

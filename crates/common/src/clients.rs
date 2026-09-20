@@ -164,6 +164,22 @@ impl EDIParserClient {
         check(resp).await
     }
 
+    /// Forward an S3-compatible bucket's event notification payload so the
+    /// matching object is picked up immediately instead of waiting for the
+    /// next poll. The gateway has already authenticated the external caller;
+    /// this call reuses the same internal service credential as `parse_file`.
+    pub async fn notify_s3_event(&self, payload: &Value) -> Result<Value, AppError> {
+        let resp = self
+            .client
+            .post(format!("{}/s3-events", self.base_url))
+            .header("X-Internal-Service-Key", &self.internal_service_api_key)
+            .timeout(Duration::from_secs(30))
+            .json(payload)
+            .send()
+            .await?;
+        check(resp).await
+    }
+
     pub async fn ingest_dropzone(&self) -> Result<Value, AppError> {
         let resp = self
             .client
