@@ -77,6 +77,8 @@ thiserror = "2"
 anyhow = "1"
 csv = "1"
 html-escape = "0.2"
+jetdb = "0.3"
+tempfile = "3"
 denial_common = { path = "crates/common" }
 denial_app = { path = "crates/app" }
 denial_domain = { path = "crates/domain" }

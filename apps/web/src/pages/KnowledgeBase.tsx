@@ -252,7 +252,7 @@ export default function KnowledgeBase() {
                      style={{ display: 'none' }} onChange={handleUpload} disabled={indexing} />
             </label>
             <button className="btn" onClick={() => setShowLcdImport(!showLcdImport)}>
-              {showLcdImport ? '✕ Cancel' : '⬆ Bulk import LCDs (CSV)'}
+              {showLcdImport ? '✕ Cancel' : '⬆ Bulk import LCDs (CSV/MDB)'}
             </button>
           </>
         )}

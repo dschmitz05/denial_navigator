@@ -1,16 +1,17 @@
-//! Bulk LCD (Local Coverage Determination) CSV import.
+//! Bulk LCD (Local Coverage Determination) import, from either of the two
+//! formats CMS actually publishes its bulk export in: a CSV, or the raw
+//! Access database (.mdb/.accdb) it was generated from - one row per
+//! policy either way, with title, indication, coding guidelines,
+//! documentation requirements, and bibliography as HTML-formatted text. The
+//! single-document upload path (`POST /knowledge/documents/upload`) treats
+//! whatever file it's given as ONE document to chunk and embed, so
+//! uploading either export as-is would mix every LCD nationwide into a
+//! single incoherent document - a category-of-data mismatch, not a size
+//! problem (though the export is also comfortably over the per-document
+//! 25 MB cap).
 //!
-//! CMS's bulk LCD export is one CSV with a row per policy - title,
-//! indication, coding guidelines, documentation requirements, bibliography,
-//! each as HTML-formatted text. The single-document upload path
-//! (`POST /knowledge/documents/upload`) treats whatever file it's given as
-//! ONE document to chunk and embed, so uploading the raw export would mix
-//! every LCD nationwide into a single incoherent document - a category-of-
-//! data mismatch, not a size problem (though the export is also comfortably
-//! over the per-document 25 MB cap).
-//!
-//! This parses the CSV server-side, splits it into one document per LCD, and
-//! indexes them in admin-driven batches: `POST /` stages the parsed,
+//! This parses the file server-side, splits it into one document per LCD,
+//! and indexes them in admin-driven batches: `POST /` stages the parsed,
 //! filtered document list in object storage and returns a job id;
 //! `POST /{job_id}/batch` indexes the next `limit` of them and reports
 //! progress, to be called repeatedly (mirroring the existing
@@ -19,11 +20,13 @@
 //! Same shape of document as `scripts/split_lcd_csv.py` produces, so a
 //! script-driven and a UI-driven import are interchangeable.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::io::Write;
 
 use axum::extract::{Multipart, Path, Query, State};
 use axum::routing::post;
 use axum::{Extension, Json, Router};
+use chrono::NaiveDate;
 use denial_auth::rbac::Principal;
 use denial_common::error::AppError;
 use denial_storage::ObjectKey;
@@ -34,7 +37,27 @@ use uuid::Uuid;
 use super::scope::organization_id;
 use crate::state::AppState;
 
-const MAX_BULK_CSV_BYTES: usize = 100 * 1024 * 1024;
+// CMS's own .mdb export runs to ~115 MB; comfortable headroom above that
+// for a larger future one, well short of the 200 MB reverse-proxy cap that
+// exists specifically to admit this.
+const MAX_BULK_IMPORT_BYTES: usize = 180 * 1024 * 1024;
+
+/// The Jet/ACE signature at a fixed offset, present regardless of what
+/// filename a caller's browser reports. Checked as a fallback when the
+/// filename extension is missing or doesn't say .mdb/.accdb, since that's
+/// what actually determines which parser can read the bytes.
+fn looks_like_jet_database(raw: &[u8]) -> bool {
+    raw.get(4..19) == Some(b"Standard Jet DB") || raw.get(4..19) == Some(b"Standard ACE DB")
+}
+
+/// One CSV row or one Access `lcd` table row, by canonical column name -
+/// both formats use the same names (CMS generates the CSV from this exact
+/// table), so everything after parsing is format-agnostic.
+type LcdRow = HashMap<String, String>;
+
+fn field<'a>(row: &'a LcdRow, name: &str) -> &'a str {
+    row.get(name).map(String::as_str).unwrap_or("").trim()
+}
 
 // Kept in the document body, in this order. Left out deliberately: CMS
 // process/administrative fields (adv_meeting, comment_start_dt,
@@ -111,18 +134,9 @@ fn strip_html(value: &str) -> String {
         .join("\n")
 }
 
-fn field<'a>(headers: &csv::StringRecord, record: &'a csv::StringRecord, name: &str) -> &'a str {
-    headers
-        .iter()
-        .position(|h| h == name)
-        .and_then(|i| record.get(i))
-        .unwrap_or("")
-        .trim()
-}
-
-fn build_document(headers: &csv::StringRecord, record: &csv::StringRecord) -> ImportedDoc {
+fn build_document(row: &LcdRow) -> ImportedDoc {
     // Some titles carry markup too, e.g. "Vitamin B<sub>12</sub> Injections".
-    let title_raw = field(headers, record, "title");
+    let title_raw = field(row, "title");
     let title = if title_raw.is_empty() {
         "(untitled LCD)".to_string()
     } else {
@@ -130,14 +144,14 @@ fn build_document(headers: &csv::StringRecord, record: &csv::StringRecord) -> Im
     };
     let mut parts = vec![title.clone()];
 
-    let det_num = field(headers, record, "determination_number");
+    let det_num = field(row, "determination_number");
     let display_id = if det_num.is_empty() {
-        field(headers, record, "lcd_id")
+        field(row, "lcd_id")
     } else {
         det_num
     };
-    let eff = field(headers, record, "orig_det_eff_date");
-    let rev = field(headers, record, "rev_eff_date");
+    let eff = field(row, "orig_det_eff_date");
+    let rev = field(row, "rev_eff_date");
     let mut meta_bits = Vec::new();
     if !display_id.is_empty() {
         meta_bits.push(format!("Determination number: {display_id}"));
@@ -153,7 +167,7 @@ fn build_document(headers: &csv::StringRecord, record: &csv::StringRecord) -> Im
     }
 
     for (heading, field_name) in BODY_FIELDS {
-        let raw = field(headers, record, field_name);
+        let raw = field(row, field_name);
         if raw.is_empty() {
             continue;
         }
@@ -167,6 +181,96 @@ fn build_document(headers: &csv::StringRecord, record: &csv::StringRecord) -> Im
         title,
         content: parts.join("\n\n"),
     }
+}
+
+/// Parses a CMS bulk LCD CSV export into rows keyed by column name.
+fn read_csv_rows(raw: &[u8]) -> Result<Vec<LcdRow>, AppError> {
+    let mut reader = csv::ReaderBuilder::new().flexible(true).from_reader(raw);
+    let headers = reader
+        .headers()
+        .map_err(|e| AppError::BadRequest(format!("Invalid CSV: {e}")))?
+        .clone();
+    if !headers.iter().any(|h| h == "title") || !headers.iter().any(|h| h == "status") {
+        return Err(AppError::BadRequest(
+            "Not a recognised CMS LCD export - missing 'title' or 'status' column".into(),
+        ));
+    }
+
+    let mut rows = Vec::new();
+    for result in reader.records() {
+        let Ok(record) = result else { continue };
+        let row: LcdRow = headers
+            .iter()
+            .zip(record.iter())
+            .map(|(h, v)| (h.to_string(), v.trim().to_string()))
+            .collect();
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+/// Access stores dates as days-since-1899-12-30; rendered to match the CSV
+/// export's own "YYYY-MM-DD ..." text so a document reads the same either
+/// way it was imported.
+fn mdb_value_to_string(value: &jetdb::Value) -> String {
+    use jetdb::Value;
+    match value {
+        Value::Null => String::new(),
+        Value::Bool(b) => b.to_string(),
+        Value::Byte(n) => n.to_string(),
+        Value::Int(n) => n.to_string(),
+        Value::Long(n) => n.to_string(),
+        Value::BigInt(n) => n.to_string(),
+        Value::Float(n) => n.to_string(),
+        Value::Double(n) => n.to_string(),
+        Value::Text(s) => s.clone(),
+        Value::Money(s) | Value::Numeric(s) | Value::Guid(s) | Value::DateTimeExtended(s) => {
+            s.clone()
+        }
+        Value::Binary(_) => String::new(),
+        Value::Timestamp(days) => NaiveDate::from_ymd_opt(1899, 12, 30)
+            .and_then(|epoch| epoch.checked_add_signed(chrono::Duration::days(*days as i64)))
+            .map(|d| d.format("%Y-%m-%d 00:00:00").to_string())
+            .unwrap_or_default(),
+    }
+}
+
+/// Parses the `lcd` table out of a CMS bulk export Access database. Blocking
+/// I/O - the caller runs this on a blocking thread. `jetdb` only opens by
+/// path, so the caller writes the uploaded bytes to a temp file first.
+fn read_mdb_rows(path: &std::path::Path) -> Result<Vec<LcdRow>, AppError> {
+    let mut reader = jetdb::PageReader::open(path)
+        .map_err(|e| AppError::BadRequest(format!("Could not open Access database: {e}")))?;
+    let catalog = jetdb::read_catalog(&mut reader)
+        .map_err(|e| AppError::BadRequest(format!("Could not read Access database: {e}")))?;
+    let entry = catalog.iter().find(|e| e.name == "lcd").ok_or_else(|| {
+        AppError::BadRequest(
+            "Not a recognised CMS LCD export - no 'lcd' table in this database".into(),
+        )
+    })?;
+    let table_def = jetdb::read_table_def(&mut reader, &entry.name, entry.table_page)
+        .map_err(|e| AppError::BadRequest(format!("Could not read the 'lcd' table: {e}")))?;
+    let result = jetdb::read_table_rows(&mut reader, &table_def)
+        .map_err(|e| AppError::BadRequest(format!("Could not read the 'lcd' table: {e}")))?;
+
+    let rows = result
+        .rows
+        .iter()
+        .map(|values| {
+            table_def
+                .columns
+                .iter()
+                .zip(values.iter())
+                .map(|(col, val)| {
+                    (
+                        col.name.clone(),
+                        mdb_value_to_string(val).trim().to_string(),
+                    )
+                })
+                .collect::<LcdRow>()
+        })
+        .collect();
+    Ok(rows)
 }
 
 #[derive(Deserialize)]
@@ -195,23 +299,25 @@ pub async fn start_import(
     let organization_id = organization_id(&principal)?;
 
     let mut raw: Vec<u8> = Vec::new();
+    let mut filename: Option<String> = None;
     while let Some(field) = multipart
         .next_field()
         .await
         .map_err(|_| AppError::BadRequest("Invalid multipart form data".into()))?
     {
-        if field.file_name().is_none() {
+        let Some(name) = field.file_name().map(str::to_string) else {
             continue;
-        }
+        };
+        filename = Some(name);
         let chunk = field
             .bytes()
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
         raw.extend_from_slice(&chunk);
-        if raw.len() > MAX_BULK_CSV_BYTES {
+        if raw.len() > MAX_BULK_IMPORT_BYTES {
             return Err(AppError::BadRequest(format!(
                 "File too large: maximum {} MB",
-                MAX_BULK_CSV_BYTES / (1024 * 1024)
+                MAX_BULK_IMPORT_BYTES / (1024 * 1024)
             )));
         }
     }
@@ -234,37 +340,46 @@ pub async fn start_import(
         .filter(|s| !s.is_empty())
         .collect();
 
-    let mut reader = csv::ReaderBuilder::new()
-        .flexible(true)
-        .from_reader(raw.as_slice());
-    let headers = reader
-        .headers()
-        .map_err(|e| AppError::BadRequest(format!("Invalid CSV: {e}")))?
-        .clone();
-    if !headers.iter().any(|h| h == "title") || !headers.iter().any(|h| h == "status") {
-        return Err(AppError::BadRequest(
-            "Not a recognised CMS LCD export - missing 'title' or 'status' column".into(),
-        ));
-    }
+    let lower_name = filename.as_deref().unwrap_or("").to_lowercase();
+    let is_mdb = lower_name.ends_with(".mdb")
+        || lower_name.ends_with(".accdb")
+        || (!lower_name.ends_with(".csv") && looks_like_jet_database(&raw));
+
+    let all_rows = if is_mdb {
+        // jetdb only opens by path; write the buffered upload out once. The
+        // parse itself is blocking file I/O against a file that can run over
+        // 100 MB, so it runs on a blocking thread rather than tying up an
+        // async worker for however long that takes.
+        let mut tmp = tempfile::NamedTempFile::new()
+            .map_err(|e| AppError::Internal(format!("Could not stage upload: {e}")))?;
+        tmp.write_all(&raw)
+            .map_err(|e| AppError::Internal(format!("Could not stage upload: {e}")))?;
+        let path = tmp.path().to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let rows = read_mdb_rows(&path);
+            drop(tmp); // keep the tempfile alive until parsing finishes
+            rows
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("Import task failed: {e}")))??
+    } else {
+        read_csv_rows(&raw)?
+    };
 
     let mut docs: Vec<ImportedDoc> = Vec::new();
     let mut skipped = 0usize;
-    for result in reader.records() {
-        let Ok(record) = result else {
-            skipped += 1;
-            continue;
-        };
-        let status = field(&headers, &record, "status").to_uppercase();
+    for row in &all_rows {
+        let status = field(row, "status").to_uppercase();
         if !wanted_status.contains(&status) {
             skipped += 1;
             continue;
         }
-        let title_lower = field(&headers, &record, "title").to_lowercase();
+        let title_lower = field(row, "title").to_lowercase();
         if !keywords.is_empty() && !keywords.iter().any(|k| title_lower.contains(k.as_str())) {
             skipped += 1;
             continue;
         }
-        let doc = build_document(&headers, &record);
+        let doc = build_document(row);
         if doc.content.trim().is_empty() {
             skipped += 1;
             continue;
@@ -445,16 +560,18 @@ pub fn router() -> Router<AppState> {
 mod tests {
     use super::*;
 
+    fn one_row(csv_body: &str) -> LcdRow {
+        let rows = read_csv_rows(csv_body.as_bytes()).unwrap();
+        rows.into_iter().next().unwrap()
+    }
+
     #[test]
     fn strips_markup_from_title_as_well_as_body_fields() {
-        let mut reader = csv::ReaderBuilder::new().from_reader(
+        let row = one_row(
             "lcd_id,title,indication,status\n\
-             33967,Vitamin B<sub>12</sub> Injections,<p>Covered when medically necessary.</p>,A\n"
-                .as_bytes(),
+             33967,Vitamin B<sub>12</sub> Injections,<p>Covered when medically necessary.</p>,A\n",
         );
-        let headers = reader.headers().unwrap().clone();
-        let record = reader.records().next().unwrap().unwrap();
-        let doc = build_document(&headers, &record);
+        let doc = build_document(&row);
         // A tag boundary always becomes a space (see strip_html), even an
         // inline one like <sub> - a harmless extra space here is the
         // trade-off for never running two list items or paragraphs
@@ -465,14 +582,11 @@ mod tests {
 
     #[test]
     fn adjacent_list_items_stay_separated_instead_of_running_together() {
-        let mut reader = csv::ReaderBuilder::new().from_reader(
+        let row = one_row(
             "lcd_id,title,indication,status\n\
-             33252,Test,<p>Covered:</p><ul><li>Condition A</li><li>Condition B</li></ul>,A\n"
-                .as_bytes(),
+             33252,Test,<p>Covered:</p><ul><li>Condition A</li><li>Condition B</li></ul>,A\n",
         );
-        let headers = reader.headers().unwrap().clone();
-        let record = reader.records().next().unwrap().unwrap();
-        let doc = build_document(&headers, &record);
+        let doc = build_document(&row);
         assert!(
             doc.content.contains("Condition A") && doc.content.contains("Condition B"),
             "content: {}",
@@ -487,14 +601,11 @@ mod tests {
 
     #[test]
     fn decodes_entities_beyond_the_five_basic_ones() {
-        let mut reader = csv::ReaderBuilder::new().from_reader(
+        let row = one_row(
             "lcd_id,title,indication,status\n\
-             33252,Test,HbA1c &ge; 9&#37; and age &lt; 65 &mdash; the patient&rsquo;s history,A\n"
-                .as_bytes(),
+             33252,Test,HbA1c &ge; 9&#37; and age &lt; 65 &mdash; the patient&rsquo;s history,A\n",
         );
-        let headers = reader.headers().unwrap().clone();
-        let record = reader.records().next().unwrap().unwrap();
-        let doc = build_document(&headers, &record);
+        let doc = build_document(&row);
         assert!(
             doc.content.contains("HbA1c ≥ 9% and age < 65"),
             "content: {}",
@@ -505,5 +616,31 @@ mod tests {
             "content: {}",
             doc.content
         );
+    }
+
+    #[test]
+    fn recognises_a_jet_database_by_its_signature_regardless_of_filename() {
+        let mut raw = vec![0u8; 4];
+        raw.extend_from_slice(b"Standard Jet DB");
+        assert!(looks_like_jet_database(&raw));
+
+        let mut ace = vec![0u8; 4];
+        ace.extend_from_slice(b"Standard ACE DB");
+        assert!(looks_like_jet_database(&ace));
+
+        assert!(!looks_like_jet_database(b"lcd_id,title,status\n"));
+    }
+
+    #[test]
+    fn converts_an_access_timestamp_to_the_csv_exports_date_format() {
+        // 2015-10-01, the same date the CSV path renders as
+        // "2015-10-01 00:00:00" (see the module doc's worked example).
+        let days_since_1899_12_30 = 42278.0;
+        assert_eq!(
+            mdb_value_to_string(&jetdb::Value::Timestamp(days_since_1899_12_30)),
+            "2015-10-01 00:00:00"
+        );
+        assert_eq!(mdb_value_to_string(&jetdb::Value::Null), "");
+        assert_eq!(mdb_value_to_string(&jetdb::Value::Long(33252)), "33252");
     }
 }

@@ -133,8 +133,9 @@ async fn main() -> anyhow::Result<()> {
         // import) stream through handlers that each enforce their own byte
         // cap; axum's 2 MB default would reject them long before that. Keep a
         // generous ceiling rather than disabling the limit outright - above
-        // the highest real app-level cap (the LCD bulk-import CSV, 100 MB).
-        .layer(axum::extract::DefaultBodyLimit::max(105 * 1024 * 1024))
+        // the highest real app-level cap (the LCD bulk import, CSV or the
+        // raw .mdb/.accdb CMS generates it from, 180 MB).
+        .layer(axum::extract::DefaultBodyLimit::max(185 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

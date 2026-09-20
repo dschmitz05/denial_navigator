@@ -665,13 +665,18 @@ add("/api/v1/knowledge/reindex",
                         "stopped.",
             body=jbody({"limit": I(default=25)})))
 add("/api/v1/knowledge/lcd-import",
-    post=op("Stage a CMS bulk LCD CSV export for import (manager+)", "knowledge",
-            description="Parses the CSV, splits it into one document per LCD "
-                        "(CMS's export is a bulk file, not a single policy), "
-                        "and stages the filtered result server-side. Returns "
-                        "a job_id; call POST /knowledge/lcd-import/{job_id}/batch "
-                        "repeatedly to actually index them. Max 100 MB. "
-                        "Defaults to status=A (active) only.",
+    post=op("Stage a CMS bulk LCD export for import (manager+)", "knowledge",
+            description="Accepts either format CMS publishes the bulk export "
+                        "in - a CSV, or the raw .mdb/.accdb Access database "
+                        "it was generated from (detected from the filename, "
+                        "or the Jet/ACE file signature if that's missing or "
+                        "doesn't say .csv/.mdb/.accdb). Splits it into one "
+                        "document per LCD (CMS's export is a bulk file, not "
+                        "a single policy) and stages the filtered result "
+                        "server-side. Returns a job_id; call POST "
+                        "/knowledge/lcd-import/{job_id}/batch repeatedly to "
+                        "actually index them. Max 180 MB. Defaults to "
+                        "status=A (active) only.",
             params=[{"name": "status", "in": "query", "schema": S(default="A")},
                     {"name": "keyword", "in": "query", "schema": S(),
                      "description": "Comma-separated, OR'd, matched against the LCD title."},

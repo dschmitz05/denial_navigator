@@ -5,10 +5,11 @@ const API_BASE = '/api/v1'
 type BatchResult = { title: string; status: string; error?: string }
 type Stage = 'idle' | 'staging' | 'running' | 'done' | 'error'
 
-// CMS's bulk LCD export is one CSV with a row per policy - the single-file
-// upload elsewhere on this page treats whatever it's given as ONE document
-// to chunk and embed, so uploading that export as-is would mix every LCD
-// nationwide into one incoherent document. This stages it server-side
+// CMS's bulk LCD export - a CSV, or the raw .mdb/.accdb Access database it
+// was generated from - has a row per policy. The single-file upload
+// elsewhere on this page treats whatever it's given as ONE document to chunk
+// and embed, so uploading that export as-is would mix every LCD nationwide
+// into one incoherent document. This stages it server-side
 // (POST /knowledge/lcd-import) and then drives the batch-processing endpoint
 // (POST /knowledge/lcd-import/{job_id}/batch) in a loop, the same
 // call-repeatedly-until-done shape as the existing "Re-index" action.
@@ -75,18 +76,19 @@ export default function LcdImportPanel({ onDone }: { onDone: () => void }) {
     <div style={{
       padding: 20, background: 'var(--gray-50)', borderRadius: 8, marginBottom: 24, border: '1px solid var(--border)',
     }}>
-      <h4 style={{ marginTop: 0, fontSize: '0.95rem', marginBottom: 4 }}>Bulk import LCDs from a CMS CSV export</h4>
+      <h4 style={{ marginTop: 0, fontSize: '0.95rem', marginBottom: 4 }}>Bulk import LCDs from a CMS export</h4>
       <p style={{ fontSize: '0.8rem', color: 'var(--gray-500)', marginTop: 0, marginBottom: 16 }}>
-        CMS's bulk LCD export has one row per policy. This splits it into one document per LCD and indexes each
-        separately, instead of treating the whole file as a single document.
+        CMS's bulk LCD export - the CSV or the .mdb/.accdb Access database it was generated from - has one row per
+        policy. This splits it into one document per LCD and indexes each separately, instead of treating the
+        whole file as a single document.
       </p>
 
       {(stage === 'idle' || stage === 'error') && (
         <>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 12 }}>
             <div>
-              <label style={{ fontSize: '0.8rem', fontWeight: 600, display: 'block', marginBottom: 4 }}>CSV file *</label>
-              <input type="file" accept=".csv,text/csv" className="form-input" style={{ width: '100%' }}
+              <label style={{ fontSize: '0.8rem', fontWeight: 600, display: 'block', marginBottom: 4 }}>CSV or Access database (.mdb/.accdb) *</label>
+              <input type="file" accept=".csv,text/csv,.mdb,.accdb" className="form-input" style={{ width: '100%' }}
                      onChange={e => setFile(e.target.files?.[0] || null)} />
             </div>
             <div>
