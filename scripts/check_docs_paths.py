@@ -28,8 +28,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # Referenced but not expected to exist in a fresh checkout: generated at
 # runtime, an example/placeholder value, or a path outside this repo.
 ALLOWLIST = {
+    ".env",
     "certs/tls.crt",
     "certs/tls.key",
+    "certs-rust/",
+    "certs-rust/tls.crt",
+    "certs-rust/tls.key",
     "your-cert.pem",
     "your-key.pem",
     "database/backups/denial_navigator_20260906.sql.gz",
