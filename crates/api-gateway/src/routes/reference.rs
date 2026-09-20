@@ -277,9 +277,18 @@ fn parse_csv(raw: &[u8], kind: &str) -> (Vec<ParsedRow>, Vec<RowError>, i64) {
 
     let mut header: HashMap<&str, usize> = HashMap::new();
     for (i, cell) in rows[0].iter().enumerate() {
-        let name = cell.trim().to_lowercase();
+        let mut name = cell.trim().to_lowercase();
         if name.is_empty() {
             continue;
+        }
+        // CMS's published ICD-10/HCPCS files annotate headers with the
+        // revision, e.g. "SHORT DESCRIPTION (VALID ICD-10 FY2027)" - strip a
+        // trailing parenthetical before matching so next year's file, with a
+        // different fiscal year in the same spot, still recognises the
+        // column instead of silently falling back to positional mapping.
+        if let Some(paren) = name.find('(') {
+            name.truncate(paren);
+            name = name.trim().to_string();
         }
         if let Some(field) = alias_field(&name) {
             if !header.contains_key(field) {
@@ -1132,4 +1141,31 @@ pub fn router() -> Router<AppState> {
         .route("/{kind}/delete", post(reference_delete))
         .route("/{kind}/clear", post(reference_clear))
         .route("/ncci/{kind}/import", post(ncci_import))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn header_with_a_trailing_parenthetical_annotation_still_matches() {
+        // CMS's published ICD-10/HCPCS files annotate headers with the
+        // revision year, e.g. "SHORT DESCRIPTION (VALID ICD-10 FY2027)",
+        // which used to fail exact-string alias matching and silently fall
+        // back to positional mapping - misaligning any trailing column (like
+        // "NF EXCL") into effective_date and rejecting every row where it
+        // held a non-date value.
+        let csv = "CODE,SHORT DESCRIPTION (VALID ICD-10 FY2027),LONG DESCRIPTION (VALID ICD-10 FY2027),NF EXCL\n\
+                    A000,Cholera due to Vibrio cholerae,Cholera due to Vibrio cholerae 01,Y\n\
+                    A001,Cholera due to Vibrio cholerae eltor,Cholera due to Vibrio cholerae 01 eltor,\n";
+        let (valid, errors, rows_parsed) = parse_csv(csv.as_bytes(), "icd10");
+        assert!(
+            errors.is_empty(),
+            "NF EXCL must not be mistaken for a date column: {errors:?}"
+        );
+        assert_eq!(rows_parsed, 2);
+        assert_eq!(valid.len(), 2);
+        assert_eq!(valid[0].code, "A000");
+        assert_eq!(valid[0].description, "Cholera due to Vibrio cholerae");
+    }
 }
