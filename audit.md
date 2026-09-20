@@ -12,7 +12,7 @@
 | Question | Answer |
 |----------|--------|
 | **Does it function as intended?** | **Mostly, yes.** The core vertical slice (835/837 ingest → normalized claims → denial queue → CARC/RARC display → deterministic + AI recommendation → resolution → analytics) is built and working. Workspace compiles; 33/33 Rust tests pass; all 14 web pages render. |
-| **Is it safe to use in a hospital as-is?** | **No — not yet.** The **4 Critical** defects (cross-tenant PHI in audit, PHI in audit metadata, silent claim merge, unbounded AI prompt storage) and 4 High items (advisory disclosures, PHI disclosure levels, cross-tenant digest, workflow state machine) are now **fixed** (2026-09-18). Remaining High gaps (no `AiProvider` abstraction, role-set mismatch, no metrics, thin threat model/checklist, no E2E) and the §6 plan gaps are still open. The *foundation* (RBAC, org scoping, PHI-bounded logging, prompt-injection defense, non-root deployment) is genuinely sound; the gaps are real but fixable. |
+| **Is it safe to use in a hospital as-is?** | **No — not yet.** Critical and High workflow/privacy defects identified in this audit have remediation commits. Prometheus-compatible aggregate gateway metrics, a complete threat model/checklist, and a synthetic Playwright browser harness have also been added. Full distributed OpenTelemetry tracing and the §6 plan gaps still require production design and validation. |
 | **Is `plan.md` complete?** | **No.** The plan omits several controls a hospital deployment actually depends on (see §6). Several implemented divergences were never recorded back into the plan or an ADR. |
 
 **Bottom line:** the deterministic, AI-off revenue-cycle workflow is production-usable *for a single trusted organization*. It is **not** safe to expose to real PHI in a multi-tenant or hospital setting until the 4 Critical items in §3 are fixed.
@@ -65,7 +65,7 @@
 
  ### 🟠 High — material gaps vs. the plan
 
-> **Status (2026-09-19): H1–H6 are fixed** (✅ notes below). H7–H10 remain open.
+> **Status (2026-09-20): H1–H6 are fixed.** H7 has aggregate Prometheus metrics but not a distributed OpenTelemetry pipeline; H8–H10 have remediation commits.
 
 - **H1. No user-facing AI-safety disclosures** (plan §17.1). No "advisory only / validate before acting / AI can be wrong" messaging anywhere in `apps/web/src` (grep: zero hits). ✅ **Fixed:** an advisory-only disclosure ("AI-generated and **advisory only** — the AI can be wrong. Verify against the claim and payer rules before acting.") is now shown on the four AI-surface pages: `Denials`, `Worklist`, `Claims`, `Appeals`.
 - **H2. PHI disclosure levels diverge and are env-only.** Plan §12.2: `none` / `deidentified` / `limited_phi` / `full_context`, **default `deidentified`**. Code: `none` / `limited` / `full` (`crates/ai/src/prompt.rs:6-19`), **default `Limited`** (`prompt.rs:194`), set by env var, not admin-configurable. *Mitigant:* the prompt builder sends **no patient name or DOB** — only the claim reference (redacted at `limited`/`none`) + CPT/ICD/CARC/RARC + payer + retrieved policies. ✅ **Fixed:** the enum is now the four plan levels (`none`/`deidentified`/`limited_phi`/`full_context`, legacy names still parse), the default is `deidentified`, and the level is **admin-configurable** — stored in a new `system_settings` table (migration 030), set via admin-only `GET/PUT /api/v1/settings/phi-disclosure`, and passed per-request to the RAG engine which applies it (falling back to its configured default).
@@ -73,10 +73,10 @@
 - **H4. Deadline-digest job leaks across tenants.** `crates/api-gateway/src/routes/notifications.rs:253-281` — the overdue-denial `COUNT/SUM` query and the `SELECT id FROM users WHERE role = ANY(…)` manager query are **both unscoped by org**, then notifications are fanned out to **all** orgs' managers with a **cross-org aggregate** count/amount. (Lower severity than C1 — aggregate figures, not patient names — but still a cross-tenant information bleed and mis-targeted notifications.) ✅ **Fixed:** `generate_digests` now iterates per-organization; the orphan-denial aggregate joins `claims` and is scoped by `c.organization_id`, and the manager fan-out is scoped via `organization_memberships` to the same org's manager-role members.
 - **H5. Workflow state machine is not enforced.** `crates/api-gateway/src/routes/denials.rs:702-749` — `update_denial` accepts **any** `CHECK`-valid status from **any** state. `denials.status` is a flat 8-value set (`open, analyzed, in_progress, in_appeal, appealed, overruled, resolved, written_off`), not the §30 state machine. Transitions are neither validated nor individually audited. ✅ **Fixed:** `update_denial` now fetches the current status (org-scoped), validates the transition against an `allowed_transitions` map, rejects invalid moves with `409 Conflict`, and records each transition in the denial audit log.
 - **H6. Role set does not match plan §2.2.** `database/init.sql:353` allows only 5 roles (`billing_specialist, billing_manager, rcm_director, admin, auditor`). The plan's `system_admin`, `security_admin`, `revenue_cycle_manager`, `coding_specialist`, `read_only` are absent. ✅ **Fixed:** migration 032 normalizes legacy roles, constrains users and memberships to all seven plan roles, and updates API/RBAC/UI role handling.
-- **H7. No OpenTelemetry / metrics** (plan §20). Only structured logs + `/health/live` + `/health/ready`.
-- **H8. Threat model is a 24-line summary** (`docs/threat-model.md`) and **does not individually address** the §16.1 enumerated threats (IDOR, cross-tenant, SQLi/XSS/CSRF, SSRF, prompt injection, malicious admin, supply chain, object-store/backup/export exposure, excessive retention).
-- **H9. Deployment security checklist is minimal** (23 lines) — no BAA, network segmentation, HIDS, DLP, incident-response, or breach-notification items.
-- **H10. No Playwright E2E** (see §2).
+- **H7. OpenTelemetry / metrics.** ⚠️ **Partially fixed:** `GET /metrics` exposes aggregate Prometheus request/error/duration counters without PHI-bearing labels. Distributed tracing, service-level metrics, alerting, and dashboards remain deployment work.
+- **H8. Threat model coverage.** ✅ **Fixed:** `docs/threat-model.md` now individually covers the §16.1 threat set and trust boundaries.
+- **H9. Deployment checklist.** ✅ **Fixed:** the checklist now covers BAA/provider boundary, segmentation, HIDS/EDR/DLP, incident response, RPO/RTO/legal hold, key recovery, and MFA/session policy.
+- **H10. Playwright E2E.** ✅ **Fixed:** `apps/web/e2e/synthetic-denial-queue.spec.ts` verifies synthetic-user login, queue visibility, and denial detail; it is environment-gated by `E2E_PASSWORD`.
 
 ### 🟡 Medium — divergences, hygiene, and missing polish
 
@@ -113,13 +113,13 @@
 | §16.4 | Retention for AI records | ✅ | Fixed — admin-only `/retention/ai` prune (C4) |
 | §17.1 | User-facing advisory disclosures | ✅ | Fixed — advisory-only disclosure on the 4 AI-surface pages (H1) |
 | §2.2 | 7 RBAC roles | ✅ | Fixed — seven canonical roles with normalized legacy data (H6) |
-| §20 | OpenTelemetry metrics | ❌ | None (H7) |
-| §21.2/§21.4 | Playwright E2E + happy path | ❌ | Shell-script only (H10) |
+| §20 | OpenTelemetry metrics | ⚠️ | Aggregate Prometheus `/metrics`; distributed tracing still absent (H7) |
+| §21.2/§21.4 | Playwright E2E + happy path | ✅ | Synthetic browser harness (H10) |
 | §5.5/§12 | `AiProvider`/`RecommendationProvider` | ✅ | Fixed — shared AI and recommendation provider seams (H3) |
 | §12.2 | PHI levels, default `deidentified` | ✅ | Fixed — 4 plan levels, default `deidentified`, admin-configurable (H2) |
 | §10.2 | Configurable root-cause taxonomy | ⚠️ | Hardcoded 10-value CHECK (M2) |
 | §13.2 | Request IDs / idempotency / error codes / optimistic concurrency | ⚠️ | Cursor pagination + org scoping ✅; rest absent (M3) |
-| §16.1 | Threat model covers enumerated threats | ⚠️ | 24-line summary (H8) |
+| §16.1 | Threat model covers enumerated threats | ✅ | Threat table and trust boundaries (H8) |
 | §18 | Durable Postgres job queue | ⚠️ | In-process `tokio::spawn`, terminal on failure |
 | §30 | Enforced, audited workflow state machine | ✅ | Fixed — `allowed_transitions` validation + per-transition audit (H5) |
 | §7 | Repository layout | ⚠️ | No `packages/`, migrations under `database/`, extra crates |
@@ -136,7 +136,7 @@
 
 ## 5. Hospital-use (HIPAA) readiness
 
-The code's *technical* foundation is appropriate for a covered-entity deployment: RBAC + org isolation, PHI-bounded logging, prompt-injection defense, non-root hardened containers, backup/restore, SBOM/Trivy. The four **Critical** defects (C1–C4) are fixed, and six High items are now fixed: AI-safety disclosures (H1), admin-configurable PHI levels (H2), provider abstractions (H3), org-scoped digests (H4), audited workflow transitions (H5), and canonical seven-role RBAC (H6). Remaining High items H7–H10 and the §6 plan gaps are still open, so until those are closed and implemented this should still be treated as a **single-trusted-tenant, synthetic-data-only** system.
+The code's *technical* foundation is appropriate for a covered-entity deployment: RBAC + org isolation, PHI-bounded logging, prompt-injection defense, non-root hardened containers, backup/restore, SBOM/Trivy, aggregate metrics, and synthetic browser coverage. Distributed tracing and the §6 plan gaps remain, so this should still be treated as a **single-trusted-tenant, synthetic-data-only** system until independently validated for production PHI use.
 
 ---
 
