@@ -38,6 +38,7 @@ function Layout({ children, showNav = true }: LayoutProps) {
     ...(can.managePlaybooks() ? [{ path: '/playbooks', label: 'Playbooks', icon: 'PB' }] : []),
     ...(can.viewAudit() ? [{ path: '/audit', label: 'Audit Log', icon: 'AU' }] : []),
     ...(can.manageUsers() ? [{ path: '/users', label: 'Users', icon: 'US' }] : []),
+    ...(can.manageOrganizations() ? [{ path: '/organizations', label: 'Organizations', icon: 'OR' }] : []),
     { path: '/profile', label: 'My Profile', icon: 'ME' },
     { path: '/settings', label: 'Settings', icon: 'ST' },
   ]

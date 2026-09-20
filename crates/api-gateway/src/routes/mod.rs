@@ -11,6 +11,7 @@ pub mod ingestion;
 pub mod interactions;
 pub mod knowledge;
 pub mod notifications;
+pub mod organizations;
 pub mod overpayments;
 pub mod payers;
 pub mod playbooks;
@@ -41,6 +42,7 @@ pub fn api_router() -> Router<AppState> {
         .nest("/audit", audit::router())
         .nest("/users", users::router())
         .nest("/notifications", notifications::router())
+        .nest("/organizations", organizations::router())
         .nest("/playbooks", playbooks::router())
         .nest("/write-offs", write_offs::router())
         .nest("/overpayments", overpayments::router())

@@ -106,6 +106,7 @@ ROUTE_PREFIXES = {
     "reference": "/api/v1/reference",
     "audit": "/api/v1/audit",
     "users": "/api/v1/users",
+    "organizations": "/api/v1/organizations",
     "notifications": "/api/v1/notifications",
     "playbooks": "/api/v1/playbooks",
     "system": "/api/v1/system",
@@ -764,6 +765,23 @@ add("/api/v1/users/{user_id}/totp/reset",
     post=op("Clear a user's enrolled TOTP secret (admin)", "users",
             params=[path_param("user_id")]))
 
+# ── organizations (admin only, platform-level) ──────────────────────────
+add("/api/v1/organizations",
+    get=op("List organizations, with member counts (admin)", "organizations"),
+    post=op("Create an organization and its first system_admin user (admin)",
+            "organizations",
+            description="The only way to provision a new tenant - nothing "
+                        "else in this app can create a membership in an "
+                        "organization other than the caller's own.",
+            body=jbody({"slug": S(description="lowercase letters, digits, "
+                                              "and hyphens only"),
+                        "name": S(),
+                        "admin_username": S(), "admin_email": S(),
+                        "admin_password": S(), "admin_full_name": S()},
+                       ["slug", "name", "admin_username", "admin_email",
+                        "admin_password"]),
+            responses=CREATED))
+
 # ── notifications ────────────────────────────────────────────────────────
 add("/api/v1/notifications",
     get=op("Your notifications", "notifications",
@@ -966,6 +984,7 @@ doc = {
             ("reference", "CARC/RARC/ICD-10/CPT/HCPCS/modifier code lists"),
             ("audit", "HIPAA access log (manager+)"),
             ("users", "User administration (admin)"),
+            ("organizations", "Tenant provisioning (admin)"),
             ("notifications", "Deadline digests and escalations"),
             ("playbooks", "Manager-curated deterministic resolution rules"),
             ("write-offs", "Write-off approval above the organization threshold"),

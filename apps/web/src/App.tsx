@@ -14,6 +14,7 @@ import Settings from './pages/Settings'
 import Upload from './pages/Upload'
 import Audit from './pages/Audit'
 import Users from './pages/Users'
+import Organizations from './pages/Organizations'
 import Profile from './pages/Profile'
 import Insights from './pages/Insights'
 import Playbooks from './pages/Playbooks'
@@ -94,6 +95,7 @@ function AppContent() {
       <Route path="/unanswered" element={<ProtectedRoute><UnansweredClaims /></ProtectedRoute>} />
       <Route path="/audit" element={<ProtectedRoute roles={MANAGER_UP}><Audit /></ProtectedRoute>} />
       <Route path="/users" element={<ProtectedRoute roles={['system_admin', 'security_admin']}><Users /></ProtectedRoute>} />
+      <Route path="/organizations" element={<ProtectedRoute roles={['system_admin', 'security_admin']}><Organizations /></ProtectedRoute>} />
       <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
       <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
       <Route path="*" element={<Navigate to="/" replace />} />

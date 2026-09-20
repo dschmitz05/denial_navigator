@@ -86,6 +86,8 @@ export interface ApiOperations {
   "POST /api/v1/notifications/generate-digests": Record<string, never>;
   "POST /api/v1/notifications/read-all": Record<string, never>;
   "POST /api/v1/notifications/{notification_id}/read": { path: { "notification_id": string } };
+  "GET /api/v1/organizations": Record<string, never>;
+  "POST /api/v1/organizations": { body: { "slug": string; "name": string; "admin_username": string; "admin_email": string; "admin_password": string; "admin_full_name"?: string } };
   "GET /api/v1/overpayments": { query?: { "status"?: "identified" | "refunded" | "recouped" | "disputed" } };
   "POST /api/v1/overpayments/{id}/status": { path: { "id": string }; body: { "status": "identified" | "refunded" | "recouped" | "disputed"; "note"?: string } };
   "GET /api/v1/payers": Record<string, never>;

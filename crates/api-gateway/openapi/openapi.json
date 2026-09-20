@@ -57,6 +57,10 @@
       "description": "User administration (admin)"
     },
     {
+      "name": "organizations",
+      "description": "Tenant provisioning (admin)"
+    },
+    {
       "name": "notifications",
       "description": "Deadline digests and escalations"
     },
@@ -4636,6 +4640,107 @@
         "responses": {
           "200": {
             "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/organizations": {
+      "get": {
+        "summary": "List organizations, with member counts (admin)",
+        "tags": [
+          "organizations"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "post": {
+        "summary": "Create an organization and its first system_admin user (admin)",
+        "tags": [
+          "organizations"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "The only way to provision a new tenant - nothing else in this app can create a membership in an organization other than the caller's own.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "slug": {
+                    "type": "string",
+                    "description": "lowercase letters, digits, and hyphens only"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "admin_username": {
+                    "type": "string"
+                  },
+                  "admin_email": {
+                    "type": "string"
+                  },
+                  "admin_password": {
+                    "type": "string"
+                  },
+                  "admin_full_name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "slug",
+                  "name",
+                  "admin_username",
+                  "admin_email",
+                  "admin_password"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
             "content": {
               "application/json": {
                 "schema": {

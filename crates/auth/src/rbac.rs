@@ -381,6 +381,9 @@ fn permissions(resource: &str) -> Option<(&'static [&'static str], &'static [&'s
         "overpayments" => (ALL_ROLES, MANAGER_UP),
         "payers" => (ALL_ROLES, MANAGER_UP),
         "users" => (ADMIN_ONLY, ADMIN_ONLY),
+        // Platform-level: creating or listing organizations is not scoped to
+        // the caller's own organization the way every other resource is.
+        "organizations" => (ADMIN_ONLY, ADMIN_ONLY),
         "auth" => (ALL_ROLES, ADMIN_ONLY),
         "system" => (ALL_ROLES, NOBODY),
         "retention" => (ADMIN_ONLY, ADMIN_ONLY),
@@ -854,6 +857,30 @@ mod tests {
             "/api/v1/settings/write-off-approval"
         )
         .is_err());
+    }
+
+    #[test]
+    fn creating_an_organization_is_admin_only() {
+        for role in ["system_admin", "security_admin"] {
+            assert!(authorize(&user(role), "POST", "/api/v1/organizations").is_ok());
+            assert!(authorize(&user(role), "GET", "/api/v1/organizations").is_ok());
+        }
+        for role in [
+            "revenue_cycle_manager",
+            "billing_specialist",
+            "coding_specialist",
+            "auditor",
+            "read_only",
+        ] {
+            assert!(
+                authorize(&user(role), "POST", "/api/v1/organizations").is_err(),
+                "{role} must not create organizations"
+            );
+            assert!(
+                authorize(&user(role), "GET", "/api/v1/organizations").is_err(),
+                "{role} must not list organizations"
+            );
+        }
     }
 
     fn trusted() -> Vec<IpNet> {
