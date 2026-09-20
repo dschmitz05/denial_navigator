@@ -82,6 +82,10 @@ const BODY_FIELDS: &[(&str, &str)] = &[
 struct ImportedDoc {
     title: String,
     content: String,
+    /// CMS's determination_number, or lcd_id when that's blank (common in
+    /// this export). The identity to re-import against - unlike title,
+    /// which different jurisdictions' LCDs can legitimately share.
+    external_id: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -150,6 +154,7 @@ fn build_document(row: &LcdRow) -> ImportedDoc {
     } else {
         det_num
     };
+    let external_id = display_id.to_string();
     let eff = field(row, "orig_det_eff_date");
     let rev = field(row, "rev_eff_date");
     let mut meta_bits = Vec::new();
@@ -180,6 +185,7 @@ fn build_document(row: &LcdRow) -> ImportedDoc {
     ImportedDoc {
         title,
         content: parts.join("\n\n"),
+        external_id,
     }
 }
 
@@ -488,30 +494,45 @@ pub async fn process_batch(
     for doc in &docs[start..end] {
         // Re-importing the same export (the same file twice, or an
         // overlapping keyword/status filter run again) must not create a
-        // second copy of an LCD already indexed under this title -
-        // re-ingesting an existing document's id replaces its chunks rather
+        // second copy of an LCD already indexed. Matched by CMS's
+        // determination number/lcd_id (stored in metadata), not title -
+        // different jurisdictions legitimately publish distinct LCDs under
+        // the same title, and those must stay separate documents.
+        // Re-ingesting an existing document's id replaces its chunks rather
         // than duplicating the document itself.
         let existing = sqlx::query(
             "SELECT id FROM knowledge_documents \
              WHERE organization_id = $1 AND source_type = 'cms_lcd' \
-               AND title = $2 AND status != 'archived'",
+               AND metadata->>'lcd_external_id' = $2 AND status != 'archived'",
         )
         .bind(organization_id)
-        .bind(&doc.title)
+        .bind(&doc.external_id)
         .fetch_optional(&state.pool)
         .await
         .map_err(AppError::Db)?;
 
         let doc_id: Uuid = if let Some(row) = existing {
-            row.try_get("id")
-                .map_err(|e| AppError::Internal(e.to_string()))?
+            let id: Uuid = row
+                .try_get("id")
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            // CMS revises titles occasionally; keep it current on re-import.
+            sqlx::query("UPDATE knowledge_documents SET title = $2 WHERE id = $1")
+                .bind(id)
+                .bind(&doc.title)
+                .execute(&state.pool)
+                .await
+                .map_err(AppError::Db)?;
+            id
         } else {
             let row = sqlx::query(
-                "INSERT INTO knowledge_documents (organization_id, title, source_type, status) \
-                 VALUES ($1, $2, 'cms_lcd', 'pending') RETURNING id",
+                "INSERT INTO knowledge_documents \
+                    (organization_id, title, source_type, status, metadata) \
+                 VALUES ($1, $2, 'cms_lcd', 'pending', jsonb_build_object('lcd_external_id', $3::text)) \
+                 RETURNING id",
             )
             .bind(organization_id)
             .bind(&doc.title)
+            .bind(&doc.external_id)
             .fetch_one(&state.pool)
             .await
             .map_err(AppError::Db)?;
@@ -583,6 +604,21 @@ mod tests {
     fn one_row(csv_body: &str) -> LcdRow {
         let rows = read_csv_rows(csv_body.as_bytes()).unwrap();
         rows.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn external_id_prefers_determination_number_and_falls_back_to_lcd_id() {
+        let with_det_num = one_row(
+            "lcd_id,determination_number,title,status\n\
+             33967,L33967,Vitamin B12 Injections,A\n",
+        );
+        assert_eq!(build_document(&with_det_num).external_id, "L33967");
+
+        let without_det_num = one_row(
+            "lcd_id,determination_number,title,status\n\
+             33967,,Vitamin B12 Injections,A\n",
+        );
+        assert_eq!(build_document(&without_det_num).external_id, "33967");
     }
 
     #[test]
