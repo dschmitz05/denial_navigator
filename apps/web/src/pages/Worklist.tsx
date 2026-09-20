@@ -227,7 +227,14 @@ export default function Worklist() {
   return (
     <div className="page-body">
       <AiStatusBanner />
-      <div className="filters-bar">
+      <section className="workspace-heading">
+        <div>
+          <p>Action center</p>
+          <h1>Turn recommendations into recovery.</h1>
+          <span>Prioritize queued work by expected recovery, ownership, and current outcome.</span>
+        </div>
+      </section>
+      <div className="filters-bar denials-filters">
         <select className="form-select" value={typeFilter} onChange={e => setTypeFilter(e.target.value)}>
           <option value="">All Work Types</option>
           {Object.entries(WORK_TYPES).map(([value, t]) => (
