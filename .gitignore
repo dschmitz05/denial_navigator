@@ -93,3 +93,7 @@ dropzone/
 
 # editor timestamped backups
 *.bak-*
+
+# Playwright runtime artifacts
+/apps/web/test-results/
+/apps/web/playwright-report/
