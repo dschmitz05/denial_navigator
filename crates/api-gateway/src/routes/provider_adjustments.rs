@@ -15,15 +15,8 @@ use serde_json::Value;
 use sqlx::Row;
 use uuid::Uuid;
 
+use super::scope::organization_id;
 use crate::state::AppState;
-
-fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
-    principal
-        .organization_id
-        .as_deref()
-        .and_then(|id| Uuid::parse_str(id).ok())
-        .ok_or(AppError::Forbidden)
-}
 
 fn text(value: &Value, key: &str) -> Option<String> {
     value

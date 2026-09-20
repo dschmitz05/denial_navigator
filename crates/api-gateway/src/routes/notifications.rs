@@ -16,6 +16,7 @@ use serde::Deserialize;
 use sqlx::Row;
 use uuid::Uuid;
 
+use super::scope::organization_id;
 use crate::state::AppState;
 
 /// system/revenue-cycle administrators - the roles an unowned overdue
@@ -44,14 +45,6 @@ fn me(principal: &Principal) -> Result<Uuid, AppError> {
         .as_deref()
         .and_then(|s| Uuid::parse_str(s).ok())
         .ok_or(AppError::Unauthorized)
-}
-
-fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
-    principal
-        .organization_id
-        .as_deref()
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .ok_or(AppError::Forbidden)
 }
 
 /// `12345.6` -> `"12,345.60"`, matching Python's `{:,.2f}`.

@@ -16,16 +16,9 @@ use serde_json::Value;
 use sqlx::Row;
 use uuid::Uuid;
 
+use super::scope::organization_id;
 use crate::routes::appeals::record_audit;
 use crate::state::AppState;
-
-fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
-    principal
-        .organization_id
-        .as_deref()
-        .and_then(|id| Uuid::parse_str(id).ok())
-        .ok_or(AppError::Forbidden)
-}
 
 fn is_unique_violation(e: &sqlx::Error) -> bool {
     matches!(e, sqlx::Error::Database(db) if db.code().is_some_and(|c| c == "23505"))

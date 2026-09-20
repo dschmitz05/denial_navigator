@@ -16,6 +16,7 @@ use denial_common::error::AppError;
 use serde::Deserialize;
 use uuid::Uuid;
 
+use super::scope::organization_id;
 use crate::state::AppState;
 
 /// The plan §12.2 level names. Kept in sync with
@@ -95,14 +96,6 @@ pub async fn set_phi_disclosure(
     .await?;
 
     Ok(Json(serde_json::json!({ "phi_disclosure_level": level })))
-}
-
-fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
-    principal
-        .organization_id
-        .as_deref()
-        .and_then(|id| Uuid::parse_str(id).ok())
-        .ok_or(AppError::Forbidden)
 }
 
 #[derive(Deserialize)]

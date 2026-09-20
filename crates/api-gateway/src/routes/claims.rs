@@ -10,6 +10,7 @@ use serde::Deserialize;
 use sqlx::{QueryBuilder, Row};
 use uuid::Uuid;
 
+use super::scope::organization_id;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -41,14 +42,6 @@ pub struct ListClaimsQuery {
 
 fn default_limit() -> i64 {
     50
-}
-
-fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
-    principal
-        .organization_id
-        .as_deref()
-        .and_then(|id| Uuid::parse_str(id).ok())
-        .ok_or(AppError::Forbidden)
 }
 
 pub async fn list_claims(

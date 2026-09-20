@@ -16,18 +16,11 @@ use serde_json::Value;
 use sqlx::Row;
 use uuid::Uuid;
 
+use super::scope::organization_id;
 use crate::routes::appeals::record_audit;
 use crate::state::AppState;
 
 const CHANNELS: &[&str] = &["phone", "portal", "fax", "mail", "email", "other"];
-
-fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
-    principal
-        .organization_id
-        .as_deref()
-        .and_then(|id| Uuid::parse_str(id).ok())
-        .ok_or(AppError::Forbidden)
-}
 
 /// A denial's payer-interaction history, most recent first.
 pub async fn list_interactions(

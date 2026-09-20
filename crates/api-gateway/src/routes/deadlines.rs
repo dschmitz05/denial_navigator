@@ -16,6 +16,7 @@ use serde_json::Value;
 use sqlx::Row;
 use uuid::Uuid;
 
+use super::scope::organization_id;
 use crate::routes::appeals::record_audit;
 use crate::state::AppState;
 
@@ -34,14 +35,6 @@ pub const RULE_TYPES: &[(&str, &str, &str)] = &[
         "Second-level appeal",
     ),
 ];
-
-fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
-    principal
-        .organization_id
-        .as_deref()
-        .and_then(|id| Uuid::parse_str(id).ok())
-        .ok_or(AppError::Forbidden)
-}
 
 /// The deadline that governs a recommended resolution, if any. An appeal after
 /// the payer upheld a first appeal is a second-level appeal.

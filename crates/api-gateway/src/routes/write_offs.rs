@@ -16,16 +16,9 @@ use serde::Deserialize;
 use sqlx::Row;
 use uuid::Uuid;
 
+use super::scope::organization_id;
 use crate::routes::appeals::{record_audit, refresh_claim_status};
 use crate::state::AppState;
-
-fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
-    principal
-        .organization_id
-        .as_deref()
-        .and_then(|id| Uuid::parse_str(id).ok())
-        .ok_or(AppError::Forbidden)
-}
 
 fn user_id(principal: &Principal) -> Option<Uuid> {
     principal

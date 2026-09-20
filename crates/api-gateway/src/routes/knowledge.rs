@@ -21,6 +21,7 @@ use serde::Deserialize;
 use sqlx::{QueryBuilder, Row};
 use uuid::Uuid;
 
+use super::scope::organization_id;
 use crate::state::AppState;
 
 /// Per-caller key for the in-process rate limiter, matching `ingestion`.
@@ -38,14 +39,6 @@ fn limit_key(principal: &Principal) -> String {
 
 const PDF_MAGIC: &[u8] = b"%PDF";
 const MAX_DOCUMENT_BYTES: usize = 25 * 1024 * 1024;
-
-fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
-    principal
-        .organization_id
-        .as_deref()
-        .and_then(|id| Uuid::parse_str(id).ok())
-        .ok_or(AppError::Forbidden)
-}
 
 // ── PDF / upload decoding ───────────────────────────────────────────────
 

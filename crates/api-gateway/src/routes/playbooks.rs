@@ -11,6 +11,7 @@ use serde::Deserialize;
 use sqlx::QueryBuilder;
 use uuid::Uuid;
 
+use super::scope::organization_id;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -38,13 +39,6 @@ fn manager(principal: &Principal) -> Result<(), AppError> {
         Some("revenue_cycle_manager" | "system_admin") => Ok(()),
         _ => Err(AppError::Forbidden),
     }
-}
-fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
-    principal
-        .organization_id
-        .as_deref()
-        .and_then(|id| Uuid::parse_str(id).ok())
-        .ok_or(AppError::Forbidden)
 }
 fn validate(input: &PlaybookInput) -> Result<(), AppError> {
     if input.name.trim().is_empty() || input.name.len() > 200 {

@@ -12,6 +12,7 @@ use serde::Deserialize;
 use sqlx::{Column, QueryBuilder, Row};
 use uuid::Uuid;
 
+use super::scope::organization_id;
 use crate::state::AppState;
 
 const VALID_ROLES: &[&str] = &[
@@ -82,14 +83,6 @@ fn require_roles(principal: &Principal, roles: &[&str]) -> Result<(), AppError> 
 
 fn is_self(principal: &Principal, user_id: &Uuid) -> bool {
     principal.user_id.as_deref() == Some(user_id.to_string().as_str())
-}
-
-fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
-    principal
-        .organization_id
-        .as_deref()
-        .and_then(|id| Uuid::parse_str(id).ok())
-        .ok_or(AppError::Forbidden)
 }
 
 /// Accounts are presently global identities. Until account attributes become

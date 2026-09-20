@@ -14,6 +14,7 @@ use serde::Deserialize;
 use sqlx::{QueryBuilder, Row};
 use uuid::Uuid;
 
+use super::scope::organization_id;
 use crate::state::AppState;
 
 /// Who performed an entry. Three kinds of actor end up in this table and only
@@ -39,14 +40,6 @@ pub struct AuditQuery {
 
 fn default_limit() -> i64 {
     200
-}
-
-fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
-    principal
-        .organization_id
-        .as_deref()
-        .and_then(|id| Uuid::parse_str(id).ok())
-        .ok_or(AppError::Forbidden)
 }
 
 fn opt_string(row: &sqlx::postgres::PgRow, col: &str) -> Option<String> {

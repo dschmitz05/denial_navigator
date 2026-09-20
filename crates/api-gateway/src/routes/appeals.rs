@@ -21,6 +21,7 @@ use serde::Deserialize;
 use sqlx::Row;
 use uuid::Uuid;
 
+use crate::routes::scope::organization_id;
 use crate::routes::{attachments, write_offs};
 use crate::state::AppState;
 use denial_db::pgjson::row_to_json;
@@ -99,14 +100,6 @@ fn queue_owner(principal: &Principal) -> Option<String> {
     } else {
         None
     }
-}
-
-fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
-    principal
-        .organization_id
-        .as_deref()
-        .ok_or(AppError::Forbidden)
-        .and_then(|id| Uuid::parse_str(id).map_err(|_| AppError::Forbidden))
 }
 
 fn assert_may_touch(principal: &Principal, assigned_user_id: Option<Uuid>) -> Result<(), AppError> {

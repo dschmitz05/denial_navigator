@@ -15,6 +15,7 @@ use serde_json::Value;
 use sqlx::Row;
 use uuid::Uuid;
 
+use super::scope::organization_id;
 use crate::routes::appeals::record_audit;
 use crate::state::AppState;
 
@@ -22,14 +23,6 @@ use crate::state::AppState;
 const DEFAULT_RESPONSE_DAYS: i32 = 30;
 
 const FOLLOWUP_ACTIONS: &[&str] = &["status_inquiry", "resubmitted", "payer_contact"];
-
-fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
-    principal
-        .organization_id
-        .as_deref()
-        .and_then(|id| Uuid::parse_str(id).ok())
-        .ok_or(AppError::Forbidden)
-}
 
 pub async fn list(
     State(state): State<AppState>,

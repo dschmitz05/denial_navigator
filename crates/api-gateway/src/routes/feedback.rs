@@ -16,6 +16,7 @@ use serde::Deserialize;
 use sqlx::{QueryBuilder, Row};
 use uuid::Uuid;
 
+use super::scope::organization_id;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -52,14 +53,6 @@ fn default_similar_limit() -> i64 {
 
 fn default_limit() -> i64 {
     50
-}
-
-fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
-    principal
-        .organization_id
-        .as_deref()
-        .and_then(|id| Uuid::parse_str(id).ok())
-        .ok_or(AppError::Forbidden)
 }
 
 fn f64_col(row: &sqlx::postgres::PgRow, col: &str) -> Option<f64> {

@@ -17,6 +17,7 @@ use sqlx::{QueryBuilder, Row};
 use std::collections::HashSet;
 use uuid::Uuid;
 
+use super::scope::organization_id;
 use crate::state::AppState;
 
 /// Per-caller key for the in-process rate limiter, matching `ingestion`.
@@ -42,14 +43,6 @@ pub struct ListAnalysesQuery {
 
 fn default_limit() -> i64 {
     50
-}
-
-fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
-    principal
-        .organization_id
-        .as_deref()
-        .and_then(|id| Uuid::parse_str(id).ok())
-        .ok_or(AppError::Forbidden)
 }
 
 #[derive(Deserialize)]

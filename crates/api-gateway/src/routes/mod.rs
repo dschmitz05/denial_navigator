@@ -17,6 +17,7 @@ pub mod playbooks;
 pub mod provider_adjustments;
 pub mod reference;
 pub mod retention;
+pub mod scope;
 pub mod settings;
 pub mod system;
 pub mod unanswered;

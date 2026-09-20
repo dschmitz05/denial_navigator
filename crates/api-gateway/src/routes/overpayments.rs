@@ -18,19 +18,12 @@ use serde_json::Value;
 use sqlx::Row;
 use uuid::Uuid;
 
+use super::scope::organization_id;
 use crate::routes::appeals::record_audit;
 use crate::state::AppState;
 
 /// CLP02 values meaning the payer processed and paid the claim.
 const PAID_STATUSES: &[&str] = &["1", "2", "3", "19", "20", "21"];
-
-fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
-    principal
-        .organization_id
-        .as_deref()
-        .and_then(|id| Uuid::parse_str(id).ok())
-        .ok_or(AppError::Forbidden)
-}
 
 fn text<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value

@@ -15,6 +15,7 @@ use sqlx::{QueryBuilder, Row};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+use super::scope::organization_id;
 use crate::routes::{attachments, deadlines, interactions, write_offs};
 use crate::state::AppState;
 
@@ -52,14 +53,6 @@ pub struct ListDenialsQuery {
 
 fn default_limit() -> i64 {
     50
-}
-
-fn organization_id(principal: &Principal) -> Result<Uuid, AppError> {
-    principal
-        .organization_id
-        .as_deref()
-        .and_then(|id| Uuid::parse_str(id).ok())
-        .ok_or(AppError::Forbidden)
 }
 
 fn decode_cursor(cursor: &str) -> Result<i64, AppError> {
