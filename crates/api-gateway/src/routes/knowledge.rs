@@ -46,11 +46,18 @@ const MAX_DOCUMENT_BYTES: usize = 25 * 1024 * 1024;
 /// 4xx rather than letting an empty extraction be indexed as a silently
 /// useless document. `pdf-extract` can panic on malformed input, so the call
 /// runs on a blocking thread inside `catch_unwind`.
-async fn extract_pdf_text(raw: Vec<u8>) -> Result<Vec<KnowledgeSection>, AppError> {
-    let page_text = tokio::task::spawn_blocking(move || {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            pdf_extract::extract_text_from_mem_by_pages(&raw)
-        }))
+///
+/// Falls back to OCR when the PDF has (almost) no extractable text layer -
+/// a scan or an image-only PDF, where `pdf-extract` reads glyphs, not
+/// pixels, and finds none.
+async fn extract_pdf_text(raw: Vec<u8>) -> Result<(Vec<KnowledgeSection>, bool), AppError> {
+    let page_text = tokio::task::spawn_blocking({
+        let raw = raw.clone();
+        move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                pdf_extract::extract_text_from_mem_by_pages(&raw)
+            }))
+        }
     })
     .await
     .map_err(|e| AppError::Internal(format!("PDF extraction task failed: {e}")))?
@@ -77,17 +84,104 @@ async fn extract_pdf_text(raw: Vec<u8>) -> Result<Vec<KnowledgeSection>, AppErro
         .collect();
     let chars: usize = sections.iter().map(|s| s.content.chars().count()).sum();
 
-    if chars < 50 {
-        // Almost certainly a scan: pdf-extract reads glyphs, not pixels.
-        // Indexing this would create a document with no retrievable content.
+    if chars >= 50 {
+        return Ok((sections, false));
+    }
+
+    // Almost certainly a scan. Try OCR before giving up - if that also
+    // comes back empty, the PDF is genuinely unreadable (corrupt, or truly
+    // blank pages) rather than just lacking a text layer.
+    let page_count = sections.len();
+    let ocr_sections = ocr_pdf(raw).await?;
+    if ocr_sections.is_empty() {
         return Err(AppError::Unprocessable(format!(
-            "No extractable text found in this PDF ({} pages). It is most likely a scan \
-             or image-only PDF, which needs OCR. Upload a text-based PDF, or paste the text \
-             directly.",
-            sections.len()
+            "No extractable text found in this PDF ({page_count} pages), and OCR found \
+             nothing readable either. Upload a clearer scan, a text-based PDF, or paste the \
+             text directly."
+        )));
+    }
+    Ok((ocr_sections, true))
+}
+
+/// Rasterizes each page with poppler's `pdftoppm`, then reads each page
+/// image with `tesseract`. Both are external processes - no pure-Rust
+/// PDF-rasterization + OCR combination approaches their reliability, so
+/// this shells out rather than binding to pdfium/leptonica directly. Needs
+/// poppler-utils and tesseract-ocr installed in the image (see
+/// Dockerfile.rust's api-gateway stage).
+async fn ocr_pdf(raw: Vec<u8>) -> Result<Vec<KnowledgeSection>, AppError> {
+    tokio::task::spawn_blocking(move || ocr_pdf_blocking(&raw))
+        .await
+        .map_err(|e| AppError::Internal(format!("OCR task failed: {e}")))?
+}
+
+// A scanned document runs page-at-a-time through two external processes
+// within one HTTP request/response cycle; capped well under the reverse
+// proxy's read timeout even at a few seconds per page.
+const MAX_OCR_PAGES: usize = 60;
+
+fn ocr_pdf_blocking(raw: &[u8]) -> Result<Vec<KnowledgeSection>, AppError> {
+    let tmp_dir = tempfile::tempdir()
+        .map_err(|e| AppError::Internal(format!("Could not create a temp dir for OCR: {e}")))?;
+    let pdf_path = tmp_dir.path().join("input.pdf");
+    std::fs::write(&pdf_path, raw)
+        .map_err(|e| AppError::Internal(format!("Could not stage the PDF for OCR: {e}")))?;
+
+    let page_prefix = tmp_dir.path().join("page");
+    let status = std::process::Command::new("pdftoppm")
+        .args(["-png", "-r", "200"])
+        .arg(&pdf_path)
+        .arg(&page_prefix)
+        .status()
+        .map_err(|e| AppError::Internal(format!("Could not run pdftoppm for OCR: {e}")))?;
+    if !status.success() {
+        return Err(AppError::Internal(
+            "pdftoppm failed to rasterize the PDF for OCR".into(),
+        ));
+    }
+
+    let mut page_files: Vec<std::path::PathBuf> = std::fs::read_dir(tmp_dir.path())
+        .map_err(|e| AppError::Internal(format!("Could not read OCR temp dir: {e}")))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("png"))
+        .collect();
+    page_files.sort();
+
+    if page_files.len() > MAX_OCR_PAGES {
+        return Err(AppError::Unprocessable(format!(
+            "This PDF has {} pages; OCR is limited to {MAX_OCR_PAGES} pages per upload.",
+            page_files.len()
         )));
     }
 
+    let mut sections = Vec::new();
+    for (i, page_file) in page_files.iter().enumerate() {
+        let output = std::process::Command::new("tesseract")
+            .arg(page_file)
+            .arg("stdout")
+            .output()
+            .map_err(|e| AppError::Internal(format!("Could not run tesseract for OCR: {e}")))?;
+        if !output.status.success() {
+            // One unreadable page shouldn't sink the whole document.
+            continue;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let content = text
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string();
+        if !content.is_empty() {
+            sections.push(KnowledgeSection {
+                content,
+                page: Some(i + 1),
+                section: None,
+            });
+        }
+    }
     Ok(sections)
 }
 
@@ -97,12 +191,16 @@ async fn decode_upload(
     filename: &str,
 ) -> Result<(Vec<KnowledgeSection>, serde_json::Value), AppError> {
     if raw.starts_with(PDF_MAGIC) {
-        let sections = extract_pdf_text(raw).await?;
+        let (sections, ocr) = extract_pdf_text(raw).await?;
         let pages = sections.len();
         let chars: usize = sections.iter().map(|s| s.content.chars().count()).sum();
         return Ok((
             sections,
-            serde_json::json!({"format": "pdf", "pages": pages, "chars": chars}),
+            serde_json::json!({
+                "format": if ocr { "pdf-ocr" } else { "pdf" },
+                "pages": pages,
+                "chars": chars,
+            }),
         ));
     }
 
@@ -822,7 +920,53 @@ pub fn router() -> Router<AppState> {
 
 #[cfg(test)]
 mod tests {
-    use super::merge_overlapping_chunks;
+    use super::{merge_overlapping_chunks, ocr_pdf_blocking};
+
+    fn have_ocr_tools() -> bool {
+        std::process::Command::new("pdftoppm")
+            .arg("-v")
+            .output()
+            .is_ok()
+            && std::process::Command::new("tesseract")
+                .arg("--version")
+                .output()
+                .is_ok()
+    }
+
+    #[test]
+    fn ocr_reads_an_image_only_pdf_with_no_text_layer() {
+        // poppler-utils/tesseract-ocr are installed in the api-gateway image
+        // (see Dockerfile.rust) but not necessarily wherever `cargo test`
+        // runs (e.g. this repo's own CI image doesn't have them) - skip
+        // rather than fail when they're unavailable, same as this app's
+        // convention for other external-process-dependent checks.
+        if !have_ocr_tools() {
+            eprintln!("skipping: pdftoppm/tesseract not on PATH");
+            return;
+        }
+        // A single blank white page has no text; pdftoppm+tesseract should
+        // still run cleanly and correctly find nothing, rather than erroring.
+        let pdf = magick_blank_pdf();
+        let sections = ocr_pdf_blocking(&pdf).expect("OCR should not error on a blank page");
+        assert!(sections.is_empty(), "a blank page should OCR to nothing");
+    }
+
+    /// A minimal single-page PDF (no text layer), built by hand so this test
+    /// doesn't depend on ImageMagick being installed too.
+    fn magick_blank_pdf() -> Vec<u8> {
+        b"%PDF-1.1\n\
+          1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n\
+          2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n\
+          3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >> endobj\n\
+          xref\n\
+          0 4\n\
+          0000000000 65535 f \n\
+          trailer << /Size 4 /Root 1 0 R >>\n\
+          startxref\n\
+          0\n\
+          %%EOF"
+            .to_vec()
+    }
 
     #[test]
     fn skips_the_overlap_instead_of_duplicating_it() {

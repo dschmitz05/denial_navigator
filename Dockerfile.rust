@@ -45,6 +45,17 @@ ENTRYPOINT ["tini", "--"]
 
 # ── API Gateway ──────────────────────────────────────────────────────────
 FROM runtime-base AS api-gateway
+# OCR fallback for scanned/image-only PDF knowledge documents: poppler-utils
+# rasterizes pages (pdftoppm), tesseract-ocr reads them. No pure-Rust
+# PDF-rasterization + OCR combination approaches their reliability, so the
+# app shells out to these rather than binding to pdfium/leptonica directly.
+# Root only for the install; runtime-base already dropped to `app` and this
+# restores that before the image's entrypoint runs.
+USER root
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends poppler-utils tesseract-ocr tesseract-ocr-eng \
+ && rm -rf /var/lib/apt/lists/*
+USER app
 COPY --from=builder /out/api-gateway /usr/local/bin/api-gateway
 # Vendored Swagger UI / ReDoc bundles (shared with the Python service), served
 # at /static/docs/. The OpenAPI document itself is compiled into the binary.
