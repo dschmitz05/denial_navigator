@@ -111,193 +111,98 @@ export default function Login({ onLogin, onComplete }: LoginProps) {
   }
 
   return (
-    <div style={{
-      minHeight: '100vh',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      background: 'linear-gradient(135deg, #0f172a 0%, #1e293b 100%)',
-    }}>
-      <div className="card" style={{
-        width: '100%',
-        maxWidth: 420,
-        margin: 20,
-      }}>
-        <div className="card-body" style={{ textAlign: 'center', padding: '40px 32px' }}>
-          <h1 style={{ fontSize: '1.8rem', marginBottom: 8 }}>🧭 Denial Navigator</h1>
-          <p style={{ color: 'var(--gray-500)', marginBottom: 32 }}>Healthcare Denial Management</p>
+    <main className="login-shell">
+      <section className="login-brand" aria-label="Denial Navigator overview">
+        <div className="login-brand-content">
+          <div className="login-mark" aria-hidden="true"><span>DN</span></div>
+          <p className="login-eyebrow">Revenue cycle command center</p>
+          <h1>Bring every denial into focus.</h1>
+          <p className="login-brand-copy">
+            Prioritize recovery, coordinate the next action, and keep a clear record of every decision.
+          </p>
+          <div className="login-points" aria-label="Product capabilities">
+            <div><span className="login-point-icon">✓</span><span>One queue for claims, denials, and appeals</span></div>
+            <div><span className="login-point-icon">✓</span><span>Evidence-backed recommendations and deadlines</span></div>
+            <div><span className="login-point-icon">✓</span><span>Secure, role-based access to your workflow</span></div>
+          </div>
+        </div>
+        <p className="login-brand-footer">Built for teams protecting every earned dollar.</p>
+      </section>
+
+      <section className="login-panel">
+        <div className="login-card">
+          <div className="login-mobile-mark" aria-hidden="true"><span>DN</span></div>
+          <header className="login-header">
+            <p className="login-kicker">
+              {stage === 'password' ? 'Welcome back' : 'Secure sign-in'}
+            </p>
+            <h2>
+              {stage === 'organization' ? 'Choose your workspace'
+                : stage === 'change-password' ? 'Create your password'
+                  : stage === 'enroll' ? 'Protect your account'
+                    : stage === 'code' ? 'Verify it’s you'
+                      : 'Sign in to your workspace'}
+            </h2>
+            <p>
+              {stage === 'organization' ? 'Select the organization you want to work in.'
+                : stage === 'change-password' ? 'Your administrator set the initial password. Choose a private replacement to continue.'
+                  : stage === 'enroll' ? 'Set up your authenticator app, then confirm the code it provides.'
+                    : stage === 'code' ? 'Enter the six-digit code from your authenticator app.'
+                      : 'Use your credentials to continue to Denial Navigator.'}
+            </p>
+          </header>
+
+          {error && <div className="login-error" role="alert">{error}</div>}
 
           {stage === 'organization' ? (
-            <form onSubmit={handleSubmit}>
-              <h2>Select organization</h2>
-              <p>Choose where you want to work.</p>
-              <select value={organizationId} onChange={(e) => setOrganizationId(e.target.value)} required>
+            <form className="login-form" onSubmit={handleSubmit}>
+              <label className="login-label" htmlFor="organization">Organization</label>
+              <select id="organization" className="login-input" value={organizationId} onChange={(e) => setOrganizationId(e.target.value)} required autoFocus>
                 <option value="">Select an organization</option>
                 {organizations.map((organization) => <option key={organization.id} value={organization.id}>{organization.name}</option>)}
               </select>
-              <button className="btn btn-primary" type="submit" disabled={loading || !organizationId}>Continue</button>
+              <button className="login-submit" type="submit" disabled={loading || !organizationId}>{loading ? 'Continuing…' : 'Continue'}</button>
+              <button type="button" className="login-secondary" onClick={restart}>Back to sign in</button>
             </form>
           ) : stage === 'change-password' ? (
-            <form onSubmit={handlePasswordChange} style={{ textAlign: 'left' }}>
-              <h3 style={{ fontSize: '1.05rem', marginBottom: 6 }}>Choose a new password</h3>
-              <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: 16 }}>
-                This account's password was set by someone else. Choose your own before continuing:
-                at least 12 characters, not your username and not a common password.
-              </p>
-              {error && (
-                <div style={{
-                  background: 'var(--danger-light)', color: 'var(--danger-text)',
-                  border: '1px solid var(--danger)', borderRadius: 8,
-                  padding: 10, marginBottom: 16, fontSize: '0.9rem',
-                }}>{error}</div>
-              )}
-              <div className="form-group">
-                <label className="form-label">New password</label>
-                <input className="form-input" type="password" value={newPassword} autoFocus
-                  autoComplete="new-password" minLength={12} required
-                  onChange={e => setNewPassword(e.target.value)} style={{ width: '100%' }} />
-              </div>
-              <div className="form-group">
-                <label className="form-label">Confirm new password</label>
-                <input className="form-input" type="password" value={confirmPassword}
-                  autoComplete="new-password" minLength={12} required
-                  onChange={e => setConfirmPassword(e.target.value)} style={{ width: '100%' }} />
-              </div>
-              <button type="submit" className="btn btn-primary" disabled={loading}
-                      style={{ width: '100%', marginBottom: 10 }}>
-                {loading ? 'Saving…' : 'Set password and sign in'}
-              </button>
-              <button type="button" className="btn" onClick={restart} style={{ width: '100%' }}>
-                Back
-              </button>
+            <form className="login-form" onSubmit={handlePasswordChange}>
+              <div className="login-note">Use at least 12 characters. Avoid your username and common passwords.</div>
+              <label className="login-label" htmlFor="new-password">New password</label>
+              <input id="new-password" className="login-input" type="password" value={newPassword} autoFocus autoComplete="new-password" minLength={12} required onChange={e => setNewPassword(e.target.value)} />
+              <label className="login-label" htmlFor="confirm-password">Confirm new password</label>
+              <input id="confirm-password" className="login-input" type="password" value={confirmPassword} autoComplete="new-password" minLength={12} required onChange={e => setConfirmPassword(e.target.value)} />
+              <button type="submit" className="login-submit" disabled={loading}>{loading ? 'Saving…' : 'Set password and sign in'}</button>
+              <button type="button" className="login-secondary" onClick={restart}>Back to sign in</button>
             </form>
           ) : stage !== 'password' ? (
-            <form onSubmit={handleCode}>
-              {error && (
-                <div style={{
-                  background: 'var(--danger-light)', color: 'var(--danger-text)',
-                  border: '1px solid var(--danger)', borderRadius: 8,
-                  padding: 10, marginBottom: 20, fontSize: '0.9rem',
-                }}>{error}</div>
-              )}
-
+            <form className="login-form" onSubmit={handleCode}>
               {stage === 'enroll' && enrollment && (
-                <div style={{ marginBottom: 20, textAlign: 'left' }}>
-                  <h3 style={{ fontSize: '1.05rem', marginBottom: 6 }}>Set up two-factor authentication</h3>
-                  <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: 12 }}>
-                    Your administrator requires a second factor on this account. Scan this
-                    with an authenticator app, then enter the six-digit code it shows.
-                  </p>
-                  {/* Rendered by the server as inline SVG, so this works with
-                      no internet and the secret never reaches a third party. */}
-                  {/* Deliberately white in both themes: a QR code needs light quiet
-                          zones and dark modules to scan reliably, so this one does
-                          not follow the palette. */}
-                  <div style={{ background: '#ffffff', padding: 12, borderRadius: 8, display: 'flex', justifyContent: 'center' }}
-                       dangerouslySetInnerHTML={{ __html: enrollment.qr_svg }} />
-                  <details style={{ marginTop: 10 }}>
-                    <summary style={{ cursor: 'pointer', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-                      Can't scan it?
-                    </summary>
-                    <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: 6 }}>
-                      Enter this key manually:
-                    </p>
-                    <code style={{
-                      display: 'block', wordBreak: 'break-all', padding: 8,
-                      background: 'var(--surface-alt)', borderRadius: 6, fontSize: '0.85rem',
-                    }}>{enrollment.secret}</code>
-                    <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: 6 }}>
-                      Shown once. If you lose the device, an administrator can reset it.
-                    </p>
+                <div className="login-enrollment">
+                  <div className="login-qr" dangerouslySetInnerHTML={{ __html: enrollment.qr_svg }} />
+                  <details>
+                    <summary>Can’t scan the QR code?</summary>
+                    <p>Enter this key in your authenticator app:</p>
+                    <code>{enrollment.secret}</code>
                   </details>
                 </div>
               )}
-
-              {stage === 'code' && (
-                <p style={{ color: 'var(--text-muted)', marginBottom: 16 }}>
-                  Enter the six-digit code from your authenticator app.
-                </p>
-              )}
-
-              <div className="form-group" style={{ textAlign: 'left' }}>
-                <label className="form-label">Authentication code</label>
-                <input
-                  className="form-input"
-                  value={code}
-                  onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                  placeholder="000000"
-                  inputMode="numeric"
-                  autoComplete="one-time-code"
-                  autoFocus
-                  style={{ letterSpacing: '0.3em', fontSize: '1.2rem', textAlign: 'center' }}
-                />
-              </div>
-
-              <button type="submit" className="btn btn-primary"
-                      disabled={loading || code.length !== 6}
-                      style={{ width: '100%', marginBottom: 10 }}>
-                {loading ? 'Checking…' : stage === 'enroll' ? 'Confirm and sign in' : 'Sign in'}
-              </button>
-              <button type="button" className="btn" onClick={restart} style={{ width: '100%' }}>
-                Back
-              </button>
+              <label className="login-label" htmlFor="authentication-code">Authentication code</label>
+              <input id="authentication-code" className="login-input login-code" value={code} onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="000000" inputMode="numeric" autoComplete="one-time-code" autoFocus required />
+              <button type="submit" className="login-submit" disabled={loading || code.length !== 6}>{loading ? 'Checking…' : stage === 'enroll' ? 'Confirm and sign in' : 'Sign in'}</button>
+              <button type="button" className="login-secondary" onClick={restart}>Back to sign in</button>
             </form>
           ) : (
-          <form onSubmit={handleSubmit}>
-            {error && (
-              <div className="card" style={{
-                background: 'var(--danger-light)', color: 'var(--danger-text)',
-                border: '1px solid var(--danger)',
-                marginBottom: 20,
-                fontSize: '0.85rem',
-              }}>
-                {error}
-              </div>
-            )}
-
-            <label style={{ display: 'block', textAlign: 'left', marginBottom: 6, fontWeight: 600, fontSize: '0.9rem' }}>
-              Username
-            </label>
-            <input
-              type="text"
-              className="form-input"
-              value={username}
-              onChange={e => setUsername(e.target.value)}
-              required
-              autoFocus
-              style={{ width: '100%', marginBottom: 20 }}
-              placeholder="Enter your username"
-            />
-
-            <label style={{ display: 'block', textAlign: 'left', marginBottom: 6, fontWeight: 600, fontSize: '0.9rem' }}>
-              Password
-            </label>
-            <input
-              type="password"
-              className="form-input"
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              required
-              style={{ width: '100%', marginBottom: 24 }}
-              placeholder="Enter your password"
-            />
-
-            <button
-              type="submit"
-              className="btn btn-primary"
-              style={{ width: '100%' }}
-              disabled={loading}
-            >
-              {loading ? 'Signing in...' : 'Sign In'}
-            </button>
-          </form>
+            <form className="login-form" onSubmit={handleSubmit}>
+              <label className="login-label" htmlFor="username">Username</label>
+              <input id="username" type="text" className="login-input" value={username} onChange={e => setUsername(e.target.value)} required autoFocus autoComplete="username" placeholder="Enter your username" />
+              <label className="login-label" htmlFor="password">Password</label>
+              <input id="password" type="password" className="login-input" value={password} onChange={e => setPassword(e.target.value)} required autoComplete="current-password" placeholder="Enter your password" />
+              <button type="submit" className="login-submit" disabled={loading}>{loading ? 'Signing in…' : 'Sign in'}</button>
+            </form>
           )}
-
-          {/* Deliberately does not name the default credentials: the
-                login page is reachable by anyone who can reach the app.
-                Settings tells the administrator to change them. */}
+          <p className="login-security"><span aria-hidden="true">⌁</span> Your access is protected with secure authentication.</p>
         </div>
-      </div>
-    </div>
+      </section>
+    </main>
   )
 }
