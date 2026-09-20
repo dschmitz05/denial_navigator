@@ -1,7 +1,7 @@
 //! User management routes (admin only, plus the assignable list for managers).
 
 use axum::extract::{Extension, Path, Query, State};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, NaiveDate, Utc};
 use denial_auth::auth::hash_password;
@@ -32,7 +32,7 @@ const OPEN_QUEUE_CLAUSE: &str = "(outcome_status IS NULL \
      OR outcome_status NOT IN ('approved', 'overruled', 'resolved', 'denied_again', 'cancelled'))";
 
 #[derive(Deserialize)]
-struct UserUpdate {
+pub(crate) struct UserUpdate {
     email: Option<String>,
     full_name: Option<String>,
     role: Option<String>,
@@ -40,17 +40,17 @@ struct UserUpdate {
 }
 
 #[derive(Deserialize)]
-struct UserPasswordUpdate {
+pub(crate) struct UserPasswordUpdate {
     password: String,
 }
 
 #[derive(Deserialize)]
-struct TotpPolicy {
+pub(crate) struct TotpPolicy {
     required: bool,
 }
 
 #[derive(Deserialize)]
-struct ListUsersQuery {
+pub(crate) struct ListUsersQuery {
     role: Option<String>,
     is_active: Option<bool>,
     search: Option<String>,
@@ -65,7 +65,7 @@ fn default_limit() -> i64 {
 }
 
 #[derive(Deserialize)]
-struct DeleteUserQuery {
+pub(crate) struct DeleteUserQuery {
     #[serde(default)]
     purge: bool,
     #[serde(default)]
@@ -281,34 +281,18 @@ pub async fn list_users(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let mut need_where = false;
     if let Some(ref role) = params.role {
-        if need_where {
-            qb.push(" WHERE ");
-            need_where = false;
-        } else {
-            qb.push(" AND ");
-        }
+        qb.push(" AND ");
         qb.push("om.role = ");
         qb.push_bind(role);
     }
     if let Some(active) = params.is_active {
-        if need_where {
-            qb.push(" WHERE ");
-            need_where = false;
-        } else {
-            qb.push(" AND ");
-        }
+        qb.push(" AND ");
         qb.push("u.is_active = ");
         qb.push_bind(active);
     }
     if let Some(search) = search {
-        if need_where {
-            qb.push(" WHERE ");
-            need_where = false;
-        } else {
-            qb.push(" AND ");
-        }
+        qb.push(" AND ");
         let pattern = format!("%{search}%");
         qb.push("(u.username ILIKE ");
         qb.push_bind(pattern.clone());
@@ -627,8 +611,6 @@ pub async fn delete_user(
     .await
     .map_err(AppError::Db)?
     .ok_or(AppError::NotFound)?;
-    let mut username: String;
-    let mut role: String;
 
     // Prevent self-deletion
     if is_self(&principal, &user_id) {
@@ -657,8 +639,8 @@ pub async fn delete_user(
     .await
     .map_err(AppError::Db)?
     .ok_or(AppError::NotFound)?;
-    username = locked_user.try_get("username").map_err(AppError::Db)?;
-    role = locked_user.try_get("role").map_err(AppError::Db)?;
+    let username: String = locked_user.try_get("username").map_err(AppError::Db)?;
+    let role: String = locked_user.try_get("role").map_err(AppError::Db)?;
 
     // Prevent deleting the last admin
     let admin_count: (i64,) = sqlx::query_as(
@@ -733,12 +715,12 @@ pub async fn delete_user(
         .map_err(AppError::Db)?;
         // No foreign keys exist, so these would otherwise be left pointing at
         // an id that resolves to nobody.
-        sqlx::query(&format!(
+        sqlx::query(
             "UPDATE appeals_queue aq SET assigned_user_id = NULL \
              FROM denials d JOIN claims c ON c.id = d.claim_id \
              WHERE aq.denial_id = d.id AND aq.assigned_user_id = $1 \
-               AND c.organization_id = $2"
-        ))
+               AND c.organization_id = $2",
+        )
         .bind(user_id)
         .bind(organization_id)
         .execute(&mut *tx)

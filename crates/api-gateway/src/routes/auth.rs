@@ -1,17 +1,13 @@
 use axum::extract::State;
-use axum::http::header;
-use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use chrono::{DateTime, Utc};
-use denial_auth::auth::{
-    create_token, create_token_for_organization, decode_token, hash_password, verify_password,
-};
+use denial_auth::auth::{create_token_for_organization, hash_password, verify_password};
 use denial_auth::password::check_new_password;
 use denial_auth::rbac::Principal;
 use denial_common::error::AppError;
 use denial_common::totp;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sqlx::Row;
 use uuid::Uuid;
 

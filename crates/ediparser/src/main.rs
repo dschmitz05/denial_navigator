@@ -783,9 +783,9 @@ impl SftpCredentialsFile {
             .mode(0o600)
             .open(&path)
             .map_err(|e| AppError::Internal(format!("Could not prepare SFTP credentials: {e}")))?;
-        write!(
+        writeln!(
             file,
-            "machine {} login {} password {}\n",
+            "machine {} login {} password {}",
             cfg.host, cfg.username, password
         )
         .map_err(|e| AppError::Internal(format!("Could not prepare SFTP credentials: {e}")))?;

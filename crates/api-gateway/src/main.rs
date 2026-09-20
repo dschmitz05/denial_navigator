@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::{Json, Router};
 use state::AppState;
 use tower_http::cors::{Any, CorsLayer};

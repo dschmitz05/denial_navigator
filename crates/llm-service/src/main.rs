@@ -134,36 +134,7 @@ struct HealthResponse {
 
 /// Store an LLM analysis result via the API gateway. Returns whether the store
 /// call succeeded (a failure is logged, not propagated).
-async fn store_analysis(
-    state: &AppState,
-    denial_id: &str,
-    claim_id: &str,
-    raw_prompt: &str,
-    raw_response: &str,
-    parsed_result: &Value,
-    allowed_evidence_ids: &[String],
-    model_name: &str,
-    prompt_tokens: i64,
-    completion_tokens: i64,
-    total_tokens: i64,
-    fallback_reason: Option<&str>,
-) -> bool {
-    let payload = serde_json::json!({
-        "denial_id": denial_id,
-        "claim_id": claim_id,
-        "model_name": model_name,
-        "provider_name": "openai_compatible",
-        "provider_version": "v1",
-        "prompt_template_version": "denial_analysis_v1",
-        "raw_prompt": raw_prompt,
-        "raw_response": raw_response,
-        "parsed_result": parsed_result,
-        "allowed_evidence_ids": allowed_evidence_ids,
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "total_tokens": total_tokens,
-        "fallback_reason": fallback_reason,
-    });
+async fn store_analysis(state: &AppState, payload: Value) -> bool {
     let result = state
         .http
         .post(format!("{}/api/v1/analyses/store", state.cfg.api_base))
@@ -394,21 +365,23 @@ async fn analyze_denial(
         let completion_tokens = word_count(&raw_response);
 
         let parsed_result = parsed_json.as_ref().unwrap_or(&Value::Null);
-        let stored_ok = store_analysis(
-            &state,
-            &req.denial_id,
-            &req.claim_id,
-            &format!("{system_prompt}\n\n{user_prompt}"),
-            &raw_response,
-            parsed_result,
-            &req.allowed_evidence_ids,
-            &model_name,
-            prompt_tokens,
-            completion_tokens,
-            prompt_tokens + completion_tokens,
-            req.fallback_reason.as_deref(),
-        )
-        .await;
+        let payload = serde_json::json!({
+            "denial_id": req.denial_id,
+            "claim_id": req.claim_id,
+            "model_name": &model_name,
+            "provider_name": "openai_compatible",
+            "provider_version": "v1",
+            "prompt_template_version": "denial_analysis_v1",
+            "raw_prompt": format!("{system_prompt}\n\n{user_prompt}"),
+            "raw_response": &raw_response,
+            "parsed_result": parsed_result,
+            "allowed_evidence_ids": req.allowed_evidence_ids,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "fallback_reason": req.fallback_reason,
+        });
+        let stored_ok = store_analysis(&state, payload).await;
 
         Ok(Json(DenialAnalysisResponse {
             model: model_name,

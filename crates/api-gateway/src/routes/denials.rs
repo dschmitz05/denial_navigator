@@ -122,7 +122,7 @@ pub async fn list_denials(
             .push_bind(user_id)
             .push(")");
     }
-    let mut push_prefix = |qb: &mut QueryBuilder<sqlx::Postgres>, need_where: &mut bool| {
+    let push_prefix = |qb: &mut QueryBuilder<sqlx::Postgres>, need_where: &mut bool| {
         if *need_where {
             qb.push(" WHERE ");
             *need_where = false;

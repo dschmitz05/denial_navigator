@@ -234,6 +234,13 @@ async fn label_for(
 }
 
 /// Write one audit row. Never raises into the caller.
+///
+/// Nine arguments, each a distinct, independently-optional audit_log column
+/// with no natural grouping - bundling them into a struct would just move the
+/// same nine fields into a second place to keep in sync across this
+/// function's 18 call sites, for no real reduction in what a caller has to
+/// know. Named arguments at each call site already read clearly.
+#[allow(clippy::too_many_arguments)]
 pub async fn record(
     pool: &PgPool,
     action: &str,
@@ -350,7 +357,7 @@ pub async fn audit(State(state): State<AuditState>, req: Request, next: Next) ->
             authorization.as_deref(),
             service_name.as_deref(),
             service_key.as_deref(),
-            &config,
+            config,
         );
         let user_id = principal.user_id.clone();
         let username = principal.username.clone();
@@ -367,7 +374,7 @@ pub async fn audit(State(state): State<AuditState>, req: Request, next: Next) ->
 
         if resource_id.is_some() {
             if let serde_json::Value::Object(m) = label_for(
-                &pool,
+                pool,
                 &resource_type,
                 resource_id.as_deref(),
                 user_id.as_deref(),
@@ -393,10 +400,10 @@ pub async fn audit(State(state): State<AuditState>, req: Request, next: Next) ->
             peer,
             x_real_ip.as_deref(),
             x_forwarded_for.as_deref(),
-            &trusted,
+            trusted,
         );
         record(
-            &pool,
+            pool,
             &action,
             &resource_type,
             resource_id.as_deref(),

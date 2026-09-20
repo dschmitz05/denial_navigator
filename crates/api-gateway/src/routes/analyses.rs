@@ -818,6 +818,183 @@ async fn generate_analysis_for_request(
     }))
 }
 
+/// Queue the same recommendation pipeline for callers that should not hold an
+/// HTTP connection open while retrieval and model inference run.
+pub async fn enqueue_generation(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Json(request): Json<GenerateAnalysisRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let key = limit_key(&principal);
+    if !state.analyses_limiter.allow(&key) {
+        return Err(AppError::RateLimited {
+            retry_after: state.analyses_limiter.retry_after(&key),
+        });
+    }
+    let denial_id = Uuid::parse_str(request.denial_id.trim())
+        .map_err(|_| AppError::BadRequest("denial_id must be a UUID".into()))?;
+    let requested_by = principal
+        .user_id
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok());
+    let job_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO recommendation_jobs (denial_id, requested_by, temperature) \
+         VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(denial_id)
+    .bind(requested_by)
+    .bind(request.temperature)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(AppError::Db)?;
+
+    let worker_state = state.clone();
+    let worker_principal = principal.clone();
+    tokio::spawn(async move {
+        if let Err(error) = sqlx::query(
+            "UPDATE recommendation_jobs SET status = 'running', started_at = NOW(), attempts = attempts + 1 WHERE id = $1",
+        )
+        .bind(job_id)
+        .execute(&worker_state.pool)
+        .await
+        {
+            tracing::error!(%job_id, "could not start recommendation job: {error}");
+            return;
+        }
+        match generate_analysis_for_request(worker_state.clone(), request, Some(worker_principal)).await {
+            Ok(result) => {
+                if let Err(error) = sqlx::query(
+                    "UPDATE recommendation_jobs SET status = 'completed', result = $2::jsonb, completed_at = NOW() WHERE id = $1",
+                )
+                .bind(job_id)
+                .bind(result.to_string())
+                .execute(&worker_state.pool)
+                .await
+                {
+                    tracing::error!(%job_id, "could not complete recommendation job: {error}");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%job_id, "recommendation job failed: {error}");
+                let _ = sqlx::query(
+                    "UPDATE recommendation_jobs SET status = 'failed', error_message = $2, completed_at = NOW() WHERE id = $1",
+                )
+                .bind(job_id)
+                .bind(error.to_string())
+                .execute(&worker_state.pool)
+                .await;
+            }
+        }
+    });
+
+    Ok(Json(serde_json::json!({
+        "id": job_id,
+        "status": "pending",
+        "denial_id": denial_id,
+    })))
+}
+
+pub async fn get_generation_job(
+    State(state): State<AppState>,
+    axum::extract::Path(job_id): axum::extract::Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let row = sqlx::query(
+        "SELECT id, denial_id, requested_by, temperature, status, attempts, result, error_message, created_at, started_at, completed_at \
+         FROM recommendation_jobs WHERE id = $1",
+    )
+    .bind(job_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(AppError::Db)?
+    .ok_or(AppError::NotFound)?;
+    Ok(Json(row_to_json(&row)))
+}
+
+/// Analyses needed before a fallback share is judged; one failure out of two
+/// is noise, not an outage.
+const DEGRADED_MIN_ANALYSES: i64 = 3;
+
+/// Whether AI analyses are degraded: either the organization's most recent
+/// `DEGRADED_MIN_ANALYSES` analyses all fell back or ran without evidence (an
+/// outage happening now), or that share over the last 24 hours reaches
+/// `AI_DEGRADED_THRESHOLD` (default 0.2). The 24-hour share alone reacts too
+/// slowly: after a busy day, several failures in a row are still a small share.
+pub async fn ai_status(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    Ok(Json(
+        ai_fallback_summary(&state.pool, organization_id(&principal)?).await?,
+    ))
+}
+
+/// The body of [`ai_status`], shared with system health.
+pub async fn ai_fallback_summary(
+    pool: &sqlx::PgPool,
+    organization_id: Uuid,
+) -> Result<serde_json::Value, AppError> {
+    let threshold = std::env::var("AI_DEGRADED_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| (0.0..=1.0).contains(v))
+        .unwrap_or(0.2);
+    let row = sqlx::query(
+        "SELECT COUNT(*) AS total, \
+                COUNT(*) FILTER (WHERE aa.fallback_reason IS NOT NULL) AS degraded, \
+                COUNT(*) FILTER (WHERE aa.fallback_reason = 'llm_error') AS llm_error, \
+                COUNT(*) FILTER (WHERE aa.fallback_reason = 'retrieval_error') AS retrieval_error, \
+                COUNT(*) FILTER (WHERE aa.fallback_reason = 'no_evidence') AS no_evidence \
+         FROM ai_analyses aa JOIN claims c ON c.id = aa.claim_id \
+         WHERE c.organization_id = $1 AND aa.created_at > NOW() - INTERVAL '24 hours'",
+    )
+    .bind(organization_id)
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::Db)?;
+    let recent: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT aa.fallback_reason FROM ai_analyses aa JOIN claims c ON c.id = aa.claim_id \
+         WHERE c.organization_id = $1 ORDER BY aa.created_at DESC LIMIT $2",
+    )
+    .bind(organization_id)
+    .bind(DEGRADED_MIN_ANALYSES)
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Db)?;
+    let recent_all_degraded =
+        recent.len() as i64 == DEGRADED_MIN_ANALYSES && recent.iter().all(Option::is_some);
+    let total: i64 = row.get("total");
+    let degraded_count: i64 = row.get("degraded");
+    let share = if total == 0 {
+        0.0
+    } else {
+        degraded_count as f64 / total as f64
+    };
+    Ok(serde_json::json!({
+        "degraded": recent_all_degraded
+            || (total >= DEGRADED_MIN_ANALYSES && share >= threshold),
+        "recent_all_degraded": recent_all_degraded,
+        "window_hours": 24,
+        "analyses": total,
+        "fallback_share": share,
+        "threshold": threshold,
+        "reasons": {
+            "llm_error": row.get::<i64, _>("llm_error"),
+            "retrieval_error": row.get::<i64, _>("retrieval_error"),
+            "no_evidence": row.get::<i64, _>("no_evidence"),
+        },
+    }))
+}
+
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route("/", get(list_analyses))
+        .route("/status", get(ai_status))
+        .route("/store", post(store_analysis))
+        .route("/generate", post(generate_analysis))
+        .route("/generate-jobs", post(enqueue_generation))
+        .route("/generate-jobs/{job_id}", get(get_generation_job))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -995,181 +1172,4 @@ mod tests {
             .unwrap()
             .contains("MUE"));
     }
-}
-
-/// Queue the same recommendation pipeline for callers that should not hold an
-/// HTTP connection open while retrieval and model inference run.
-pub async fn enqueue_generation(
-    State(state): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Json(request): Json<GenerateAnalysisRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let key = limit_key(&principal);
-    if !state.analyses_limiter.allow(&key) {
-        return Err(AppError::RateLimited {
-            retry_after: state.analyses_limiter.retry_after(&key),
-        });
-    }
-    let denial_id = Uuid::parse_str(request.denial_id.trim())
-        .map_err(|_| AppError::BadRequest("denial_id must be a UUID".into()))?;
-    let requested_by = principal
-        .user_id
-        .as_deref()
-        .and_then(|id| Uuid::parse_str(id).ok());
-    let job_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO recommendation_jobs (denial_id, requested_by, temperature) \
-         VALUES ($1, $2, $3) RETURNING id",
-    )
-    .bind(denial_id)
-    .bind(requested_by)
-    .bind(request.temperature)
-    .fetch_one(&state.pool)
-    .await
-    .map_err(AppError::Db)?;
-
-    let worker_state = state.clone();
-    let worker_principal = principal.clone();
-    tokio::spawn(async move {
-        if let Err(error) = sqlx::query(
-            "UPDATE recommendation_jobs SET status = 'running', started_at = NOW(), attempts = attempts + 1 WHERE id = $1",
-        )
-        .bind(job_id)
-        .execute(&worker_state.pool)
-        .await
-        {
-            tracing::error!(%job_id, "could not start recommendation job: {error}");
-            return;
-        }
-        match generate_analysis_for_request(worker_state.clone(), request, Some(worker_principal)).await {
-            Ok(result) => {
-                if let Err(error) = sqlx::query(
-                    "UPDATE recommendation_jobs SET status = 'completed', result = $2::jsonb, completed_at = NOW() WHERE id = $1",
-                )
-                .bind(job_id)
-                .bind(result.to_string())
-                .execute(&worker_state.pool)
-                .await
-                {
-                    tracing::error!(%job_id, "could not complete recommendation job: {error}");
-                }
-            }
-            Err(error) => {
-                tracing::warn!(%job_id, "recommendation job failed: {error}");
-                let _ = sqlx::query(
-                    "UPDATE recommendation_jobs SET status = 'failed', error_message = $2, completed_at = NOW() WHERE id = $1",
-                )
-                .bind(job_id)
-                .bind(error.to_string())
-                .execute(&worker_state.pool)
-                .await;
-            }
-        }
-    });
-
-    Ok(Json(serde_json::json!({
-        "id": job_id,
-        "status": "pending",
-        "denial_id": denial_id,
-    })))
-}
-
-pub async fn get_generation_job(
-    State(state): State<AppState>,
-    axum::extract::Path(job_id): axum::extract::Path<Uuid>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let row = sqlx::query(
-        "SELECT id, denial_id, requested_by, temperature, status, attempts, result, error_message, created_at, started_at, completed_at \
-         FROM recommendation_jobs WHERE id = $1",
-    )
-    .bind(job_id)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(AppError::Db)?
-    .ok_or(AppError::NotFound)?;
-    Ok(Json(row_to_json(&row)))
-}
-
-/// Analyses needed before a fallback share is judged; one failure out of two
-/// is noise, not an outage.
-const DEGRADED_MIN_ANALYSES: i64 = 3;
-
-/// Whether AI analyses are degraded: either the organization's most recent
-/// `DEGRADED_MIN_ANALYSES` analyses all fell back or ran without evidence (an
-/// outage happening now), or that share over the last 24 hours reaches
-/// `AI_DEGRADED_THRESHOLD` (default 0.2). The 24-hour share alone reacts too
-/// slowly: after a busy day, several failures in a row are still a small share.
-pub async fn ai_status(
-    State(state): State<AppState>,
-    Extension(principal): Extension<Principal>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    Ok(Json(
-        ai_fallback_summary(&state.pool, organization_id(&principal)?).await?,
-    ))
-}
-
-/// The body of [`ai_status`], shared with system health.
-pub async fn ai_fallback_summary(
-    pool: &sqlx::PgPool,
-    organization_id: Uuid,
-) -> Result<serde_json::Value, AppError> {
-    let threshold = std::env::var("AI_DEGRADED_THRESHOLD")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .filter(|v| (0.0..=1.0).contains(v))
-        .unwrap_or(0.2);
-    let row = sqlx::query(
-        "SELECT COUNT(*) AS total, \
-                COUNT(*) FILTER (WHERE aa.fallback_reason IS NOT NULL) AS degraded, \
-                COUNT(*) FILTER (WHERE aa.fallback_reason = 'llm_error') AS llm_error, \
-                COUNT(*) FILTER (WHERE aa.fallback_reason = 'retrieval_error') AS retrieval_error, \
-                COUNT(*) FILTER (WHERE aa.fallback_reason = 'no_evidence') AS no_evidence \
-         FROM ai_analyses aa JOIN claims c ON c.id = aa.claim_id \
-         WHERE c.organization_id = $1 AND aa.created_at > NOW() - INTERVAL '24 hours'",
-    )
-    .bind(organization_id)
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::Db)?;
-    let recent: Vec<Option<String>> = sqlx::query_scalar(
-        "SELECT aa.fallback_reason FROM ai_analyses aa JOIN claims c ON c.id = aa.claim_id \
-         WHERE c.organization_id = $1 ORDER BY aa.created_at DESC LIMIT $2",
-    )
-    .bind(organization_id)
-    .bind(DEGRADED_MIN_ANALYSES)
-    .fetch_all(pool)
-    .await
-    .map_err(AppError::Db)?;
-    let recent_all_degraded =
-        recent.len() as i64 == DEGRADED_MIN_ANALYSES && recent.iter().all(Option::is_some);
-    let total: i64 = row.get("total");
-    let degraded_count: i64 = row.get("degraded");
-    let share = if total == 0 {
-        0.0
-    } else {
-        degraded_count as f64 / total as f64
-    };
-    Ok(serde_json::json!({
-        "degraded": recent_all_degraded
-            || (total >= DEGRADED_MIN_ANALYSES && share >= threshold),
-        "recent_all_degraded": recent_all_degraded,
-        "window_hours": 24,
-        "analyses": total,
-        "fallback_share": share,
-        "threshold": threshold,
-        "reasons": {
-            "llm_error": row.get::<i64, _>("llm_error"),
-            "retrieval_error": row.get::<i64, _>("retrieval_error"),
-            "no_evidence": row.get::<i64, _>("no_evidence"),
-        },
-    }))
-}
-
-pub fn router() -> Router<AppState> {
-    Router::new()
-        .route("/", get(list_analyses))
-        .route("/status", get(ai_status))
-        .route("/store", post(store_analysis))
-        .route("/generate", post(generate_analysis))
-        .route("/generate-jobs", post(enqueue_generation))
-        .route("/generate-jobs/{job_id}", get(get_generation_job))
 }

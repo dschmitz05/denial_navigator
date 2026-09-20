@@ -57,26 +57,15 @@ pub async fn list_claims(
     );
 
     let q = params.q.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let mut need_where = false;
     qb.push(" WHERE c.organization_id = ")
         .push_bind(organization_id);
     if let Some(ref status) = params.status {
-        if need_where {
-            qb.push(" WHERE ");
-            need_where = false;
-        } else {
-            qb.push(" AND ");
-        }
+        qb.push(" AND ");
         qb.push("c.status = ");
         qb.push_bind(status);
     }
     if let Some(q) = q {
-        if need_where {
-            qb.push(" WHERE ");
-            need_where = false;
-        } else {
-            qb.push(" AND ");
-        }
+        qb.push(" AND ");
         let pattern = format!("%{q}%");
         qb.push("(c.claim_number ILIKE ");
         qb.push_bind(pattern.clone());
@@ -97,7 +86,7 @@ pub async fn list_claims(
         .fetch_all(&state.pool)
         .await
         .map_err(AppError::Db)?;
-    let values: Vec<serde_json::Value> = rows.iter().map(|row| row_to_json(row)).collect();
+    let values: Vec<serde_json::Value> = rows.iter().map(row_to_json).collect();
 
     Ok(Json(values))
 }

@@ -11,7 +11,7 @@ pub fn safe_error(error: impl std::fmt::Display) -> String {
     let mut text = error.to_string().replace(['\r', '\n'], " ");
     if text.len() > 240 {
         text.truncate(240);
-        text.push_str("…");
+        text.push('…');
     }
     let lower = text.to_ascii_lowercase();
     if [

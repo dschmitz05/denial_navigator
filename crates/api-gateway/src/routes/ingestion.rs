@@ -234,8 +234,8 @@ fn clean_claim(claim: &serde_json::Value, seen_numbers: &mut HashSet<String>) ->
             .unwrap_or(&serde_json::Value::Null),
     );
 
-    let base = if dob.is_some() {
-        format!("{}-{}", patient_id, dob.unwrap())
+    let base = if let Some(dob) = dob {
+        format!("{patient_id}-{dob}")
     } else {
         format!("{patient_id}-NODOB")
     };
@@ -939,7 +939,7 @@ pub async fn upload_file(
                 filename = Some(name.to_string());
             }
         }
-        let mut chunk = field
+        let chunk = field
             .bytes()
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;

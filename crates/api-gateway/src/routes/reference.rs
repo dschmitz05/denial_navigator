@@ -16,7 +16,7 @@ use denial_common::error::AppError;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::postgres::Postgres;
-use sqlx::{Column, QueryBuilder, Row};
+use sqlx::{QueryBuilder, Row};
 
 use crate::state::AppState;
 
@@ -147,7 +147,6 @@ struct ParsedRow {
 
 #[derive(Debug, Clone)]
 struct ExistingRow {
-    code: String,
     description: String,
     is_active: bool,
     effective_date: Option<NaiveDate>,
@@ -492,9 +491,8 @@ async fn fetch_existing(
             None => None,
         };
         map.insert(
-            code.clone(),
+            code,
             ExistingRow {
-                code,
                 description,
                 is_active: is_active.unwrap_or(true),
                 effective_date,
@@ -620,7 +618,7 @@ async fn apply_update(
 
 fn is_status_change(row: &ParsedRow) -> bool {
     // Only the deactivation/re-activation rows set is_active in the UPDATE.
-    matches!(row.is_active, Some(_))
+    row.is_active.is_some()
 }
 
 async fn apply_plan(
@@ -1109,7 +1107,7 @@ pub async fn ncci_import(
             let c = get(code);
             let v = get(value).parse::<i32>().ok();
             let a = get(adj).parse::<i16>().ok();
-            if c.is_empty() || v.unwrap_or(0) <= 0 || a.is_some_and(|n| !matches!(n, 1 | 2 | 3)) {
+            if c.is_empty() || v.unwrap_or(0) <= 0 || a.is_some_and(|n| !matches!(n, 1..=3)) {
                 errors.push(i + 2);
                 continue;
             }
