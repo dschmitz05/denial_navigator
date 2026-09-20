@@ -126,9 +126,16 @@ export default function Audit() {
 
   return (
     <div className="page-body">
+      <section className="workspace-heading">
+        <div>
+          <p>Compliance record</p>
+          <h1>Review activity with confidence.</h1>
+          <span>Trace system access and workflow events without exposing the underlying patient data.</span>
+        </div>
+      </section>
       <div className="card">
         <div className="card-header">
-          <h3>🔍 Audit Log</h3>
+          <h3>Audit Log</h3>
           <p style={{ fontSize: '0.85rem', color: 'var(--gray-500)', marginTop: 4 }}>
             Track all user actions across the system for HIPAA compliance
           </p>
