@@ -486,18 +486,38 @@ pub async fn process_batch(
 
     let mut results = Vec::new();
     for doc in &docs[start..end] {
-        let row = sqlx::query(
-            "INSERT INTO knowledge_documents (organization_id, title, source_type, status) \
-             VALUES ($1, $2, 'cms_lcd', 'pending') RETURNING id",
+        // Re-importing the same export (the same file twice, or an
+        // overlapping keyword/status filter run again) must not create a
+        // second copy of an LCD already indexed under this title -
+        // re-ingesting an existing document's id replaces its chunks rather
+        // than duplicating the document itself.
+        let existing = sqlx::query(
+            "SELECT id FROM knowledge_documents \
+             WHERE organization_id = $1 AND source_type = 'cms_lcd' \
+               AND title = $2 AND status != 'archived'",
         )
         .bind(organization_id)
         .bind(&doc.title)
-        .fetch_one(&state.pool)
+        .fetch_optional(&state.pool)
         .await
         .map_err(AppError::Db)?;
-        let doc_id: Uuid = row
-            .try_get("id")
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let doc_id: Uuid = if let Some(row) = existing {
+            row.try_get("id")
+                .map_err(|e| AppError::Internal(e.to_string()))?
+        } else {
+            let row = sqlx::query(
+                "INSERT INTO knowledge_documents (organization_id, title, source_type, status) \
+                 VALUES ($1, $2, 'cms_lcd', 'pending') RETURNING id",
+            )
+            .bind(organization_id)
+            .bind(&doc.title)
+            .fetch_one(&state.pool)
+            .await
+            .map_err(AppError::Db)?;
+            row.try_get("id")
+                .map_err(|e| AppError::Internal(e.to_string()))?
+        };
 
         match state
             .rag
