@@ -141,7 +141,9 @@ Sample files for a first run: `scripts/sample_835.txt`,
 denials, remittances and matching knowledge-base policies to explain them —
 comes from `scripts/generate_synthetic_835.py` and
 `scripts/seed_test_knowledge.sh`; `scripts/test_synthetic_e2e.sh` runs the
-whole path end to end and checks what came out.
+whole API path end to end and checks what came out. With that synthetic stack
+running, `cd apps/web && E2E_PASSWORD=... npm run e2e` also verifies login,
+the browser denial queue, and the PAT001 denial detail.
 
 ## Security
 

@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "smoke": "esbuild scripts/smoke-render.mjs --bundle --platform=node --format=cjs --jsx=automatic --outfile=node_modules/.smoke.cjs --log-level=error && node node_modules/.smoke.cjs",
     "typecheck": "tsc --noEmit"
+    ,"e2e": "playwright test"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.62.0",
@@ -17,6 +18,7 @@
     "react-router-dom": "^7.1.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",
     "@vitejs/plugin-react": "^4.3.4",
