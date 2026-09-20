@@ -1002,6 +1002,128 @@ pub async fn reference_clear(
     Ok(Json(json!({ "kind": kind, "deleted": deleted })))
 }
 
+/// Import the two CMS NCCI formats without forcing them into the simpler
+/// code/description reference-list schema. `apply` is a multipart field; the
+/// default is a safe preview. Expected headers are deliberately permissive:
+/// PTP: column_1_code,column_2_code,modifier_indicator; MUE:
+/// code,mue_value,adjudication_indicator. Effective/termination dates are
+/// optional ISO dates.
+pub async fn ncci_import(
+    State(state): State<AppState>,
+    Path(kind): Path<String>,
+    mut multipart: Multipart,
+) -> Result<Json<Value>, AppError> {
+    if kind != "ptp" && kind != "mue" {
+        return Err(AppError::Unprocessable(
+            "NCCI kind must be ptp or mue".into(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    let mut apply = false;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| AppError::BadRequest("Invalid multipart form data".into()))?
+    {
+        if field.file_name().is_some() {
+            bytes.extend_from_slice(
+                &field
+                    .bytes()
+                    .await
+                    .map_err(|_| AppError::BadRequest("Could not read CSV".into()))?,
+            );
+        } else if field
+            .text()
+            .await
+            .unwrap_or_default()
+            .trim()
+            .eq_ignore_ascii_case("true")
+        {
+            apply = true;
+        }
+    }
+    if bytes.is_empty() || bytes.len() > 50 * 1024 * 1024 {
+        return Err(AppError::BadRequest(
+            "CSV must be present and no larger than 50 MB".into(),
+        ));
+    }
+    let mut csv = csv::ReaderBuilder::new()
+        .trim(csv::Trim::All)
+        .from_reader(bytes.as_slice());
+    let headers = csv
+        .headers()
+        .map_err(|_| AppError::BadRequest("NCCI CSV needs a header row".into()))?
+        .iter()
+        .map(|h| h.to_ascii_lowercase().replace([' ', '-'], "_"))
+        .collect::<Vec<_>>();
+    let find = |names: &[&str]| headers.iter().position(|h| names.contains(&h.as_str()));
+    let c1 = find(&["column_1_code", "column1", "hcpcs_code_1"]);
+    let c2 = find(&["column_2_code", "column2", "hcpcs_code_2"]);
+    let modifier = find(&["modifier_indicator", "modifier"]);
+    let code = find(&["code", "hcpcs_code"]);
+    let value = find(&["mue_value", "mue"]);
+    let adj = find(&["adjudication_indicator", "adjudication"]);
+    let effective = find(&["effective_date", "effective"]);
+    let termination = find(&["termination_date", "termination", "end_date"]);
+    if (kind == "ptp" && (c1.is_none() || c2.is_none() || modifier.is_none()))
+        || (kind == "mue" && (code.is_none() || value.is_none()))
+    {
+        return Err(AppError::BadRequest(
+            "CSV is missing required NCCI columns".into(),
+        ));
+    }
+    let mut valid = 0_i64;
+    let mut errors = Vec::new();
+    for (i, row) in csv.records().enumerate() {
+        let row = row.map_err(|_| AppError::BadRequest("Malformed CSV row".into()))?;
+        let get = |idx: Option<usize>| idx.and_then(|n| row.get(n)).unwrap_or("").trim();
+        let date = |idx| {
+            let v = get(idx);
+            if v.is_empty() {
+                Ok(None)
+            } else {
+                NaiveDate::parse_from_str(v, "%Y-%m-%d")
+                    .map(Some)
+                    .map_err(|_| ())
+            }
+        };
+        let eff = date(effective).map_err(|_| {
+            AppError::BadRequest(format!("row {} has invalid effective_date", i + 2))
+        })?;
+        let term = date(termination).map_err(|_| {
+            AppError::BadRequest(format!("row {} has invalid termination_date", i + 2))
+        })?;
+        if kind == "ptp" {
+            let a = get(c1);
+            let b = get(c2);
+            let m = get(modifier).parse::<i16>().ok();
+            if a.is_empty() || b.is_empty() || !matches!(m, Some(0 | 1 | 9)) {
+                errors.push(i + 2);
+                continue;
+            }
+            valid += 1;
+            if apply {
+                sqlx::query("INSERT INTO ncci_ptp_edits (column_1_code,column_2_code,modifier_indicator,effective_date,termination_date) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (column_1_code,column_2_code,effective_date) DO UPDATE SET modifier_indicator=EXCLUDED.modifier_indicator,termination_date=EXCLUDED.termination_date").bind(a).bind(b).bind(m.unwrap()).bind(eff).bind(term).execute(&state.pool).await.map_err(AppError::Db)?;
+            }
+        } else {
+            let c = get(code);
+            let v = get(value).parse::<i32>().ok();
+            let a = get(adj).parse::<i16>().ok();
+            if c.is_empty() || v.unwrap_or(0) <= 0 || a.is_some_and(|n| !matches!(n, 1 | 2 | 3)) {
+                errors.push(i + 2);
+                continue;
+            }
+            valid += 1;
+            if apply {
+                sqlx::query("INSERT INTO ncci_mue_edits (code,mue_value,adjudication_indicator,effective_date,termination_date) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (code,effective_date) DO UPDATE SET mue_value=EXCLUDED.mue_value,adjudication_indicator=EXCLUDED.adjudication_indicator,termination_date=EXCLUDED.termination_date").bind(c).bind(v.unwrap()).bind(a).bind(eff).bind(term).execute(&state.pool).await.map_err(AppError::Db)?;
+            }
+        }
+    }
+    Ok(Json(
+        json!({"kind":kind,"mode":if apply{"applied"}else{"dry-run"},"valid_rows":valid,"invalid_rows":errors.len(),"invalid_row_numbers":errors.into_iter().take(50).collect::<Vec<_>>() }),
+    ))
+}
+
 // ── Router ────────────────────────────────────────────────────────────────
 
 pub fn router() -> Router<AppState> {
@@ -1011,4 +1133,5 @@ pub fn router() -> Router<AppState> {
         .route("/{kind}/search", get(reference_search))
         .route("/{kind}/delete", post(reference_delete))
         .route("/{kind}/clear", post(reference_clear))
+        .route("/ncci/{kind}/import", post(ncci_import))
 }

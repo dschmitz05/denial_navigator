@@ -99,6 +99,7 @@ export interface ApiOperations {
   "POST /api/v1/playbooks/{id}": { path: { "id": string }; body: { "name": string; "description"?: string; "triggers"?: Record<string, unknown>; "recommendation"?: Record<string, unknown> } };
   "POST /api/v1/playbooks/{id}/approve": { path: { "id": string } };
   "POST /api/v1/playbooks/{id}/archive": { path: { "id": string } };
+  "POST /api/v1/reference/ncci/{kind}/import": { path: { "kind": "ptp" | "mue" }; body: FormData };
   "GET /api/v1/reference/summary": Record<string, never>;
   "POST /api/v1/reference/{kind}/clear": { path: { "kind": "carc" | "rarc" | "icd10" | "cpt" | "hcpcs" | "modifier" }; body: { "confirm": boolean } };
   "POST /api/v1/reference/{kind}/delete": { path: { "kind": "carc" | "rarc" | "icd10" | "cpt" | "hcpcs" | "modifier" }; body: { "code": string } };

@@ -186,6 +186,7 @@ struct DeterministicRecommendationProvider<'a> {
     description: &'a str,
     /// A payer that pays after this claim's payer, if the claim names one.
     next_payer: Option<&'a str>,
+    ncci_evidence: Option<&'a str>,
 }
 
 impl RecommendationProvider for DeterministicRecommendationProvider<'_> {
@@ -212,6 +213,8 @@ impl RecommendationProvider for DeterministicRecommendationProvider<'_> {
             ("missing_info", "clinical_documentation", "Review the remittance advice and submit the requested clinical or claim documentation.")
         } else if matches!(self.carc, "197" | "198" | "204") {
             ("lack_of_preauth", "clinical_documentation", "Verify authorization requirements and gather authorization or medical-necessity support before resubmission.")
+        } else if self.carc == "97" {
+            ("bundled_service", "coding_correction", self.ncci_evidence.unwrap_or("Review the billed service pair against current NCCI PTP edits and verify whether a distinct-service modifier is supported."))
         } else {
             ("other", "coding_correction", "Review the claim, remittance advice, coding, modifiers, and payer edits before corrected resubmission.")
         };
@@ -556,6 +559,13 @@ async fn generate_analysis_for_request(
     let icd: Vec<String> = icd_codes.iter().take(5).cloned().collect();
     let cpt = cpt_code.as_deref().unwrap_or("");
     let carc = carc_code.as_deref().unwrap_or("");
+    let ncci_evidence: Option<String> = if carc == "97" && !cpt.is_empty() {
+        sqlx::query("SELECT p.column_1_code, p.column_2_code, p.modifier_indicator FROM ncci_ptp_edits p JOIN denials other ON other.claim_id=$1 AND other.id<>$2 AND other.cpt_code IN (p.column_1_code,p.column_2_code) WHERE $3 IN (p.column_1_code,p.column_2_code) AND (p.termination_date IS NULL OR p.termination_date >= CURRENT_DATE) ORDER BY p.effective_date DESC NULLS LAST LIMIT 1")
+            .bind(claim_db_id).bind(denial_id).bind(cpt).fetch_optional(&state.pool).await.map_err(AppError::Db)?
+            .map(|row| format!("NCCI PTP edit: {} / {}; modifier indicator {}. Verify documented distinct-service circumstances before submitting a corrected claim.", row.try_get::<String,_>("column_1_code").unwrap_or_default(), row.try_get::<String,_>("column_2_code").unwrap_or_default(), row.try_get::<i16,_>("modifier_indicator").unwrap_or(9)))
+    } else {
+        None
+    };
     let cpt_description = code_description(&state.pool, "cpt_codes", cpt_code.as_deref()).await;
     let icd_descriptions = code_descriptions(&state.pool, "icd10_codes", &icd).await;
     let search_query = build_search_query(
@@ -668,6 +678,7 @@ async fn generate_analysis_for_request(
                     .as_deref()
                     .unwrap_or("the payer's adjustment reason"),
                 next_payer: next_payer_name.as_deref(),
+                ncci_evidence: ncci_evidence.as_deref(),
             }
             .recommend()
             .await?;
@@ -874,6 +885,7 @@ mod tests {
             carc: "1",
             description: "Deductible amount",
             next_payer: None,
+            ncci_evidence: None,
         }
         .recommend()
         .await
@@ -890,6 +902,7 @@ mod tests {
             carc: "2",
             description: "Coinsurance amount",
             next_payer: Some("SYNTHETIC SECONDARY PLAN"),
+            ncci_evidence: None,
         }
         .recommend()
         .await

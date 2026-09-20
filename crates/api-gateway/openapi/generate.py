@@ -714,6 +714,11 @@ add("/api/v1/reference/{kind}/delete",
 add("/api/v1/reference/{kind}/clear",
     post=op("Clear an entire list (manager+)", "reference", params=[KIND],
             body=jbody({"confirm": B()}, ["confirm"])))
+add("/api/v1/reference/ncci/{kind}/import",
+    post=op("Preview or apply a CMS NCCI PTP/MUE CSV", "reference",
+            params=[{"name": "kind", "in": "path", "required": True,
+                     "schema": S(enum=["ptp", "mue"])}],
+            body=multipart({"file": S(format="binary"), "apply": B()}, ["file"])))
 
 # ── audit ────────────────────────────────────────────────────────────────
 add("/api/v1/audit",
