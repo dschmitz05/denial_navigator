@@ -84,6 +84,20 @@ async fn security_headers(req: axum::extract::Request, next: axum::middleware::N
     response
 }
 
+/// Attach an opaque correlation ID even when authorization rejects the
+/// request. Caller-supplied IDs are intentionally ignored to avoid log
+/// injection and cross-system identifier confusion.
+async fn request_id(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let id = uuid::Uuid::new_v4().to_string();
+    let mut response = next.run(req).await;
+    response.headers_mut().insert(
+        HeaderName::from_static("x-request-id"),
+        HeaderValue::from_str(&id).expect("UUID is a valid header value"),
+    );
+    tracing::debug!(request_id = %id, status = %response.status(), "request completed");
+    response
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -143,6 +157,7 @@ async fn main() -> anyhow::Result<()> {
             },
             denial_audit::audit,
         ))
+        .layer(axum::middleware::from_fn(request_id))
         .with_state(state);
 
     let addr: SocketAddr = std::env::var("API_GATEWAY_ADDR")
