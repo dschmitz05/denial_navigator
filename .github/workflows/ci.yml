@@ -48,6 +48,12 @@ jobs:
           path: .
           format: spdx-json
           output-file: sbom.spdx.json
+          # Gitea Actions doesn't support the actions/artifact v2+ protocol
+          # this action's default artifact upload uses (GHESNotSupportedError),
+          # so it always failed the step even though the SBOM generation
+          # itself succeeded. The gate here is Trivy's scan of the tree, not
+          # a downloadable SBOM artifact.
+          upload-artifact: false
       - uses: aquasecurity/trivy-action@v0.28.0
         with:
           scan-type: fs
