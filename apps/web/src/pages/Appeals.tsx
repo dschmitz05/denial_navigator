@@ -147,7 +147,14 @@ export default function Appeals() {
   return (
     <div className="page-body">
       <AiStatusBanner />
-      <div className="filters-bar">
+      <section className="workspace-heading">
+        <div>
+          <p>Appeal management</p>
+          <h1>Protect the recoverable revenue.</h1>
+          <span>Move each appeal from evidence review through submission and outcome with a complete record.</span>
+        </div>
+      </section>
+      <div className="filters-bar denials-filters">
         <select className="form-select" value={outcomeFilter} onChange={e => setOutcomeFilter(e.target.value)}>
           <option value="">All Statuses</option>
           <option value="queued">Queued</option>
