@@ -1,3 +1,7 @@
+-- IF NOT EXISTS throughout: the app's snapshot-tail startup path re-runs
+-- every migration file's raw SQL once, unconditionally, after loading
+-- init.sql on a fresh database (see crates/db/src/migrations.rs), and
+-- init.sql already carries this table. Every migration must tolerate that.
 -- FB-16: structured payer-interaction log.
 --
 -- `payer_contact` has always been a resolution type on appeals_queue and a
@@ -5,10 +9,6 @@
 -- reached, what reference number they gave, what they promised and by
 -- when — was never recorded anywhere but a free-text note. An appeal or an
 -- escalation later depends on exactly that detail.
--- IF NOT EXISTS throughout: rag-engine's snapshot-tail startup path re-runs
--- every migration file's raw SQL once, unconditionally, after loading
--- init.sql on a fresh database (see crates/db/src/migrations.rs), and
--- init.sql already carries this table. Every migration must tolerate that.
 CREATE TABLE IF NOT EXISTS payer_interactions (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     organization_id UUID NOT NULL REFERENCES organizations(id),

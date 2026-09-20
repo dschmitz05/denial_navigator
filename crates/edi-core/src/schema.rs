@@ -281,6 +281,12 @@ pub struct ParsedDenial {
     pub denial_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub denial_date: Option<String>,
+    /// The 835 QTY segment quantity for this line, if one was reported.
+    /// Distinct from SVC05 billed units - see ParsedServiceLine.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reported_quantity: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quantity_qualifier: Option<String>,
 }
 
 impl Default for ParsedDenial {
@@ -300,6 +306,8 @@ impl Default for ParsedDenial {
             rarc_code: None,
             denial_reason: None,
             denial_date: None,
+            reported_quantity: None,
+            quantity_qualifier: None,
         }
     }
 }

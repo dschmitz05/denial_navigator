@@ -330,6 +330,19 @@ fn clean_denial(denial: &serde_json::Value) -> serde_json::Value {
             .unwrap_or(&serde_json::Value::Null),
     )
     .and_then(|s| parse_date(&s));
+    // The 835 QTY segment quantity, if one was reported - distinct from
+    // SVC05 billed units. `f64_from_json` returns 0.0 for a missing/null
+    // value, which is indistinguishable from a genuinely reported zero;
+    // only carry it through when the source actually had the key.
+    let reported_quantity = denial
+        .get("reported_quantity")
+        .filter(|v| !v.is_null())
+        .map(f64_from_json);
+    let quantity_qualifier = str_from_json(
+        denial
+            .get("quantity_qualifier")
+            .unwrap_or(&serde_json::Value::Null),
+    );
 
     serde_json::json!({
         "claim_id": claim_id,
@@ -346,6 +359,8 @@ fn clean_denial(denial: &serde_json::Value) -> serde_json::Value {
         "rarc_code": rarc_code,
         "denial_reason": denial_reason,
         "denial_date": denial_date.map(|d| d.to_string()).unwrap_or_default(),
+        "reported_quantity": reported_quantity,
+        "quantity_qualifier": quantity_qualifier,
     })
 }
 
@@ -777,6 +792,15 @@ async fn store_remittance(
             .get("denial_date")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty());
+        // The 835 QTY segment quantity, if one was reported on this line -
+        // distinct from SVC05 billed units. Lets an MUE evidence check
+        // compare what was reported against a code's per-date unit limit.
+        let reported_quantity: Option<f64> = denial_data
+            .get("reported_quantity")
+            .and_then(|v| v.as_f64());
+        let quantity_qualifier: Option<&str> = denial_data
+            .get("quantity_qualifier")
+            .and_then(|v| v.as_str());
 
         // A payer re-sending a remittance changes the production date, which
         // is part of idx_denials_natural_key; an active copy of the same
@@ -785,10 +809,12 @@ async fn store_remittance(
             "INSERT INTO denials \
              (claim_id, service_line_number, cpt_code, hcpcs_code, modifier_1, modifier_2, \
               charge_amount, payment_amount, adjustment_amount, cagc, carc_code, rarc_code, \
-              adjustment_reason, denial_date, status, appeal_deadline) \
+              adjustment_reason, denial_date, status, appeal_deadline, \
+              reported_quantity, quantity_qualifier) \
              SELECT c.id, $2, $3, $4, $5, $6, $7::numeric, $8::numeric, $9::numeric, $10, $11, $12, \
                     $13, $14::date, 'open', \
-                    appeal_deadline_for(c.payer_name, COALESCE($14::date, CURRENT_DATE)) \
+                    appeal_deadline_for(c.payer_name, COALESCE($14::date, CURRENT_DATE)), \
+                    $17::numeric, $18 \
              FROM claims c \
              WHERE c.claim_number = $1 AND c.organization_id = $15 \
                AND NOT EXISTS ( \
@@ -818,6 +844,8 @@ async fn store_remittance(
         .bind(denial_date)
         .bind(organization_id)
         .bind(reprocessing::ACTIVE_DENIAL_STATUSES)
+        .bind(reported_quantity)
+        .bind(quantity_qualifier)
         .fetch_optional(&mut **tx)
         .await
         .map_err(AppError::Db)?;

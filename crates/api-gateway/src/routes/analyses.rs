@@ -187,6 +187,7 @@ struct DeterministicRecommendationProvider<'a> {
     /// A payer that pays after this claim's payer, if the claim names one.
     next_payer: Option<&'a str>,
     ncci_evidence: Option<&'a str>,
+    mue_evidence: Option<&'a str>,
 }
 
 impl RecommendationProvider for DeterministicRecommendationProvider<'_> {
@@ -215,6 +216,12 @@ impl RecommendationProvider for DeterministicRecommendationProvider<'_> {
             ("lack_of_preauth", "clinical_documentation", "Verify authorization requirements and gather authorization or medical-necessity support before resubmission.")
         } else if self.carc == "97" {
             ("bundled_service", "coding_correction", self.ncci_evidence.unwrap_or("Review the billed service pair against current NCCI PTP edits and verify whether a distinct-service modifier is supported."))
+        } else if self.carc == "151" {
+            // "coding_error", not a category of its own: exceeding an MUE
+            // without a supported split/modifier is a billing error, and
+            // denial_category's CHECK constraint has no dedicated value for
+            // "unit limit exceeded".
+            ("coding_error", "coding_correction", self.mue_evidence.unwrap_or("Review the billed units against the current NCCI MUE for this code before resubmission."))
         } else {
             ("other", "coding_correction", "Review the claim, remittance advice, coding, modifiers, and payer edits before corrected resubmission.")
         };
@@ -516,6 +523,7 @@ async fn generate_analysis_for_request(
 
     let denial = sqlx::query(
         "SELECT d.cagc, d.cpt_code, d.carc_code, d.rarc_code, d.claim_id, \
+                d.reported_quantity::float8 AS reported_quantity, \
                 c.claim_number, c.patient_name, c.payer_name, c.icd_10_codes, c.next_payer_name, \
                 c.service_from, c.payer_id_number, \
                 cc.description AS carc_description, \
@@ -563,6 +571,40 @@ async fn generate_analysis_for_request(
         sqlx::query("SELECT p.column_1_code, p.column_2_code, p.modifier_indicator FROM ncci_ptp_edits p JOIN denials other ON other.claim_id=$1 AND other.id<>$2 AND other.cpt_code IN (p.column_1_code,p.column_2_code) WHERE $3 IN (p.column_1_code,p.column_2_code) AND (p.termination_date IS NULL OR p.termination_date >= CURRENT_DATE) ORDER BY p.effective_date DESC NULLS LAST LIMIT 1")
             .bind(claim_db_id).bind(denial_id).bind(cpt).fetch_optional(&state.pool).await.map_err(AppError::Db)?
             .map(|row| format!("NCCI PTP edit: {} / {}; modifier indicator {}. Verify documented distinct-service circumstances before submitting a corrected claim.", row.try_get::<String,_>("column_1_code").unwrap_or_default(), row.try_get::<String,_>("column_2_code").unwrap_or_default(), row.try_get::<i16,_>("modifier_indicator").unwrap_or(9)))
+    } else {
+        None
+    };
+    // CARC 151 ("information does not support frequency of services") is the
+    // standard code for an MUE (Medically Unlikely Edit) denial - a per-code,
+    // per-date-of-service unit limit. reported_quantity is the 835 QTY
+    // segment's quantity for this line, when the payer reported one; without
+    // it, the edit is still surfaced (the limit itself is useful context) but
+    // cannot say whether this specific line actually exceeded it.
+    let reported_quantity: Option<f64> = denial.try_get("reported_quantity").ok().flatten();
+    let mue_evidence: Option<String> = if carc == "151" && !cpt.is_empty() {
+        sqlx::query(
+            "SELECT mue_value FROM ncci_mue_edits WHERE code = $1 \
+             AND (termination_date IS NULL OR termination_date >= CURRENT_DATE) \
+             ORDER BY effective_date DESC NULLS LAST LIMIT 1",
+        )
+        .bind(cpt)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(AppError::Db)?
+        .map(|row| {
+            let mue_value: i32 = row.try_get("mue_value").unwrap_or(0);
+            match reported_quantity {
+                Some(q) if q > f64::from(mue_value) => format!(
+                    "NCCI MUE for {cpt}: {mue_value} unit(s) allowed per date of service; \
+                     {q} were reported, exceeding the limit. Verify the units billed; an \
+                     appeal needs documentation of medical necessity for the excess units."
+                ),
+                _ => format!(
+                    "NCCI MUE for {cpt}: {mue_value} unit(s) allowed per date of service. \
+                     Verify the billed units against this limit before resubmission."
+                ),
+            }
+        })
     } else {
         None
     };
@@ -679,6 +721,7 @@ async fn generate_analysis_for_request(
                     .unwrap_or("the payer's adjustment reason"),
                 next_payer: next_payer_name.as_deref(),
                 ncci_evidence: ncci_evidence.as_deref(),
+                mue_evidence: mue_evidence.as_deref(),
             }
             .recommend()
             .await?;
@@ -886,6 +929,7 @@ mod tests {
             description: "Deductible amount",
             next_payer: None,
             ncci_evidence: None,
+            mue_evidence: None,
         }
         .recommend()
         .await
@@ -903,6 +947,7 @@ mod tests {
             description: "Coinsurance amount",
             next_payer: Some("SYNTHETIC SECONDARY PLAN"),
             ncci_evidence: None,
+            mue_evidence: None,
         }
         .recommend()
         .await
@@ -913,6 +958,49 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("SYNTHETIC SECONDARY PLAN"));
+    }
+
+    #[tokio::test]
+    async fn a_frequency_denial_cites_the_mue_evidence_when_there_is_any() {
+        let recommendation = DeterministicRecommendationProvider {
+            cagc: "CO",
+            carc: "151",
+            description: "does not support frequency of services",
+            next_payer: None,
+            ncci_evidence: None,
+            mue_evidence: Some("NCCI MUE for 80053: 1 unit(s) allowed per date of service; 2 were reported, exceeding the limit."),
+        }
+        .recommend()
+        .await
+        .unwrap();
+
+        assert_eq!(recommendation["denial_category"], "coding_error");
+        assert_eq!(recommendation["required_action"], "coding_correction");
+        assert_eq!(
+            recommendation["steps"][0]["action"],
+            "NCCI MUE for 80053: 1 unit(s) allowed per date of service; 2 were reported, exceeding the limit."
+        );
+    }
+
+    #[tokio::test]
+    async fn a_frequency_denial_falls_back_without_mue_evidence() {
+        let recommendation = DeterministicRecommendationProvider {
+            cagc: "CO",
+            carc: "151",
+            description: "does not support frequency of services",
+            next_payer: None,
+            ncci_evidence: None,
+            mue_evidence: None,
+        }
+        .recommend()
+        .await
+        .unwrap();
+
+        assert_eq!(recommendation["denial_category"], "coding_error");
+        assert!(recommendation["steps"][0]["action"]
+            .as_str()
+            .unwrap()
+            .contains("MUE"));
     }
 }
 

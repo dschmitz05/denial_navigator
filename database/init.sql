@@ -118,7 +118,12 @@ CREATE TABLE denials (
     recovered_amount DECIMAL(12, 2),
     resolved_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    -- FB-20 follow-up: the 835 QTY segment quantity, distinct from SVC05
+    -- billed units. Lets an MUE evidence check compare what was reported
+    -- against a code's per-date-of-service unit limit.
+    reported_quantity NUMERIC(10, 2),
+    quantity_qualifier VARCHAR(10)
 );
 
 CREATE INDEX idx_denials_claim_id ON denials(claim_id);

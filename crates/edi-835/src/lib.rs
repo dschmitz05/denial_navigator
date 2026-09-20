@@ -601,6 +601,9 @@ fn derive_denials(claims: &[ParsedClaim], payment_info: &ParsedPaymentInfo) -> V
                 rarc_code: adjustment.remark_code.clone(),
                 denial_reason: adjustment.description.clone(),
                 denial_date: Some(denial_date.clone()),
+                // Claim-level adjustment, not tied to one service line.
+                reported_quantity: None,
+                quantity_qualifier: None,
             });
         }
 
@@ -625,6 +628,8 @@ fn derive_denials(claims: &[ParsedClaim], payment_info: &ParsedPaymentInfo) -> V
                     rarc_code: adjustment.remark_code.clone(),
                     denial_reason: adjustment.description.clone(),
                     denial_date: Some(denial_date.clone()),
+                    reported_quantity: sl.reported_quantity,
+                    quantity_qualifier: sl.quantity_qualifier.clone(),
                 });
             }
         }
