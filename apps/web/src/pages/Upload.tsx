@@ -98,6 +98,13 @@ export default function Upload() {
 
   return (
     <div className="page-body">
+      <section className="workspace-heading">
+        <div>
+          <p>Data intake</p>
+          <h1>Bring new remittances into view.</h1>
+          <span>Upload supported claim and remittance files for secure, traceable processing.</span>
+        </div>
+      </section>
       <div className="card">
         <div className="card-header">
           <h3>📁 Upload EDI 835 / 837 Files</h3>

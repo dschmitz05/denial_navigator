@@ -813,6 +813,13 @@ export default function Settings() {
 
   return (
     <div className="page-body">
+      <section className="workspace-heading">
+        <div>
+          <p>Administration</p>
+          <h1>Set the operating guardrails.</h1>
+          <span>Manage security, workflow policies, and system behavior from one deliberate workspace.</span>
+        </div>
+      </section>
       <div className="card">
         <div className="card-header"><h3>⚙️ Settings</h3></div>
         <div className="card-body">
