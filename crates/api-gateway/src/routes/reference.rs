@@ -703,9 +703,13 @@ pub async fn reference_summary(State(state): State<AppState>) -> Result<Json<Val
                 let at: chrono::DateTime<Utc> = l.get("imported_at");
                 let by: Option<String> = l.get("imported_by");
                 let filename: Option<String> = l.get("filename");
-                let added: i64 = l.get("rows_added");
-                let updated: i64 = l.get("rows_updated");
-                let deactivated: i64 = l.get("rows_deactivated");
+                // These columns are INTEGER, not BIGINT - sqlx's typed get()
+                // panics rather than coerces on a width mismatch, which this
+                // path never surfaced before nothing could reach it (see the
+                // init.sql fix for the reference-code tables it reads from).
+                let added: i32 = l.get("rows_added");
+                let updated: i32 = l.get("rows_updated");
+                let deactivated: i32 = l.get("rows_deactivated");
                 json!({
                     "at": at.to_rfc3339(),
                     "by": by,
