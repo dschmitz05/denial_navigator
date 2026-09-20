@@ -39,7 +39,15 @@ export default function Profile() {
     } finally { setSaving(false) }
   }
 
-  return <div className="page-body"><div style={{ display: 'grid', gap: 20, gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', alignItems: 'start' }}>
+  return <div className="page-body">
+    <section className="workspace-heading">
+      <div>
+        <p>Personal settings</p>
+        <h1>Keep your account secure.</h1>
+        <span>Manage your password, session, and workspace preferences in one place.</span>
+      </div>
+    </section>
+    <div style={{ display: 'grid', gap: 20, gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', alignItems: 'start' }}>
     <section className="card"><div className="card-header"><h3>👤 Your account</h3></div><div className="card-body"><div className="detail-grid">
       <Field label="Username" value={user?.username} /><Field label="Name" value={user?.full_name || '—'} />
       <Field label="Role" value={<span className="badge">{user?.role?.replace(/_/g, ' ')}</span>} />
