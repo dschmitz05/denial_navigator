@@ -688,9 +688,9 @@ pub async fn decide(
 ///
 /// Forwarded headers are honoured only when the request actually arrived from
 /// a trusted proxy, and validated before reaching an INET column either way.
-/// `X-Real-IP` is preferred (nginx sets it to `$remote_addr`, which the caller
-/// cannot influence). `X-Forwarded-For` is read from the right-most entry, the
-/// one our own proxy appended; the left-most is attacker-controlled.
+/// For `X-Forwarded-For`, trusted hops are removed from right to left: that
+/// preserves the originating address through an edge proxy plus the in-cluster
+/// nginx hop, but never accepts an address claimed before an untrusted hop.
 pub fn client_ip(peer: Option<SocketAddr>, req: &Request, trusted: &[IpNet]) -> Option<String> {
     let real = req
         .headers()
@@ -716,24 +716,31 @@ pub fn client_ip_from(
     let peer_ip: Option<IpAddr> = peer.map(|p| p.ip());
 
     let is_trusted = peer_ip
-        .map(|ip| trusted.iter().any(|net| net.contains(&ip)))
+        .map(|ip| is_trusted_proxy(ip, trusted))
         .unwrap_or(false);
     if is_trusted {
+        if let Some(fwd) = x_forwarded_for {
+            if let Some(client) = fwd
+                .split(',')
+                .filter_map(|candidate| candidate.trim().parse::<IpAddr>().ok())
+                .rev()
+                .find(|candidate| !is_trusted_proxy(*candidate, trusted))
+            {
+                return Some(client.to_string());
+            }
+        }
         if let Some(real) = x_real_ip {
             if let Ok(ip) = real.trim().parse::<IpAddr>() {
                 return Some(ip.to_string());
             }
         }
-        if let Some(fwd) = x_forwarded_for {
-            if let Some(candidate) = fwd.rsplit(',').next() {
-                if let Ok(ip) = candidate.trim().parse::<IpAddr>() {
-                    return Some(ip.to_string());
-                }
-            }
-        }
     }
 
     peer_ip.map(|ip| ip.to_string())
+}
+
+fn is_trusted_proxy(ip: IpAddr, trusted: &[IpNet]) -> bool {
+    trusted.iter().any(|net| net.contains(&ip))
 }
 
 /// Attach a principal to the request so handlers can read it via
@@ -780,7 +787,9 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{authorize, Principal, PrincipalKind};
+    use super::{authorize, client_ip_from, Principal, PrincipalKind};
+    use ipnet::IpNet;
+    use std::net::SocketAddr;
 
     fn user(role: &str) -> Principal {
         Principal {
@@ -845,5 +854,54 @@ mod tests {
             "/api/v1/settings/write-off-approval"
         )
         .is_err());
+    }
+
+    fn trusted() -> Vec<IpNet> {
+        ["172.28.0.0/24", "10.0.0.0/8"]
+            .into_iter()
+            .map(|network| network.parse().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn forwarded_chain_returns_the_client_not_the_outer_proxy() {
+        let peer: SocketAddr = "172.28.0.4:8000".parse().unwrap();
+        assert_eq!(
+            client_ip_from(
+                Some(peer),
+                Some("10.2.3.4"),
+                Some("203.0.113.8, 10.2.3.4"),
+                &trusted(),
+            ),
+            Some("203.0.113.8".into())
+        );
+    }
+
+    #[test]
+    fn forwarded_chain_discards_a_value_injected_before_the_real_client() {
+        let peer: SocketAddr = "172.28.0.4:8000".parse().unwrap();
+        assert_eq!(
+            client_ip_from(
+                Some(peer),
+                Some("203.0.113.8"),
+                Some("198.51.100.44, 203.0.113.8"),
+                &trusted(),
+            ),
+            Some("203.0.113.8".into())
+        );
+    }
+
+    #[test]
+    fn untrusted_peers_cannot_supply_a_client_ip_header() {
+        let peer: SocketAddr = "198.51.100.8:8000".parse().unwrap();
+        assert_eq!(
+            client_ip_from(
+                Some(peer),
+                Some("203.0.113.8"),
+                Some("203.0.113.8"),
+                &trusted(),
+            ),
+            Some("198.51.100.8".into())
+        );
     }
 }

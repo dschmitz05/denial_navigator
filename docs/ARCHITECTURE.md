@@ -374,12 +374,17 @@ separate per-target internal credentials as well.
 because with multiple workers an in-process counter gives an attacker several
 times the stated budget. TOTP verification is throttled the same way.
 
-**Client IP** is taken from `X-Real-IP`, falling back to the *right-most*
-`X-Forwarded-For` entry, and **only** when the request actually arrived from a
-trusted proxy. `TRUSTED_PROXY_NETWORKS` is a comma-separated list of CIDRs (or
-bare addresses); an entry that does not parse is dropped, and if the list ends
-up empty the forwarded headers are ignored entirely and the peer address is
-used.
+**Client IP** is resolved from `X-Forwarded-For` only when the request actually
+arrived from a trusted proxy. The gateway removes trusted proxy hops from the
+right of the chain and records the first remaining address, so an edge proxy
+and the in-cluster frontend do not replace the client address and a caller
+cannot inject a value before its own address. `X-Real-IP` is the fallback.
+`TRUSTED_PROXY_NETWORKS` is a comma-separated list of CIDRs (or bare
+addresses); an entry that does not parse is dropped, and if the list ends up
+empty the forwarded headers are ignored entirely and the peer address is used.
+When Docker's localhost hairpin NAT hides a browser behind the bridge gateway,
+no application header can recover its original host address; expose the
+frontend through a trusted edge proxy for client-IP attribution in that setup.
 
 **Audit.** Every action against a claim is recorded with actor, IP, user agent
 and the affected record's *claim number*, not just its UUID. The UI renders
