@@ -95,8 +95,8 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-denial_nav}:${POSTGRES_PASSWORD:-denial_nav_pass}@postgres:5432/${POSTGRES_DB:-denial_navigator}
       RAG_INTERNAL_API_KEY: ${RAG_INTERNAL_API_KEY:?set RAG_INTERNAL_API_KEY in .env}
       API_BASE: http://api:8000
-      LLAMA_BASE_URL: ${LLAMA_BASE_URL:-http://10.10.10.98:8080}
-      EMBED_BASE_URL: ${EMBED_BASE_URL:-http://10.10.10.98:8081}
+      LLAMA_BASE_URL: ${LLAMA_BASE_URL:-http://localhost:8080}
+      EMBED_BASE_URL: ${EMBED_BASE_URL:-http://localhost:8081}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
       EMBED_QUERY_PREFIX: ${EMBED_QUERY_PREFIX:-}
       EMBED_DOCUMENT_PREFIX: ${EMBED_DOCUMENT_PREFIX:-}
@@ -122,7 +122,7 @@ services:
       LLM_SERVICE_API_KEY: ${LLM_SERVICE_API_KEY:?set LLM_SERVICE_API_KEY in .env}
       LLM_INTERNAL_API_KEY: ${LLM_INTERNAL_API_KEY:?set LLM_INTERNAL_API_KEY in .env}
       API_BASE: http://api:8000
-      LLAMA_BASE_URL: ${LLAMA_BASE_URL:-http://10.10.10.98:8080}
+      LLAMA_BASE_URL: ${LLAMA_BASE_URL:-http://localhost:8080}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-auto}
       LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-2048}
@@ -151,8 +151,8 @@ services:
       EDIPARSER_SERVICE_URL: http://ediparser:8000
       RAG_ENGINE_URL: http://rag-engine:8000
       LLM_SERVICE_URL: http://llm-service:8000
-      LLAMA_BASE_URL: ${LLAMA_BASE_URL:-http://10.10.10.98:8080}
-      EMBED_BASE_URL: ${EMBED_BASE_URL:-http://10.10.10.98:8081}
+      LLAMA_BASE_URL: ${LLAMA_BASE_URL:-http://localhost:8080}
+      EMBED_BASE_URL: ${EMBED_BASE_URL:-http://localhost:8081}
       AI_DEGRADED_THRESHOLD: ${AI_DEGRADED_THRESHOLD:-0.2}
       # `local` remains the default. To use the optional MinIO profile, set
       # OBJECT_STORAGE_BACKEND=s3 and retain the internal minio endpoint.
@@ -248,12 +248,12 @@ services:
       - keycloak_data:/opt/keycloak/data
 
 # Pin the project's network. Left to Docker, Compose walks the default address
-# pool (172.17, .18, .19 ...) and on 2026-09-09 it landed on 172.20.0.0/16 -
-# which contains the DMZ VLAN (172.20.3.0/24) and the IoT VLAN
-# (172.20.66.0/24). Every packet to the media host, Gitea, TrueNAS and the
-# Denial Navigator VM was then routed into this bridge and dropped. An explicit
-# subnet makes the network deterministic instead of dependent on the order
-# projects happen to start in.
+# pool (172.17, .18, .19 ...), and on a host with other Docker projects or
+# routed subnets already using part of that range, it can land on a block
+# that collides with real infrastructure - every packet to that overlapping
+# subnet then gets routed into this bridge and silently dropped instead. An
+# explicit subnet makes the network deterministic instead of dependent on the
+# order projects happen to start in.
 networks:
   default:
     ipam:

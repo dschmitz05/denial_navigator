@@ -181,8 +181,8 @@ async fn health(
     ))
     .await;
 
-    let llama_url = env_or("LLAMA_BASE_URL", "http://10.10.10.98:8080");
-    let embed_url = env_or("EMBED_BASE_URL", "http://10.10.10.98:8081");
+    let llama_url = env_or("LLAMA_BASE_URL", "http://localhost:8080");
+    let embed_url = env_or("EMBED_BASE_URL", "http://localhost:8081");
     let (llama_status, llama_message) = llm_provider_row(llm_ok, &llm_detail);
     let (embed_status, embed_message) = embedding_provider_row(rag_ok, &rag_detail);
     let (provenance_status, provenance_message, provenance_total, provenance_mismatched) =

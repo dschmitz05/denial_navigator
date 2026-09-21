@@ -83,7 +83,7 @@
 - **M1. Schema diverges from §8.** No `import_batches`, `source_files`, `service_lines`, `adjustments`, `remarks`, `payers`, `recommendations` tables. Service lines are embedded in `claims.raw_835_data JSONB`; adjustments live inside the `denials` row.
 - **M2. Root-cause taxonomy is a hardcoded 10-value `CHECK`** on `ai_analyses.denial_category`, not a seeded/configurable/org-customizable table (§10.2).
 - **M3. API hygiene gaps (§13.2):** no request IDs, no machine-readable error `code`, no `Idempotency-Key`; the `version` column is incremented but not used for optimistic-concurrency conflict detection.
-- **M4. `.env.example:11` ships a real internal IP** — `LLAMA_BASE_URL=http://10.10.10.98:8080`.
+- **M4. `.env.example:11` shipped a real internal IP** as the `LLAMA_BASE_URL` default. ✅ **Fixed:** `.env.example` uses a `<your-llama.cpp-host>` placeholder, and the hardcoded fallback that had leaked into source defaults (`system.rs`, `rag-engine/main.rs`, `docker-compose.rust.yml`, the eval scripts) now falls back to `localhost`, matching every other service's own default convention.
 - **M5. Docs contradiction.** `docs/RELEASE_READINESS.md:38-39` claims "OIDC/Keycloak and multi-organization tenant isolation remain deployment roadmap work," but both are implemented (`crates/auth/src/rbac.rs:555,582-601`, `organization_memberships`, `scripts/test_organization_isolation.sh`).
 - **M6. Governance files missing (§23.2):** no `.github/ISSUE_TEMPLATE/*`, no `PULL_REQUEST_TEMPLATE.md`; only **1 of 10** planned ADRs exists (`docs/adr/0001-modular-monolith-migration.md`).
 - **M7. `QTY` segments unhandled** in the 835 parser (Milestone 1 lists QTY; no `QTY` handling in `crates/`).

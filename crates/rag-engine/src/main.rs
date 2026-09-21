@@ -70,7 +70,7 @@ impl Config {
             // chat model and answers /v1/embeddings with 501. This is the
             // dedicated llama.cpp embedding server (768 dims, matching the
             // vector(768) column and its ivfflat cosine index).
-            embed_base_url: env_or("EMBED_BASE_URL", "http://10.10.10.98:8081"),
+            embed_base_url: env_or("EMBED_BASE_URL", "http://localhost:8081"),
             chunk_chars: env_usize("CHUNK_CHARS", 1500),
             chunk_overlap: env_usize("CHUNK_OVERLAP", 200),
             min_similarity: env_f64("MIN_SIMILARITY", 0.62),

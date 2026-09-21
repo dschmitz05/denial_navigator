@@ -193,7 +193,7 @@ def evaluate(cases, min_similarity: float, relative_cut: float) -> Outcome:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--cases", default=str(ROOT / "fixtures" / "retrieval_eval.json"))
-    parser.add_argument("--embed-url", default=os.environ.get("EMBED_BASE_URL", "http://10.10.10.98:8081"))
+    parser.add_argument("--embed-url", default=os.environ.get("EMBED_BASE_URL", "http://localhost:8081"))
     parser.add_argument("--model", default=os.environ.get("EMBEDDING_MODEL", "nomic-embed-text"))
     parser.add_argument("--query-prefix", default=os.environ.get("EMBED_QUERY_PREFIX") or "search_query: ")
     parser.add_argument("--db-container", default=os.environ.get("DB_CONTAINER", "denialnav-rust-postgres"))

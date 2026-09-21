@@ -36,7 +36,7 @@ from pathlib import Path
 # and should work on the host, where the container's dependencies are absent.
 
 RAG_ENGINE_URL = os.environ.get("RAG_ENGINE_URL", "http://rag-engine:8000")
-LLAMA_BASE_URL = os.environ.get("LLAMA_BASE_URL", "http://10.10.10.98:8080")
+LLAMA_BASE_URL = os.environ.get("LLAMA_BASE_URL", "http://localhost:8080")
 LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "2048"))
 DISABLE_THINKING = os.environ.get("LLM_DISABLE_THINKING", "true").lower() not in ("0", "false", "no")
 
