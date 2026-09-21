@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { useNavigate, type NavigateFunction } from 'react-router-dom'
+import { Download } from 'lucide-react'
 
 const API_BASE = '/api/v1'
 
@@ -117,11 +118,12 @@ export default function Dashboard() {
     <div className="page-body">
       <section className="dashboard-hero">
         <div>
-          <p className="dashboard-eyebrow">Revenue cycle overview</p>
-          <h1>Keep recovery work moving.</h1>
-          <p>See today’s exposure, the work nearest its deadline, and where your team can make the biggest impact.</p>
+          <h1>Dashboard</h1>
+          <p>Today's exposure, the work nearest its deadline, and where to focus next.</p>
         </div>
-        <button className="btn dashboard-export" onClick={exportClaims}><span aria-hidden="true">↓</span> Export claims CSV</button>
+        <button className="btn dashboard-export" onClick={exportClaims}>
+          <Download size={15} strokeWidth={2} aria-hidden="true" /> Export claims CSV
+        </button>
       </section>
       <div className="stats-grid">
         <StatCard

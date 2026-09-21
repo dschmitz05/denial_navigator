@@ -231,13 +231,7 @@ export default function Users() {
 
   return (
     <div className="page-body">
-      <section className="workspace-heading">
-        <div>
-          <p>Access management</p>
-          <h1>Give every teammate the right access.</h1>
-          <span>Manage roles, account status, and security requirements with a clear audit trail.</span>
-        </div>
-      </section>
+      <h1 className="page-title">Users</h1>
       <div className="card">
         <div className="card-header">
           <h3>👥 User Management</h3>

@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import { Check, ShieldCheck, Lock } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 
 type LoginResult =
@@ -114,16 +115,16 @@ export default function Login({ onLogin, onComplete }: LoginProps) {
     <main className="login-shell">
       <section className="login-brand" aria-label="Denial Navigator overview">
         <div className="login-brand-content">
-          <div className="login-mark" aria-hidden="true"><span>DN</span></div>
-          <p className="login-eyebrow">Revenue cycle command center</p>
-          <h1>Bring every denial into focus.</h1>
+          <div className="login-mark" aria-hidden="true"><ShieldCheck size={22} strokeWidth={2.25} /></div>
+          <p className="login-eyebrow">Denial Navigator</p>
+          <h1>Revenue cycle workspace</h1>
           <p className="login-brand-copy">
             Prioritize recovery, coordinate the next action, and keep a clear record of every decision.
           </p>
           <div className="login-points" aria-label="Product capabilities">
-            <div><span className="login-point-icon">✓</span><span>One queue for claims, denials, and appeals</span></div>
-            <div><span className="login-point-icon">✓</span><span>Evidence-backed recommendations and deadlines</span></div>
-            <div><span className="login-point-icon">✓</span><span>Secure, role-based access to your workflow</span></div>
+            <div><span className="login-point-icon"><Check size={13} strokeWidth={3} /></span><span>One queue for claims, denials, and appeals</span></div>
+            <div><span className="login-point-icon"><Check size={13} strokeWidth={3} /></span><span>Evidence-backed recommendations and deadlines</span></div>
+            <div><span className="login-point-icon"><Check size={13} strokeWidth={3} /></span><span>Secure, role-based access to your workflow</span></div>
           </div>
         </div>
         <p className="login-brand-footer">Built for teams protecting every earned dollar.</p>
@@ -131,7 +132,7 @@ export default function Login({ onLogin, onComplete }: LoginProps) {
 
       <section className="login-panel">
         <div className="login-card">
-          <div className="login-mobile-mark" aria-hidden="true"><span>DN</span></div>
+          <div className="login-mobile-mark" aria-hidden="true"><ShieldCheck size={20} strokeWidth={2.25} /></div>
           <header className="login-header">
             <p className="login-kicker">
               {stage === 'password' ? 'Welcome back' : 'Secure sign-in'}
@@ -200,7 +201,7 @@ export default function Login({ onLogin, onComplete }: LoginProps) {
               <button type="submit" className="login-submit" disabled={loading}>{loading ? 'Signing in…' : 'Sign in'}</button>
             </form>
           )}
-          <p className="login-security"><span aria-hidden="true">⌁</span> Your access is protected with secure authentication.</p>
+          <p className="login-security"><Lock size={12} strokeWidth={2.25} aria-hidden="true" /> Your access is protected with secure authentication.</p>
         </div>
       </section>
     </main>

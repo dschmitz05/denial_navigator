@@ -57,13 +57,7 @@ export default function Organizations() {
 
   return (
     <div className="page-body">
-      <section className="workspace-heading">
-        <div>
-          <p>Tenant provisioning</p>
-          <h1>Stand up a new organization.</h1>
-          <span>Every other admin action is scoped to your own organization; this is the one place a new tenant gets created.</span>
-        </div>
-      </section>
+      <h1 className="page-title">Organizations</h1>
       <div className="card">
         <div className="card-header">
           <h3>🏢 Organizations</h3>

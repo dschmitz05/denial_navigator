@@ -338,13 +338,7 @@ export default function Claims() {
   return (
     <div className="page-body">
       <AiStatusBanner />
-      <section className="workspace-heading">
-        <div>
-          <p>Claim inventory</p>
-          <h1>See every claim in context.</h1>
-          <span>Search the full lifecycle, review payment status, and open the records that need attention.</span>
-        </div>
-      </section>
+      <h1 className="page-title">Claims</h1>
       <div className="filters-bar denials-filters">
         <select className="form-select" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
           <option value="">All Statuses</option>

@@ -126,13 +126,7 @@ export default function Audit() {
 
   return (
     <div className="page-body">
-      <section className="workspace-heading">
-        <div>
-          <p>Compliance record</p>
-          <h1>Review activity with confidence.</h1>
-          <span>Trace system access and workflow events without exposing the underlying patient data.</span>
-        </div>
-      </section>
+      <h1 className="page-title">Audit Log</h1>
       <div className="card">
         <div className="card-header">
           <h3>Audit Log</h3>
