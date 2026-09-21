@@ -70,6 +70,9 @@ dropzone/
 /target/
 /fuzz/target/
 
+# Fuzzer-generated corpus (binary, campaign-specific) - not source.
+/fuzz/corpus/
+
 # Large reference-data import samples and scratch remittances used during the
 # rewrite; test inputs, not source.
 /icd10_october2026_0.csv

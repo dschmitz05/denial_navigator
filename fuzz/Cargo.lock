@@ -423,6 +423,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "denial_edi_835"
+version = "1.0.0"
+dependencies = [
+ "chrono",
+ "denial_edi_837",
+ "denial_edi_core",
+]
+
+[[package]]
+name = "denial_edi_837"
+version = "1.0.0"
+dependencies = [
+ "denial_edi_core",
+]
+
+[[package]]
+name = "denial_edi_core"
+version = "1.0.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "denial_jobs"
+version = "1.0.0"
+dependencies = [
+ "tracing",
+]
+
+[[package]]
+name = "denial_storage"
+version = "1.0.0"
+dependencies = [
+ "chrono",
+ "hmac",
+ "reqwest",
+ "sha2",
+ "thiserror",
+ "url",
+]
+
+[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -475,6 +517,11 @@ dependencies = [
  "axum",
  "chrono",
  "denial_common",
+ "denial_edi_835",
+ "denial_edi_837",
+ "denial_edi_core",
+ "denial_jobs",
+ "denial_storage",
  "reqwest",
  "serde",
  "serde_json",
@@ -483,6 +530,8 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -1695,6 +1744,7 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "http",
