@@ -41,11 +41,6 @@ jobs:
 
   supply-chain:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      # Needed only for the generic-package upload below, which stands in
-      # for the artifact upload Gitea can't do (see that step's comment).
-      packages: write
     steps:
       - uses: actions/checkout@v4
       - uses: anchore/sbom-action@v0
@@ -60,15 +55,18 @@ jobs:
           # this file - see the next step for how the SBOM itself is kept.
           upload-artifact: false
       # Gitea has no artifact-download UI, but it does have a generic package
-      # registry, which is a plain PUT/GET over HTTP the built-in Actions
-      # token can authenticate to. Only push (not every PR) writes a version,
-      # named by commit so `git log` and this registry stay correlated; a
-      # 409 on a re-run of the same commit is expected and not a failure.
+      # registry, which is a plain PUT/GET over HTTP. The built-in Actions
+      # token can't authenticate to it (401 - confirmed by testing directly
+      # against a live instance, not assumed), so this uses a dedicated
+      # access token with write:package scope, stored as the PACKAGES_TOKEN
+      # repo secret. Only push (not every PR) writes a version, named by
+      # commit so `git log` and this registry stay correlated; a 409 on a
+      # re-run of the same commit is expected and not a failure.
       - name: Retain the SBOM as release evidence
         if: github.event_name == 'push'
         run: |
           status=$(curl -s -o /dev/null -w '%{http_code}' -X PUT \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Authorization: token ${{ secrets.PACKAGES_TOKEN }}" \
             --upload-file sbom.spdx.json \
             "${{ github.server_url }}/api/packages/${{ github.repository_owner }}/generic/denial-navigator-sbom/${{ github.sha }}/sbom.spdx.json")
           if [ "$status" != "201" ] && [ "$status" != "409" ]; then
