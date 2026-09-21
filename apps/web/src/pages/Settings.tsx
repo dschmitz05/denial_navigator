@@ -810,6 +810,10 @@ export default function Settings() {
 
   const overall = health?.overall
   const overallLook = STATUS_LOOK[overall || 'down'] || STATUS_LOOK.down
+  const serviceUrl = (url: unknown, fallback: string) =>
+    (typeof url === 'string' && url ? url : fallback).replace(/\/$/, '')
+  const llamaUrl = serviceUrl(health?.urls?.llama, 'http://localhost:8080')
+  const embedUrl = serviceUrl(health?.urls?.embed, 'http://localhost:8081')
 
   return (
     <div className="page-body">
@@ -989,12 +993,12 @@ export default function Settings() {
             To inspect them directly:
           </p>
           <div className="code-block">
-            <span className="comment"># List the models the server currently has loaded</span>{'\n'}
-            curl http://10.10.10.98:8080/v1/models{'\n\n'}
-            <span className="comment"># Check the server is up</span>{'\n'}
-            curl http://10.10.10.98:8080/health{'\n\n'}
-            <span className="comment"># Embeddings come from Ollama, not the chat server</span>{'\n'}
-            curl http://10.10.10.98:11434/api/tags
+            <span className="comment"># List the reasoning model loaded by llama.cpp</span>{'\n'}
+            {`curl ${llamaUrl}/v1/models`}{'\n\n'}
+            <span className="comment"># Check the reasoning server is up</span>{'\n'}
+            {`curl ${llamaUrl}/health`}{'\n\n'}
+            <span className="comment"># List the model on the separate llama.cpp embedding server</span>{'\n'}
+            {`curl ${embedUrl}/v1/models`}
           </div>
 
           <h4 style={{ marginTop: 24, marginBottom: 16 }}>Security &amp; compliance</h4>
