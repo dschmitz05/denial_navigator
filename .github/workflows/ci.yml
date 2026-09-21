@@ -41,6 +41,11 @@ jobs:
 
   supply-chain:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Needed only for the generic-package upload below, which stands in
+      # for the artifact upload Gitea can't do (see that step's comment).
+      packages: write
     steps:
       - uses: actions/checkout@v4
       - uses: anchore/sbom-action@v0
@@ -52,8 +57,24 @@ jobs:
           # this action's default artifact upload uses (GHESNotSupportedError),
           # so it always failed the step even though the SBOM generation
           # itself succeeded. The gate here is Trivy's scan of the tree, not
-          # a downloadable SBOM artifact.
+          # this file - see the next step for how the SBOM itself is kept.
           upload-artifact: false
+      # Gitea has no artifact-download UI, but it does have a generic package
+      # registry, which is a plain PUT/GET over HTTP the built-in Actions
+      # token can authenticate to. Only push (not every PR) writes a version,
+      # named by commit so `git log` and this registry stay correlated; a
+      # 409 on a re-run of the same commit is expected and not a failure.
+      - name: Retain the SBOM as release evidence
+        if: github.event_name == 'push'
+        run: |
+          status=$(curl -s -o /dev/null -w '%{http_code}' -X PUT \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            --upload-file sbom.spdx.json \
+            "${{ github.server_url }}/api/packages/${{ github.repository_owner }}/generic/denial-navigator-sbom/${{ github.sha }}/sbom.spdx.json")
+          if [ "$status" != "201" ] && [ "$status" != "409" ]; then
+            echo "SBOM publish failed with HTTP $status"
+            exit 1
+          fi
       # aquasecurity/trivy-action is a composite action that calls
       # aquasecurity/setup-trivy internally; that nested action call is
       # silently skipped on this runner (a known nektos/act limitation -
