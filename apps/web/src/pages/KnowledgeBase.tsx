@@ -241,8 +241,9 @@ export default function KnowledgeBase() {
           <>
             <button className="btn btn-primary" onClick={() => setShowForm(!showForm)}>+ Add Document</button>
             <label className="btn" style={{ cursor: 'pointer' }}>
-              {indexing ? 'Indexing…' : '⬆ Upload PDF / .txt / .md'}
-              <input type="file" accept=".pdf,.txt,.md,application/pdf,text/plain,text/markdown"
+              {indexing ? 'Indexing…' : '⬆ Upload PDF / CSV / Excel / .txt / .md'}
+              <input type="file"
+                     accept=".pdf,.csv,.xlsx,.xls,.xlsb,.ods,.txt,.md,application/pdf,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/plain,text/markdown"
                      style={{ display: 'none' }} onChange={handleUpload} disabled={indexing} />
             </label>
             <button className="btn" onClick={() => setShowLcdImport(!showLcdImport)}>

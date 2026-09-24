@@ -1,11 +1,15 @@
 //! Knowledge base routes.
 //!
-//! Ported from `api-gateway/routes/knowledge.py`. Documents are text and PDFs;
-//! a PDF is identified by its magic bytes, not the filename or the browser's
-//! content-type guess. Indexing is delegated to the rag-engine, which embeds
-//! the chunks into pgvector. Retiring a document ARCHIVES it by default (row
-//! kept for audit, chunks deleted so it stops steering the LLM); `?purge=true`
-//! removes the record entirely.
+//! Ported from `api-gateway/routes/knowledge.py`. Documents are text, PDFs,
+//! CSVs and spreadsheets (.xlsx/.xls/.xlsb/.ods); a PDF is identified by its
+//! magic bytes, while CSV/spreadsheet formats (text and zip/OLE containers
+//! respectively) are identified by filename extension instead. Spreadsheet
+//! rows and CSV rows are rendered as batched `header: value` text sections
+//! rather than indexed as a raw grid, so retrieval returns coherent rows
+//! instead of grid fragments. Indexing is delegated to the rag-engine, which
+//! embeds the chunks into pgvector. Retiring a document ARCHIVES it by
+//! default (row kept for audit, chunks deleted so it stops steering the
+//! LLM); `?purge=true` removes the record entirely.
 
 use axum::extract::{Multipart, Path, Query, State};
 use axum::http::StatusCode;
@@ -185,6 +189,149 @@ fn ocr_pdf_blocking(raw: &[u8]) -> Result<Vec<KnowledgeSection>, AppError> {
     Ok(sections)
 }
 
+/// Rows are batched (rather than one section per row) so a large export
+/// doesn't fan out into thousands of tiny chunks; each batch repeats the
+/// header for every row so a chunk boundary mid-batch still reads as
+/// self-contained key/value pairs instead of orphaned values.
+const ROWS_PER_SECTION: usize = 25;
+
+/// Renders a sheet's rows (headers first) as batched `header: value` text
+/// sections - friendlier for embedding/retrieval than a raw grid, since a
+/// chunk boundary lands between rows rather than mid-row.
+fn rows_to_sections(
+    headers: &[String],
+    rows: impl Iterator<Item = Vec<String>>,
+    section_label: Option<&str>,
+) -> (Vec<KnowledgeSection>, usize) {
+    let mut sections = Vec::new();
+    let mut batch = String::new();
+    let mut batch_rows = 0usize;
+    let mut total_rows = 0usize;
+
+    let flush = |batch: &mut String, batch_rows: &mut usize, sections: &mut Vec<KnowledgeSection>| {
+        if *batch_rows > 0 {
+            sections.push(KnowledgeSection {
+                content: std::mem::take(batch).trim_end().to_string(),
+                page: None,
+                section: section_label.map(str::to_string),
+            });
+            *batch_rows = 0;
+        }
+    };
+
+    for row in rows {
+        if row.iter().all(|cell| cell.trim().is_empty()) {
+            continue;
+        }
+        for (i, cell) in row.iter().enumerate() {
+            if cell.trim().is_empty() {
+                continue;
+            }
+            let header = headers.get(i).map(String::as_str).unwrap_or("column");
+            batch.push_str(header);
+            batch.push_str(": ");
+            batch.push_str(cell.trim());
+            batch.push('\n');
+        }
+        batch.push('\n');
+        batch_rows += 1;
+        total_rows += 1;
+        if batch_rows >= ROWS_PER_SECTION {
+            flush(&mut batch, &mut batch_rows, &mut sections);
+        }
+    }
+    flush(&mut batch, &mut batch_rows, &mut sections);
+    (sections, total_rows)
+}
+
+/// Parses a CSV upload into batched `header: value` sections via the `csv`
+/// crate (already used for LCD/reference-table imports).
+fn parse_csv_upload(raw: &[u8]) -> Result<(Vec<KnowledgeSection>, serde_json::Value), AppError> {
+    let mut reader = csv::ReaderBuilder::new()
+        .flexible(true)
+        .trim(csv::Trim::All)
+        .from_reader(raw);
+    let headers: Vec<String> = reader
+        .headers()
+        .map_err(|e| AppError::BadRequest(format!("Could not read CSV header row: {e}")))?
+        .iter()
+        .map(str::to_string)
+        .collect();
+
+    let mut parse_error = None;
+    let rows = reader.records().filter_map(|rec| match rec {
+        Ok(record) => Some(record.iter().map(str::to_string).collect::<Vec<_>>()),
+        Err(e) => {
+            parse_error.get_or_insert(e);
+            None
+        }
+    });
+    let (sections, total_rows) = rows_to_sections(&headers, rows, None);
+    if let Some(e) = parse_error {
+        return Err(AppError::BadRequest(format!(
+            "Could not parse CSV: {e}"
+        )));
+    }
+    if sections.is_empty() {
+        return Err(AppError::BadRequest("CSV has no data rows".into()));
+    }
+    Ok((
+        sections,
+        serde_json::json!({"format": "csv", "rows": total_rows, "columns": headers.len()}),
+    ))
+}
+
+/// Parses a spreadsheet upload (.xlsx/.xls/.xlsb/.ods) into batched
+/// `header: value` sections, one section-group per sheet. Format is
+/// auto-detected by calamine from the file contents, not the extension.
+fn parse_spreadsheet_upload(
+    raw: Vec<u8>,
+    filename: &str,
+) -> Result<(Vec<KnowledgeSection>, serde_json::Value), AppError> {
+    use calamine::{open_workbook_auto_from_rs, Reader};
+
+    let mut workbook = open_workbook_auto_from_rs(std::io::Cursor::new(raw))
+        .map_err(|e| AppError::BadRequest(format!("Could not read {filename} as a spreadsheet: {e}")))?;
+
+    let mut sections = Vec::new();
+    let mut total_rows = 0usize;
+    let mut sheet_count = 0usize;
+    for sheet_name in workbook.sheet_names().to_owned() {
+        let range = match workbook.worksheet_range(&sheet_name) {
+            Ok(range) => range,
+            Err(_) => continue,
+        };
+        let mut rows = range.rows();
+        let headers: Vec<String> = match rows.next() {
+            Some(header_row) => header_row.iter().map(|c| c.to_string()).collect(),
+            None => continue,
+        };
+        let data_rows = rows.map(|row| row.iter().map(|c| c.to_string()).collect::<Vec<_>>());
+        let (mut sheet_sections, rows_in_sheet) =
+            rows_to_sections(&headers, data_rows, Some(&sheet_name));
+        if rows_in_sheet == 0 {
+            continue;
+        }
+        sheet_count += 1;
+        total_rows += rows_in_sheet;
+        sections.append(&mut sheet_sections);
+    }
+
+    if sections.is_empty() {
+        return Err(AppError::Unprocessable(
+            "No data rows found in this spreadsheet (every sheet is empty or header-only)".into(),
+        ));
+    }
+    Ok((
+        sections,
+        serde_json::json!({"format": "spreadsheet", "sheets": sheet_count, "rows": total_rows}),
+    ))
+}
+
+fn has_extension(filename: &str, ext: &str) -> bool {
+    filename.to_ascii_lowercase().ends_with(ext)
+}
+
 /// Turn an uploaded file into indexable text plus metadata.
 async fn decode_upload(
     raw: Vec<u8>,
@@ -204,9 +351,28 @@ async fn decode_upload(
         ));
     }
 
+    // Spreadsheets are zip- (xlsx/xlsb/ods) or OLE- (xls) container formats,
+    // not text, so they're identified by extension rather than magic bytes
+    // or a failed UTF-8 decode.
+    if ["xlsx", "xls", "xlsb", "ods"]
+        .iter()
+        .any(|ext| has_extension(filename, &format!(".{ext}")))
+    {
+        let filename = filename.to_string();
+        return tokio::task::spawn_blocking(move || parse_spreadsheet_upload(raw, &filename))
+            .await
+            .map_err(|e| AppError::Internal(format!("Spreadsheet parsing task failed: {e}")))?;
+    }
+
+    if has_extension(filename, ".csv") {
+        return tokio::task::spawn_blocking(move || parse_csv_upload(&raw))
+            .await
+            .map_err(|e| AppError::Internal(format!("CSV parsing task failed: {e}")))?;
+    }
+
     let text = String::from_utf8(raw).map_err(|_| {
         AppError::BadRequest(format!(
-            "{filename} is neither a PDF nor UTF-8 text. Supported: .pdf, .txt, .md"
+            "{filename} is neither a PDF nor UTF-8 text. Supported: .pdf, .csv, .xlsx, .xls, .ods, .txt, .md"
         ))
     })?;
     if text.trim().is_empty() {
@@ -494,9 +660,16 @@ pub async fn upload_document(
     }
     let filename = filename.unwrap_or_else(|| "upload".to_string());
 
-    let is_pdf = raw.starts_with(PDF_MAGIC);
     let (sections, meta) = decode_upload(raw.clone(), &filename).await?;
     let size = raw.len() as i64;
+    let mime_type = match meta.get("format").and_then(|v| v.as_str()) {
+        Some("pdf") | Some("pdf-ocr") => "application/pdf",
+        Some("csv") => "text/csv",
+        Some("spreadsheet") => {
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        }
+        _ => "text/plain",
+    };
 
     let row = sqlx::query(
         "INSERT INTO knowledge_documents \
@@ -510,11 +683,7 @@ pub async fn upload_document(
     .bind(params.payer_name.as_deref().unwrap_or(""))
     .bind(params.effective_date)
     .bind(params.expiration_date)
-    .bind(if is_pdf {
-        "application/pdf"
-    } else {
-        "text/plain"
-    })
+    .bind(mime_type)
     .bind(size)
     .bind(serde_json::json!({"upload": meta, "jurisdiction": params.jurisdiction, "version_label": params.version_label}).to_string())
     .fetch_one(&state.pool)
@@ -920,7 +1089,39 @@ pub fn router() -> Router<AppState> {
 
 #[cfg(test)]
 mod tests {
-    use super::{merge_overlapping_chunks, ocr_pdf_blocking};
+    use super::{merge_overlapping_chunks, ocr_pdf_blocking, parse_csv_upload};
+
+    #[test]
+    fn parses_csv_rows_into_header_value_sections() {
+        let csv = "Code,Description,Rate\nA1,Widget,10.50\nA2,Gadget,20.00\n";
+        let (sections, meta) = parse_csv_upload(csv.as_bytes()).unwrap();
+        assert_eq!(sections.len(), 1);
+        assert!(sections[0].content.contains("Code: A1"));
+        assert!(sections[0].content.contains("Description: Widget"));
+        assert!(sections[0].content.contains("Rate: 10.50"));
+        assert!(sections[0].content.contains("Code: A2"));
+        assert_eq!(meta["format"], "csv");
+        assert_eq!(meta["rows"], 2);
+    }
+
+    #[test]
+    fn csv_with_no_data_rows_is_rejected() {
+        let csv = "Code,Description\n";
+        let err = parse_csv_upload(csv.as_bytes()).unwrap_err();
+        assert!(format!("{err:?}").contains("no data rows"));
+    }
+
+    #[test]
+    fn csv_batches_rows_so_a_large_file_does_not_fan_out_one_section_per_row() {
+        let mut csv = String::from("Code\n");
+        for i in 0..60 {
+            csv.push_str(&format!("A{i}\n"));
+        }
+        let (sections, meta) = parse_csv_upload(csv.as_bytes()).unwrap();
+        // 60 rows / 25 rows-per-section = 3 batches (25, 25, 10).
+        assert_eq!(sections.len(), 3);
+        assert_eq!(meta["rows"], 60);
+    }
 
     fn have_ocr_tools() -> bool {
         std::process::Command::new("pdftoppm")
