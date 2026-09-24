@@ -390,6 +390,24 @@ struct IngestDocumentRequest {
     content: Option<String>,
     #[serde(default)]
     sections: Vec<IngestSection>,
+    /// Incremental ingest: where this batch's chunks start in the document's
+    /// chunk sequence. Absent means a whole-document ingest starting at 0.
+    #[serde(default)]
+    chunk_index_offset: Option<i32>,
+    /// Drop the document's existing chunks first. True for a whole-document
+    /// ingest and for a batched one's first batch; false for the rest, which
+    /// would otherwise delete the batches before them.
+    #[serde(default = "yes")]
+    replace_existing: bool,
+    /// Flip the document to `indexed` when this batch commits. A batched
+    /// ingest sets it only on the final batch, so a run interrupted halfway
+    /// leaves the document `pending` rather than claiming to be complete.
+    #[serde(default = "yes")]
+    finalize: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -632,12 +650,16 @@ async fn ingest_document(
         None
     };
 
+    let chunk_index_offset = req.chunk_index_offset.unwrap_or(0);
+
     let mut tx = state.pool.begin().await?;
     // Re-ingesting a document replaces its chunks rather than duplicating them.
-    sqlx::query("DELETE FROM knowledge_chunks WHERE knowledge_document_id = $1")
-        .bind(doc_id)
-        .execute(&mut *tx)
-        .await?;
+    if req.replace_existing {
+        sqlx::query("DELETE FROM knowledge_chunks WHERE knowledge_document_id = $1")
+            .bind(doc_id)
+            .execute(&mut *tx)
+            .await?;
+    }
     // FB-13: recorded only when this chunk actually got a vector, so a chunk
     // indexed while VECTOR_SEARCH_ENABLED=false has no provenance to compare
     // later, exactly like its NULL embedding.
@@ -660,7 +682,7 @@ async fn ingest_document(
              VALUES ($1, $2, $3, $4::vector, $5::jsonb, $6, $7, $8, $9)",
         )
         .bind(doc_id)
-        .bind(i as i32)
+        .bind(chunk_index_offset + i as i32)
         .bind(chunk)
         .bind(vectors.as_ref().map(|items| format_vector(&items[i])))
         .bind(metadata)
@@ -671,18 +693,21 @@ async fn ingest_document(
         .execute(&mut *tx)
         .await?;
     }
-    sqlx::query(
-        "UPDATE knowledge_documents SET status = 'indexed', updated_at = NOW() WHERE id = $1",
-    )
-    .bind(doc_id)
-    .execute(&mut *tx)
-    .await?;
+    if req.finalize {
+        sqlx::query(
+            "UPDATE knowledge_documents SET status = 'indexed', updated_at = NOW() WHERE id = $1",
+        )
+        .bind(doc_id)
+        .execute(&mut *tx)
+        .await?;
+    }
     tx.commit().await?;
 
     Ok(Json(json!({
-        "status": "indexed",
+        "status": if req.finalize { "indexed" } else { "pending" },
         "document_id": doc_id.to_string(),
         "chunks": chunks.len(),
+        "next_chunk_index": chunk_index_offset + chunks.len() as i32,
         "embedding_model": state.cfg.embedding_model,
         "dimensions": vectors.as_ref().and_then(|items| items.first()).map(Vec::len),
         "vector_search_enabled": state.cfg.vector_search_enabled,
@@ -838,7 +863,17 @@ fn build_router(state: AppState) -> Router {
             key,
             denial_common::internal_auth::require_internal_key,
         ));
-    let mut app = Router::new().route("/health", get(health)).merge(protected);
+    let mut app = Router::new()
+        .route("/health", get(health))
+        .merge(protected)
+        // /ingest-document carries a whole document's sections as JSON, and a
+        // tabular upload (CSV/spreadsheet) expands well past the raw file: the
+        // header names are repeated for every row. axum's 2 MB default was
+        // rejecting those before the handler ever ran, with a plain-text 413
+        // that the gateway could only report as "error decoding response body".
+        // Sized above the gateway's 25 MB knowledge-upload cap and the
+        // expansion it can produce, mirroring the gateway's generous ceiling.
+        .layer(axum::extract::DefaultBodyLimit::max(256 * 1024 * 1024));
 
     // Reached by the gateway over the Docker network, never a browser, so no
     // CORS by default. Added only if configured.

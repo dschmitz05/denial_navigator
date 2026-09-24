@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use reqwest::{multipart, Client};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::{env_required_secret, env_u64};
@@ -19,20 +19,51 @@ fn env_url(var: &str, default: &str) -> String {
 
 async fn check(resp: reqwest::Response) -> Result<Value, AppError> {
     let status = resp.status();
-    let body: Value = resp
-        .json()
+    // Read the body as bytes first. A sibling service can fail *before* its
+    // own handler runs - a tower layer rejecting an oversized body returns
+    // 413 with a plain-text body, for instance - and parsing as JSON up front
+    // turned every such failure into a bare "error decoding response body",
+    // hiding both the status and the reason.
+    let body = resp
+        .bytes()
         .await
         .map_err(|e| AppError::Upstream(e.to_string()))?;
+    let parsed: Option<Value> = serde_json::from_slice(&body).ok();
+
     if status.is_success() {
-        Ok(body)
-    } else {
-        let msg = body
-            .get("detail")
-            .and_then(|d| d.as_str())
-            .unwrap_or(status.as_str())
-            .to_string();
-        Err(AppError::Upstream(format!("upstream {status}: {msg}")))
+        return parsed.ok_or_else(|| {
+            AppError::Upstream(format!(
+                "upstream {status} returned a non-JSON body: {}",
+                snippet(&body)
+            ))
+        });
     }
+
+    let msg = parsed
+        .as_ref()
+        .and_then(|b| b.get("detail"))
+        .and_then(|d| d.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| snippet(&body));
+    Err(AppError::Upstream(format!("upstream {status}: {msg}")))
+}
+
+/// A short, single-line rendering of a non-JSON upstream body, for error text.
+fn snippet(body: &[u8]) -> String {
+    let text = String::from_utf8_lossy(body);
+    let text = text.trim();
+    if text.is_empty() {
+        return "<empty body>".to_string();
+    }
+    let mut out: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(200)
+        .collect();
+    if text.chars().count() > 200 {
+        out.push_str("...");
+    }
+    out
 }
 
 /// A small, process-local circuit breaker for a sibling service. It prevents
@@ -208,12 +239,14 @@ pub struct RAGEngineClient {
 
 /// A separately-addressable source region for knowledge indexing. PDF uploads
 /// use one section per page so retrieval results can cite their source page.
-#[derive(Clone, Debug, Serialize)]
+/// Deserializable too: a batched ingest stages the parsed sections in object
+/// storage and reads them back one batch per request.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct KnowledgeSection {
     pub content: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub section: Option<String>,
 }
 
@@ -265,6 +298,36 @@ impl RAGEngineClient {
         sections: &[KnowledgeSection],
     ) -> Result<Value, AppError> {
         let body = serde_json::json!({ "document_id": document_id, "sections": sections });
+        let resp = self
+            .client
+            .post(format!("{}/ingest-document", self.base_url))
+            .header("X-Internal-Service-Key", &self.internal_service_api_key)
+            .timeout(Duration::from_secs(600))
+            .json(&body)
+            .send()
+            .await?;
+        check(resp).await
+    }
+
+    /// Embeds one batch of a document's sections, appending to whatever
+    /// earlier batches already indexed. Only the last batch may `finalize`,
+    /// so an interrupted run leaves the document `pending` instead of
+    /// looking complete with half its chunks.
+    pub async fn ingest_sections_batch(
+        &self,
+        document_id: &str,
+        sections: &[KnowledgeSection],
+        chunk_index_offset: i32,
+        replace_existing: bool,
+        finalize: bool,
+    ) -> Result<Value, AppError> {
+        let body = serde_json::json!({
+            "document_id": document_id,
+            "sections": sections,
+            "chunk_index_offset": chunk_index_offset,
+            "replace_existing": replace_existing,
+            "finalize": finalize,
+        });
         let resp = self
             .client
             .post(format!("{}/ingest-document", self.base_url))

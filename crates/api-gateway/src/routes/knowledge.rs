@@ -463,6 +463,20 @@ fn default_source_type() -> String {
 }
 
 #[derive(Deserialize)]
+pub struct IndexBatchQuery {
+    /// Sections per call. A section is up to `ROWS_PER_SECTION` spreadsheet
+    /// rows or one PDF page, so this is a few hundred chunks at most - sized
+    /// to land in about a minute on a CPU-only embedding backend, well inside
+    /// the request timeout, rather than to maximise throughput.
+    #[serde(default = "default_index_batch_limit")]
+    pub limit: usize,
+}
+
+fn default_index_batch_limit() -> usize {
+    40
+}
+
+#[derive(Deserialize)]
 pub struct DeleteQuery {
     #[serde(default)]
     pub purge: bool,
@@ -700,30 +714,174 @@ pub async fn upload_document(
         .object_storage
         .put(&storage_key, &raw)
         .map_err(|e| AppError::Internal(format!("Could not persist document source: {e}")))?;
-    sqlx::query("UPDATE knowledge_documents SET metadata = metadata || jsonb_build_object('storage_key', $2) WHERE id = $1")
-        .bind(doc_id).bind(storage_key.as_str()).execute(&state.pool).await.map_err(AppError::Db)?;
 
-    match state
-        .rag
-        .ingest_sections(&doc_id.to_string(), &sections)
-        .await
-    {
-        Ok(result) => {
-            created["chunks_indexed"] =
-                serde_json::json!(result.get("chunks").and_then(|c| c.as_i64()).unwrap_or(0));
-            created["status"] = serde_json::json!("indexed");
-            created["extracted"] = meta;
+    // Embedding is not done here. A spreadsheet of a few thousand rows takes
+    // far longer than any sane request timeout on a CPU-only embedding
+    // backend, so the parsed sections are staged and indexed by repeated
+    // calls to `index_batch` - the batch-per-request shape `POST
+    // /knowledge/reindex` and the bulk LCD import already use.
+    let sections_key = sections_key(doc_id)?;
+    let staged = serde_json::to_vec(&sections).map_err(|e| AppError::Internal(e.to_string()))?;
+    state
+        .object_storage
+        .put(&sections_key, &staged)
+        .map_err(|e| AppError::Internal(format!("Could not stage document sections: {e}")))?;
+
+    sqlx::query(
+        "UPDATE knowledge_documents SET metadata = metadata || jsonb_build_object( \
+            'storage_key', $2::text, \
+            'sections_key', $3::text, \
+            'index_progress', jsonb_build_object( \
+                'sections_done', 0, 'sections_total', $4::int, 'chunks', 0)) \
+         WHERE id = $1",
+    )
+    .bind(doc_id)
+    .bind(storage_key.as_str())
+    .bind(sections_key.as_str())
+    .bind(sections.len() as i32)
+    .execute(&state.pool)
+    .await
+    .map_err(AppError::Db)?;
+
+    created["status"] = serde_json::json!("pending");
+    created["extracted"] = meta;
+    created["sections_total"] = serde_json::json!(sections.len());
+    created["chunks_indexed"] = serde_json::json!(0);
+
+    Ok((StatusCode::CREATED, Json(created)).into_response())
+}
+
+fn sections_key(doc_id: Uuid) -> Result<denial_storage::ObjectKey, AppError> {
+    denial_storage::ObjectKey::parse(format!("knowledge/{doc_id}/sections.json"))
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// Progress through a staged document's sections, mirrored into the
+/// document's `metadata.index_progress` so the UI can resume or report a run
+/// that the browser abandoned partway.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, Default)]
+struct IndexProgress {
+    #[serde(default)]
+    sections_done: usize,
+    #[serde(default)]
+    sections_total: usize,
+    #[serde(default)]
+    chunks: i32,
+}
+
+/// Indexes the next `limit` staged sections of an uploaded document. Called
+/// repeatedly until the response reports `done`. Each call is sized to finish
+/// well inside the request timeout, so an arbitrarily large upload indexes in
+/// bounded steps instead of one request that cannot fit.
+pub async fn index_batch(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path(document_id): Path<Uuid>,
+    Query(params): Query<IndexBatchQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let organization_id = organization_id(&principal)?;
+    let row = sqlx::query(
+        "SELECT metadata FROM knowledge_documents WHERE id = $1 AND organization_id = $2",
+    )
+    .bind(document_id)
+    .bind(organization_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(AppError::Db)?
+    .ok_or(AppError::NotFound)?;
+
+    let metadata: serde_json::Value = row
+        .try_get::<Option<serde_json::Value>, _>("metadata")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let progress: IndexProgress = metadata
+        .get("index_progress")
+        .and_then(|p| serde_json::from_value(p.clone()).ok())
+        .unwrap_or_default();
+
+    let sections_key = sections_key(document_id)?;
+    let staged = match state.object_storage.get(&sections_key) {
+        Ok(staged) => staged,
+        Err(_) => {
+            // Object storage is not guaranteed to outlive the service, so a
+            // half-indexed document can lose the sections it still needs.
+            // Mark it `error` rather than leaving it `pending` and offering a
+            // resume that can only fail again.
+            let _ = sqlx::query("UPDATE knowledge_documents SET status = 'error' WHERE id = $1")
+                .bind(document_id)
+                .execute(&state.pool)
+                .await;
+            return Err(AppError::BadRequest(
+                "The staged sections for this document are gone, so indexing cannot resume. \
+                 Delete it and upload the file again."
+                    .into(),
+            ));
         }
+    };
+    let sections: Vec<KnowledgeSection> =
+        serde_json::from_slice(&staged).map_err(|e| AppError::Internal(e.to_string()))?;
+
+    let start = progress.sections_done.min(sections.len());
+    let end = (start + params.limit.max(1)).min(sections.len());
+    if start >= sections.len() {
+        return Ok(Json(serde_json::json!({
+            "done": true, "sections_done": sections.len(),
+            "sections_total": sections.len(), "chunks": progress.chunks,
+        })));
+    }
+    let done = end >= sections.len();
+
+    let result = state
+        .rag
+        .ingest_sections_batch(
+            &document_id.to_string(),
+            &sections[start..end],
+            progress.chunks,
+            start == 0,
+            done,
+        )
+        .await;
+    let result = match result {
+        Ok(result) => result,
         Err(e) => {
             let _ = sqlx::query("UPDATE knowledge_documents SET status = 'error' WHERE id = $1")
-                .bind(doc_id)
+                .bind(document_id)
                 .execute(&state.pool)
                 .await;
             return Err(AppError::Upstream(format!("Indexing failed: {e}")));
         }
+    };
+
+    let chunks = result
+        .get("next_chunk_index")
+        .and_then(|c| c.as_i64())
+        .unwrap_or(progress.chunks as i64) as i32;
+    sqlx::query(
+        "UPDATE knowledge_documents SET metadata = metadata || jsonb_build_object( \
+            'index_progress', jsonb_build_object( \
+                'sections_done', $2::int, 'sections_total', $3::int, 'chunks', $4::int)) \
+         WHERE id = $1",
+    )
+    .bind(document_id)
+    .bind(end as i32)
+    .bind(sections.len() as i32)
+    .bind(chunks)
+    .execute(&state.pool)
+    .await
+    .map_err(AppError::Db)?;
+
+    // The staged sections are only needed until the last batch lands.
+    if done {
+        let _ = state.object_storage.delete(&sections_key);
     }
 
-    Ok((StatusCode::CREATED, Json(created)).into_response())
+    Ok(Json(serde_json::json!({
+        "done": done,
+        "sections_done": end,
+        "sections_total": sections.len(),
+        "chunks": chunks,
+    })))
 }
 
 pub async fn delete_document(
@@ -772,6 +930,10 @@ pub async fn delete_document(
             if let Ok(key) = ObjectKey::parse(key) {
                 let _ = state.object_storage.delete(&key);
             }
+        }
+        // Present only while a batched ingest is still part-way through.
+        if let Ok(key) = sections_key(document_id) {
+            let _ = state.object_storage.delete(&key);
         }
         "purged"
     } else {
@@ -1077,6 +1239,7 @@ pub fn router() -> Router<AppState> {
             "/documents/{document_id}/content",
             post(add_document_content),
         )
+        .route("/documents/{document_id}/index-batch", post(index_batch))
         .route(
             "/documents/{document_id}/supersede",
             post(supersede_document),

@@ -6,14 +6,49 @@ import LcdImportPanel from '../components/LcdImportPanel'
 const API_BASE = '/api/v1'
 const EXPIRING_SOON_DAYS = 30
 
+// The source types a curator can file a document under. Shared by the paste
+// form and the upload panel so the two cannot drift apart.
+const SOURCE_TYPES: [string, string][] = [
+  ['cms_lcd', 'CMS LCD'],
+  ['payer_policy', 'Payer Policy'],
+  ['fee_schedule', 'Fee Schedule'],
+  ['contract', 'Contract'],
+  ['prior_auth_policy', 'Prior Auth Policy'],
+  ['medical_necessity_criteria', 'Medical Necessity Criteria'],
+]
+
+const EMPTY_UPLOAD_META: UploadMeta = {
+  source_type: 'payer_policy', payer_name: '', effective_date: '',
+  expiration_date: '', jurisdiction: '', version_label: '',
+}
+
 type KnowledgeDocument = Record<string, any> & {
   id: string; title: string; source_type: string; status: string; created_at: string; chunk_count?: number
   expiration_date?: string | null; superseded_by?: string | null; superseded_by_title?: string | null
 }
 type NewDocument = { title: string; source_type: string; payer_name: string; effective_date: string; expiration_date: string; jurisdiction: string; version_label: string; content: string }
+type UploadMeta = { source_type: string; payer_name: string; effective_date: string; expiration_date: string; jurisdiction: string; version_label: string }
 type Notice = { error: boolean; text: string }
 type SearchResult = Record<string, any>
 type ViewingContent = { content?: string; chunk_count?: number; error?: string }
+
+// What the server managed to pull out of the file, phrased per format.
+function extractedSummary(extracted: Record<string, any> | undefined): string {
+  if (!extracted) return ''
+  if (extracted.pages) return ` (${extracted.pages} PDF pages, ${extracted.chars} chars extracted)`
+  if (extracted.format === 'csv') return ` (${extracted.rows} rows, ${extracted.columns} columns)`
+  if (extracted.format === 'spreadsheet') return ` (${extracted.rows} rows across ${extracted.sheets} sheets)`
+  return ''
+}
+
+// A document whose upload staged sections that are not all embedded yet -
+// a run the browser abandoned partway. The server keeps the progress and the
+// staged sections, so indexing picks up where it stopped.
+function resumable(d: KnowledgeDocument): boolean {
+  const progress = d.metadata?.index_progress
+  if (d.status !== 'pending' || !progress) return false
+  return (progress.sections_total ?? 0) > (progress.sections_done ?? 0)
+}
 
 // Client-side, so a document loaded under one filter still shows its own
 // correct badge if the org's clock and the filter's cutoff briefly disagree.
@@ -43,6 +78,13 @@ export default function KnowledgeBase() {
   const [busyId, setBusyId] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
   const [showForm, setShowForm] = useState(false)
+  // Upload metadata is deliberately its own state, not borrowed from the
+  // paste form: it used to read `newDoc`, whose fields live inside the
+  // collapsed "+ Add Document" panel, so every upload silently filed itself
+  // as the default Payer Policy with no way to say otherwise.
+  const [showUpload, setShowUpload] = useState(false)
+  const [uploadMeta, setUploadMeta] = useState<UploadMeta>(EMPTY_UPLOAD_META)
+  const [indexProgress, setIndexProgress] = useState<{ done: number; total: number } | null>(null)
   const [showLcdImport, setShowLcdImport] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<SearchResult[]>([])
@@ -109,30 +151,87 @@ export default function KnowledgeBase() {
     setNotice(null)
     const form = new FormData()
     form.append('file', file)
-    // The Payer field in the form (above) applies here too: a payer-scoped
-    // upload only feeds analyses for that payer. Blank stays payer-agnostic.
-    const params = new URLSearchParams({ source_type: newDoc.source_type })
-    if (newDoc.payer_name.trim()) params.set('payer_name', newDoc.payer_name.trim())
-    if (newDoc.effective_date) params.set('effective_date', newDoc.effective_date)
-    if (newDoc.expiration_date) params.set('expiration_date', newDoc.expiration_date)
-    if (newDoc.jurisdiction.trim()) params.set('jurisdiction', newDoc.jurisdiction.trim())
-    if (newDoc.version_label.trim()) params.set('version_label', newDoc.version_label.trim())
+    const params = new URLSearchParams({ source_type: uploadMeta.source_type })
+    if (uploadMeta.payer_name.trim()) params.set('payer_name', uploadMeta.payer_name.trim())
+    if (uploadMeta.effective_date) params.set('effective_date', uploadMeta.effective_date)
+    if (uploadMeta.expiration_date) params.set('expiration_date', uploadMeta.expiration_date)
+    if (uploadMeta.jurisdiction.trim()) params.set('jurisdiction', uploadMeta.jurisdiction.trim())
+    if (uploadMeta.version_label.trim()) params.set('version_label', uploadMeta.version_label.trim())
     try {
       const resp = await fetch(
         `${API_BASE}/knowledge/documents/upload?${params}`,
         { method: 'POST', body: form }
       )
       const data = await resp.json()
-      setNotice(resp.ok
-        ? { error: false, text: `Indexed ${data.chunks_indexed ?? 0} chunks from ${file.name}`
-            + (data.extracted?.pages ? ` (${data.extracted.pages} PDF pages, ${data.extracted.chars} chars extracted).` : '.') }
-        : { error: true, text: data?.detail || `Upload failed (HTTP ${resp.status})` })
+      if (!resp.ok) {
+        setNotice({ error: true, text: data?.detail || `Upload failed (HTTP ${resp.status})` })
+        loadDocuments()
+        setIndexing(false)
+        setIndexProgress(null)
+        e.target.value = ''
+        return
+      }
+      // The upload only staged the parsed sections; embedding runs in batches
+      // driven from here, so a file of any size indexes in steps that each fit
+      // inside the request timeout.
+      loadDocuments()
+      const chunks = await runIndexBatches(data.id, data.sections_total ?? 0)
+      // Name the type it was filed under, so a wrong one is caught now
+      // rather than the next time a denial analysis cites it oddly.
+      const label = SOURCE_TYPES.find(([v]) => v === uploadMeta.source_type)?.[1]
+        ?? uploadMeta.source_type
+      setNotice({ error: false, text:
+        `Indexed ${chunks} chunks from ${file.name}`
+        + ` as ${label}${extractedSummary(data.extracted)}.` })
+      setShowUpload(false)
       loadDocuments()
     } catch (err) {
       setNotice({ error: true, text: err instanceof Error ? err.message : 'Upload failed' })
     }
     setIndexing(false)
+    setIndexProgress(null)
     e.target.value = ''
+  }
+
+  // Drives POST /knowledge/documents/{id}/index-batch until it reports done,
+  // the same batch-per-request loop the LCD bulk import uses. Returns the
+  // chunk count; throws with the server's message if a batch fails, leaving
+  // the document `error` and its remaining sections staged.
+  const runIndexBatches = async (
+    documentId: string, sectionsTotal: number, sectionsDone = 0,
+  ): Promise<number> => {
+    let chunks = 0
+    setIndexProgress({ done: sectionsDone, total: sectionsTotal })
+    for (;;) {
+      const resp = await fetch(
+        `${API_BASE}/knowledge/documents/${documentId}/index-batch?limit=40`,
+        { method: 'POST' }
+      )
+      const data = await resp.json()
+      if (!resp.ok) throw new Error(data?.detail || `Indexing failed (HTTP ${resp.status})`)
+      chunks = data.chunks ?? chunks
+      setIndexProgress({ done: data.sections_done ?? 0, total: data.sections_total ?? sectionsTotal })
+      if (data.done) break
+    }
+    setIndexProgress(null)
+    return chunks
+  }
+
+  const handleResumeIndexing = async (doc: KnowledgeDocument) => {
+    setIndexing(true)
+    setNotice(null)
+    try {
+      const progress = doc.metadata?.index_progress
+      const chunks = await runIndexBatches(
+        doc.id, progress?.sections_total ?? 0, progress?.sections_done ?? 0,
+      )
+      setNotice({ error: false, text: `Finished indexing ${doc.title} — ${chunks} chunks.` })
+    } catch (err) {
+      setNotice({ error: true, text: err instanceof Error ? err.message : 'Indexing failed' })
+    }
+    setIndexing(false)
+    setIndexProgress(null)
+    loadDocuments()
   }
 
   const handleRetire = async (doc: KnowledgeDocument, purge: boolean) => {
@@ -240,18 +339,92 @@ export default function KnowledgeBase() {
         {mayCurate && (
           <>
             <button className="btn btn-primary" onClick={() => setShowForm(!showForm)}>+ Add Document</button>
-            <label className="btn" style={{ cursor: 'pointer' }}>
-              {indexing ? 'Indexing…' : '⬆ Upload PDF / CSV / Excel / .txt / .md'}
-              <input type="file"
-                     accept=".pdf,.csv,.xlsx,.xls,.xlsb,.ods,.txt,.md,application/pdf,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/plain,text/markdown"
-                     style={{ display: 'none' }} onChange={handleUpload} disabled={indexing} />
-            </label>
+            <button className="btn" onClick={() => setShowUpload(!showUpload)}>
+              {showUpload ? '✕ Cancel' : '⬆ Upload PDF / CSV / Excel / .txt / .md'}
+            </button>
             <button className="btn" onClick={() => setShowLcdImport(!showLcdImport)}>
               {showLcdImport ? '✕ Cancel' : '⬆ Bulk import LCDs (CSV/MDB)'}
             </button>
           </>
         )}
       </div>
+
+      {mayCurate && showUpload && (
+        <div className="card" style={{ marginBottom: 20 }}>
+          <div className="card-header"><h3>Upload a document</h3></div>
+          <div className="card-body">
+            <div className="form-group">
+              <label>Source Type</label>
+              <select
+                className="form-select"
+                value={uploadMeta.source_type}
+                onChange={e => setUploadMeta({ ...uploadMeta, source_type: e.target.value })}
+              >
+                {SOURCE_TYPES.map(([value, label]) => (
+                  <option key={value} value={value}>{label}</option>
+                ))}
+              </select>
+              <div className="form-hint">
+                How this file is filed and cited. A fee schedule filed as a
+                payer policy still indexes, but reads as the wrong kind of
+                source in an appeal.
+              </div>
+            </div>
+            <div className="form-group">
+              <label>Payer</label>
+              <input
+                className="form-input"
+                value={uploadMeta.payer_name}
+                onChange={e => setUploadMeta({ ...uploadMeta, payer_name: e.target.value })}
+                placeholder="Leave blank if it applies to every payer (e.g. a CMS LCD)"
+              />
+              <div className="form-hint">
+                Analysis for a denial only cites documents for that claim's
+                payer, plus anything left blank here.
+              </div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 12 }}>
+              <div className="form-group"><label>Effective date</label><input className="form-input" type="date" value={uploadMeta.effective_date} onChange={e => setUploadMeta({ ...uploadMeta, effective_date: e.target.value })} /></div>
+              <div className="form-group"><label>Expiration date</label><input className="form-input" type="date" value={uploadMeta.expiration_date} onChange={e => setUploadMeta({ ...uploadMeta, expiration_date: e.target.value })} /></div>
+              <div className="form-group"><label>Jurisdiction</label><input className="form-input" value={uploadMeta.jurisdiction} onChange={e => setUploadMeta({ ...uploadMeta, jurisdiction: e.target.value })} placeholder="e.g., Noridian JF" /></div>
+              <div className="form-group"><label>Version</label><input className="form-input" value={uploadMeta.version_label} onChange={e => setUploadMeta({ ...uploadMeta, version_label: e.target.value })} placeholder="e.g., 2026.1" /></div>
+            </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <label className="btn btn-primary" style={{ cursor: indexing ? 'default' : 'pointer' }}>
+                {indexing ? 'Indexing…' : 'Choose file & index'}
+                <input type="file"
+                       accept=".pdf,.csv,.xlsx,.xls,.xlsb,.ods,.txt,.md,application/pdf,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/plain,text/markdown"
+                       style={{ display: 'none' }} onChange={handleUpload} disabled={indexing} />
+              </label>
+              <button type="button" className="btn" onClick={() => setUploadMeta(EMPTY_UPLOAD_META)} disabled={indexing}>Reset</button>
+              <span className="form-hint" style={{ margin: 0 }}>
+                The title comes from the filename. Large spreadsheets embed a
+                few thousand rows and can take several minutes — leave this tab
+                open until the progress bar completes.
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Shown for an upload's own indexing run and for a resumed one alike. */}
+      {indexProgress && (
+        <div className="card" style={{ marginBottom: 20 }}>
+          <div className="card-body">
+            <p style={{ fontSize: '0.9rem', marginTop: 0 }}>
+              Indexing {indexProgress.done} / {indexProgress.total} sections — leave this tab open.
+            </p>
+            <div style={{ height: 8, background: 'var(--border)', borderRadius: 4, overflow: 'hidden' }}>
+              <div style={{
+                height: '100%',
+                width: `${indexProgress.total ? Math.round((indexProgress.done / indexProgress.total) * 100) : 0}%`,
+                background: 'var(--primary)',
+                transition: 'width 0.3s ease',
+              }} />
+            </div>
+          </div>
+        </div>
+      )}
 
       {mayCurate && showLcdImport && (
         <LcdImportPanel onDone={loadDocuments} />
@@ -293,9 +466,7 @@ export default function KnowledgeBase() {
                 />
                 <div className="form-hint">
                   Analysis for a denial only cites documents for that claim's payer,
-                  plus anything left blank here. The field also applies to the
-                  Upload button — set it there before uploading a payer-specific
-                  PDF.
+                  plus anything left blank here.
                 </div>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 12 }}>
@@ -307,12 +478,9 @@ export default function KnowledgeBase() {
               <div className="form-group">
                 <label>Source Type</label>
                 <select className="form-select" value={newDoc.source_type} onChange={e => setNewDoc({ ...newDoc, source_type: e.target.value })}>
-                  <option value="cms_lcd">CMS LCD</option>
-                  <option value="payer_policy">Payer Policy</option>
-                  <option value="fee_schedule">Fee Schedule</option>
-                  <option value="contract">Contract</option>
-                  <option value="prior_auth_policy">Prior Auth Policy</option>
-                  <option value="medical_necessity_criteria">Medical Necessity Criteria</option>
+                  {SOURCE_TYPES.map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
                 </select>
               </div>
               <div style={{ display: 'flex', gap: 8 }}>
@@ -407,6 +575,14 @@ export default function KnowledgeBase() {
                                   onClick={() => handleViewDoc(d)}>
                             👁 View
                           </button>
+                          {mayCurate && resumable(d) && (
+                            <button className="btn btn-sm" disabled={indexing || busyId === d.id}
+                                    title="Finish indexing the sections this upload has not embedded yet"
+                                    onClick={() => handleResumeIndexing(d)}
+                                    style={{ marginLeft: 6 }}>
+                              ▶ Resume indexing
+                            </button>
+                          )}
                           {mayCurate && d.status !== 'archived' && (
                             <button className="btn btn-sm" disabled={busyId === d.id}
                                     title="Remove from the index but keep the record"
