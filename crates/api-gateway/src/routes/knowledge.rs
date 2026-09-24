@@ -208,16 +208,17 @@ fn rows_to_sections(
     let mut batch_rows = 0usize;
     let mut total_rows = 0usize;
 
-    let flush = |batch: &mut String, batch_rows: &mut usize, sections: &mut Vec<KnowledgeSection>| {
-        if *batch_rows > 0 {
-            sections.push(KnowledgeSection {
-                content: std::mem::take(batch).trim_end().to_string(),
-                page: None,
-                section: section_label.map(str::to_string),
-            });
-            *batch_rows = 0;
-        }
-    };
+    let flush =
+        |batch: &mut String, batch_rows: &mut usize, sections: &mut Vec<KnowledgeSection>| {
+            if *batch_rows > 0 {
+                sections.push(KnowledgeSection {
+                    content: std::mem::take(batch).trim_end().to_string(),
+                    page: None,
+                    section: section_label.map(str::to_string),
+                });
+                *batch_rows = 0;
+            }
+        };
 
     for row in rows {
         if row.iter().all(|cell| cell.trim().is_empty()) {
@@ -268,9 +269,7 @@ fn parse_csv_upload(raw: &[u8]) -> Result<(Vec<KnowledgeSection>, serde_json::Va
     });
     let (sections, total_rows) = rows_to_sections(&headers, rows, None);
     if let Some(e) = parse_error {
-        return Err(AppError::BadRequest(format!(
-            "Could not parse CSV: {e}"
-        )));
+        return Err(AppError::BadRequest(format!("Could not parse CSV: {e}")));
     }
     if sections.is_empty() {
         return Err(AppError::BadRequest("CSV has no data rows".into()));
@@ -290,8 +289,9 @@ fn parse_spreadsheet_upload(
 ) -> Result<(Vec<KnowledgeSection>, serde_json::Value), AppError> {
     use calamine::{open_workbook_auto_from_rs, Reader};
 
-    let mut workbook = open_workbook_auto_from_rs(std::io::Cursor::new(raw))
-        .map_err(|e| AppError::BadRequest(format!("Could not read {filename} as a spreadsheet: {e}")))?;
+    let mut workbook = open_workbook_auto_from_rs(std::io::Cursor::new(raw)).map_err(|e| {
+        AppError::BadRequest(format!("Could not read {filename} as a spreadsheet: {e}"))
+    })?;
 
     let mut sections = Vec::new();
     let mut total_rows = 0usize;
@@ -665,9 +665,7 @@ pub async fn upload_document(
     let mime_type = match meta.get("format").and_then(|v| v.as_str()) {
         Some("pdf") | Some("pdf-ocr") => "application/pdf",
         Some("csv") => "text/csv",
-        Some("spreadsheet") => {
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        }
+        Some("spreadsheet") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         _ => "text/plain",
     };
 
