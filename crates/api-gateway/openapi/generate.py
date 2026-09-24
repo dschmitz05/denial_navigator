@@ -630,16 +630,45 @@ add("/api/v1/knowledge/documents",
                         "content": S()}, ["title", "source_type"]),
             responses=CREATED))
 add("/api/v1/knowledge/documents/upload",
-    post=op("Upload a PDF / text policy document and index it (manager+)",
-            "knowledge",
-            description="PDF text is extracted server-side; scans are "
-                        "rejected. Rate limited (KNOWLEDGE_RATE_LIMIT/min); "
-                        "max 25 MB.",
+    post=op("Upload a PDF / CSV / spreadsheet / text policy document "
+            "(manager+)", "knowledge",
+            description="PDF text is extracted server-side, with an OCR "
+                        "fallback for scans; CSV and spreadsheet rows are "
+                        "rendered as batched `header: value` sections. Rate "
+                        "limited (KNOWLEDGE_RATE_LIMIT/min); max 25 MB. "
+                        "Returns with the document `pending` and its sections "
+                        "staged - embedding happens through "
+                        "/documents/{document_id}/index-batch, not here, "
+                        "because a large spreadsheet takes far longer than a "
+                        "request can stay open. `sections_total` in the "
+                        "response is the number to work through.",
             params=[{"name": "title", "in": "query", "schema": S()},
                     {"name": "source_type", "in": "query", "schema": S()},
-                    {"name": "payer_name", "in": "query", "schema": S()}],
+                    {"name": "payer_name", "in": "query", "schema": S()},
+                    {"name": "effective_date", "in": "query",
+                     "schema": S(format="date")},
+                    {"name": "expiration_date", "in": "query",
+                     "schema": S(format="date")},
+                    {"name": "jurisdiction", "in": "query", "schema": S()},
+                    {"name": "version_label", "in": "query", "schema": S()}],
             body=multipart({"file": S(format="binary")}, ["file"]),
             responses=CREATED))
+add("/api/v1/knowledge/documents/{document_id}/index-batch",
+    post=op("Index the next batch of an uploaded document's staged sections "
+            "(manager+)", "knowledge",
+            description="Call repeatedly until the response's `done` is true, "
+                        "the same batch-per-request shape as "
+                        "/knowledge/reindex and the bulk LCD import. Only the "
+                        "final batch marks the document indexed, so a run that "
+                        "stops halfway leaves it `pending` rather than looking "
+                        "complete; progress lives in "
+                        "`metadata.index_progress`, and a later call resumes "
+                        "from there instead of starting over. Returns 400 and "
+                        "marks the document `error` if its staged sections are "
+                        "no longer present.",
+            params=[path_param("document_id"),
+                    {"name": "limit", "in": "query", "schema": I(default=40),
+                     "description": "Sections to index in this call."}]))
 add("/api/v1/knowledge/documents/{document_id}",
     get=op("A document and its full indexed text", "knowledge",
            params=[path_param("document_id")]),

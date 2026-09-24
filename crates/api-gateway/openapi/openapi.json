@@ -4134,7 +4134,7 @@
     },
     "/api/v1/knowledge/documents/upload": {
       "post": {
-        "summary": "Upload a PDF / text policy document and index it (manager+)",
+        "summary": "Upload a PDF / CSV / spreadsheet / text policy document (manager+)",
         "tags": [
           "knowledge"
         ],
@@ -4143,7 +4143,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "PDF text is extracted server-side; scans are rejected. Rate limited (KNOWLEDGE_RATE_LIMIT/min); max 25 MB.",
+        "description": "PDF text is extracted server-side, with an OCR fallback for scans; CSV and spreadsheet rows are rendered as batched `header: value` sections. Rate limited (KNOWLEDGE_RATE_LIMIT/min); max 25 MB. Returns with the document `pending` and its sections staged - embedding happens through /documents/{document_id}/index-batch, not here, because a large spreadsheet takes far longer than a request can stay open. `sections_total` in the response is the number to work through.",
         "parameters": [
           {
             "name": "title",
@@ -4161,6 +4161,36 @@
           },
           {
             "name": "payer_name",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "effective_date",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "expiration_date",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "jurisdiction",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version_label",
             "in": "query",
             "schema": {
               "type": "string"
@@ -4342,6 +4372,60 @@
             }
           }
         },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/knowledge/documents/{document_id}/index-batch": {
+      "post": {
+        "summary": "Index the next batch of an uploaded document's staged sections (manager+)",
+        "tags": [
+          "knowledge"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Call repeatedly until the response's `done` is true, the same batch-per-request shape as /knowledge/reindex and the bulk LCD import. Only the final batch marks the document indexed, so a run that stops halfway leaves it `pending` rather than looking complete; progress lives in `metadata.index_progress`, and a later call resumes from there instead of starting over. Returns 400 and marks the document `error` if its staged sections are no longer present.",
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Resource id."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 40
+            },
+            "description": "Sections to index in this call."
+          }
+        ],
         "responses": {
           "200": {
             "description": "OK",

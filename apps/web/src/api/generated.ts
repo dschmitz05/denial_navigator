@@ -76,10 +76,11 @@ export interface ApiOperations {
   "GET /api/v1/knowledge/documents": { query?: { "source_type"?: string; "status"?: string; "expiry"?: "expiring_soon" | "expired_active"; "expiring_within_days"?: number; "limit"?: number } };
   "POST /api/v1/knowledge/documents": { body: { "title": string; "source_type": string; "payer_id"?: string; "payer_name"?: string; "effective_date"?: string; "content"?: string } };
   "GET /api/v1/knowledge/documents/expiry-summary": { query?: { "within_days"?: number } };
-  "POST /api/v1/knowledge/documents/upload": { query?: { "title"?: string; "source_type"?: string; "payer_name"?: string }; body: FormData };
+  "POST /api/v1/knowledge/documents/upload": { query?: { "title"?: string; "source_type"?: string; "payer_name"?: string; "effective_date"?: string; "expiration_date"?: string; "jurisdiction"?: string; "version_label"?: string }; body: FormData };
   "GET /api/v1/knowledge/documents/{document_id}": { path: { "document_id": string } };
   "DELETE /api/v1/knowledge/documents/{document_id}": { path: { "document_id": string }; query?: { "purge"?: boolean } };
   "POST /api/v1/knowledge/documents/{document_id}/content": { path: { "document_id": string }; body: { "content": string } };
+  "POST /api/v1/knowledge/documents/{document_id}/index-batch": { path: { "document_id": string }; query?: { "limit"?: number } };
   "POST /api/v1/knowledge/documents/{document_id}/supersede": { path: { "document_id": string }; body: { "new_document_id": string } };
   "POST /api/v1/knowledge/lcd-import": { query?: { "status"?: string; "keyword"?: string; "limit"?: number }; body: FormData };
   "POST /api/v1/knowledge/lcd-import/{job_id}/batch": { path: { "job_id": string }; query?: { "limit"?: number } };
