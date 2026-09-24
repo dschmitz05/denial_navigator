@@ -80,6 +80,9 @@ services:
     volumes:
       - dropzone:/app/dropzone
       - parsed_output:/app/output
+      # Same store as the gateway: both build object storage from the shared
+      # env, so an object written by one must be readable by the other.
+      - objects:/app/data/objects
     depends_on:
       postgres:
         condition: service_healthy
@@ -157,6 +160,9 @@ services:
       # `local` remains the default. To use the optional MinIO profile, set
       # OBJECT_STORAGE_BACKEND=s3 and retain the internal minio endpoint.
       OBJECT_STORAGE_BACKEND: ${OBJECT_STORAGE_BACKEND:-local}
+      # Pinned rather than left to the code's `./data/objects` default, so the
+      # path and the volume mount below cannot drift apart.
+      OBJECT_STORAGE_LOCAL_PATH: ${OBJECT_STORAGE_LOCAL_PATH:-/app/data/objects}
       OBJECT_STORAGE_S3_ENDPOINT: ${OBJECT_STORAGE_S3_ENDPOINT:-http://minio:9000}
       OBJECT_STORAGE_S3_BUCKET: ${OBJECT_STORAGE_S3_BUCKET:-denial-artifacts}
       OBJECT_STORAGE_S3_REGION: ${OBJECT_STORAGE_S3_REGION:-us-east-1}
@@ -166,6 +172,13 @@ services:
       JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-480}
       OIDC_USERINFO_URL: ${OIDC_USERINFO_URL:-}
       TRUSTED_PROXY_NETWORKS: ${TRUSTED_PROXY_NETWORKS:-127.0.0.1/32,172.16.0.0/12,10.0.0.0/8}
+    volumes:
+      # The local object-storage backend holds uploaded document sources,
+      # denial attachments, generated appeal packets and the staged sections
+      # of an in-progress knowledge ingest. Without a volume these sit in the
+      # container layer and are destroyed on every redeploy, losing every
+      # stored source and stranding a part-indexed upload.
+      - objects:/app/data/objects
     depends_on:
       postgres:
         condition: service_healthy
@@ -264,5 +277,6 @@ volumes:
   pgdata:
   dropzone:
   parsed_output:
+  objects:
   minio_data:
   keycloak_data:

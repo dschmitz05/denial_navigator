@@ -54,7 +54,11 @@ FROM runtime-base AS api-gateway
 USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends poppler-utils tesseract-ocr tesseract-ocr-eng \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+# The local object-storage root. Created here, owned by `app`, because Docker
+# seeds a fresh named volume from the image path - including its ownership. An
+# absent path yields a root-owned volume the service cannot write to.
+ && mkdir -p /app/data/objects && chown -R app:app /app/data
 USER app
 COPY --from=builder /out/api-gateway /usr/local/bin/api-gateway
 # Vendored Swagger UI / ReDoc bundles (shared with the Python service), served
@@ -69,7 +73,7 @@ CMD ["api-gateway"]
 # ── EDI Parser ───────────────────────────────────────────────────────────
 FROM runtime-base AS ediparser
 USER root
-RUN mkdir -p /app/dropzone /app/output && chown -R app:app /app
+RUN mkdir -p /app/dropzone /app/output /app/data/objects && chown -R app:app /app
 USER app
 COPY --from=builder /out/ediparser /usr/local/bin/ediparser
 ENV DROPZONE_PATH=/app/dropzone OUTPUT_PATH=/app/output
