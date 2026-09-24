@@ -48,31 +48,22 @@ jobs:
           path: .
           format: spdx-json
           output-file: sbom.spdx.json
-          # Gitea Actions doesn't support the actions/artifact v2+ protocol
-          # this action's default artifact upload uses (GHESNotSupportedError),
-          # so it always failed the step even though the SBOM generation
-          # itself succeeded. The gate here is Trivy's scan of the tree, not
-          # this file - see the next step for how the SBOM itself is kept.
+          # We upload it ourselves below (named/retained the way we want),
+          # so skip the action's own default artifact upload.
           upload-artifact: false
-      # Gitea has no artifact-download UI, but it does have a generic package
-      # registry, which is a plain PUT/GET over HTTP. The built-in Actions
-      # token can't authenticate to it (401 - confirmed by testing directly
-      # against a live instance, not assumed), so this uses a dedicated
-      # access token with write:package scope, stored as the PACKAGES_TOKEN
-      # repo secret. Only push (not every PR) writes a version, named by
-      # commit so `git log` and this registry stay correlated; a 409 on a
-      # re-run of the same commit is expected and not a failure.
+      # Retain the SBOM as release evidence via GitHub's native artifact
+      # store rather than a package registry - github.com has no generic
+      # package registry (that's a Gitea-only API; a prior version of this
+      # step targeted that path and 422'd on every run here). Only push (not
+      # every PR) uploads, named by commit so `git log` and the Actions run
+      # stay correlated.
       - name: Retain the SBOM as release evidence
         if: github.event_name == 'push'
-        run: |
-          status=$(curl -s -o /dev/null -w '%{http_code}' -X PUT \
-            -H "Authorization: token ${{ secrets.PACKAGES_TOKEN }}" \
-            --upload-file sbom.spdx.json \
-            "${{ github.server_url }}/api/packages/${{ github.repository_owner }}/generic/denial-navigator-sbom/${{ github.sha }}/sbom.spdx.json")
-          if [ "$status" != "201" ] && [ "$status" != "409" ]; then
-            echo "SBOM publish failed with HTTP $status"
-            exit 1
-          fi
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ github.sha }}
+          path: sbom.spdx.json
+          retention-days: 90
       # aquasecurity/trivy-action is a composite action that calls
       # aquasecurity/setup-trivy internally; that nested action call is
       # silently skipped on this runner (a known nektos/act limitation -
