@@ -135,17 +135,47 @@ const PUBLIC_EXACT: &[&str] = &[
 
 const WRITE_METHODS: &[&str] = &["POST", "PUT", "PATCH", "DELETE"];
 
+/// Name of the httpOnly cookie carrying the browser session's JWT.
+pub const SESSION_COOKIE: &str = "denial_session";
+
+/// The JWT in a `Cookie` header, if the session cookie is present.
+pub fn session_cookie_token(cookie_header: &str) -> Option<&str> {
+    cookie_header.split(';').find_map(|pair| {
+        let (name, value) = pair.trim().split_once('=')?;
+        (name == SESSION_COOKIE && !value.is_empty()).then_some(value)
+    })
+}
+
+/// The credential a request presents: an explicit `Authorization` header
+/// wins, otherwise the session cookie is treated as a bearer token. The
+/// bool is true when the cookie supplied it (the CSRF-exposed case).
+pub fn effective_authorization(
+    authorization: Option<&str>,
+    cookie_header: Option<&str>,
+) -> (Option<String>, bool) {
+    if let Some(a) = authorization {
+        return (Some(a.to_string()), false);
+    }
+    match cookie_header.and_then(session_cookie_token) {
+        Some(token) => (Some(format!("Bearer {token}")), true),
+        None => (None, false),
+    }
+}
+
 /// POST endpoints that only read.
 const READ_ONLY_POSTS: &[&str] = &["/api/v1/knowledge/search", "/api/v1/ingestion/log"];
 
 /// Resolve the caller from the request. Never raises, never rejects — that is
 /// the caller's job.
 pub fn resolve_principal(req: &Request, config: &GatewayConfig) -> Principal {
-    let authorization = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+    let (authorization, _) = effective_authorization(
+        req.headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok()),
+        req.headers()
+            .get(header::COOKIE)
+            .and_then(|v| v.to_str().ok()),
+    );
     let service_name = req
         .headers()
         .get("x-service-name")
@@ -401,6 +431,7 @@ fn permissions(resource: &str) -> Option<(&'static [&'static str], &'static [&'s
 fn path_permission(method: &str, norm: &str) -> Option<&'static [&'static str]> {
     Some(match (method, norm) {
         ("POST", "/api/v1/auth/change-password") => ALL_ROLES,
+        ("POST", "/api/v1/auth/logout") => ALL_ROLES,
         ("GET", "/api/v1/users/assignable") => MANAGER_UP,
         ("POST", "/api/v1/appeals/{id}/assign") => MANAGER_UP,
         ("POST", "/api/v1/users/{id}/totp") => ADMIN_ONLY,
@@ -535,6 +566,12 @@ pub struct RequestCtx {
     pub method: String,
     pub path: String,
     pub authorization: Option<String>,
+    /// The credential came from the session cookie, not an `Authorization`
+    /// header, so a cross-site request could have carried it.
+    pub cookie_auth: bool,
+    /// The request carried the `X-Requested-With` marker a cross-site form
+    /// cannot set.
+    pub requested_with: bool,
     pub service_name: Option<String>,
     pub service_key: Option<String>,
     pub x_real_ip: Option<String>,
@@ -551,10 +588,14 @@ impl RequestCtx {
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string())
         };
+        let (authorization, cookie_auth) =
+            effective_authorization(h("authorization").as_deref(), h("cookie").as_deref());
         Self {
             method: req.method().to_string(),
             path: req.uri().path().to_string(),
-            authorization: h("authorization"),
+            authorization,
+            cookie_auth,
+            requested_with: req.headers().contains_key("x-requested-with"),
             service_name: h("x-service-name"),
             service_key: h("x-service-key"),
             x_real_ip: h("x-real-ip"),
@@ -593,6 +634,17 @@ pub async fn decide(
                 }
             }
         }
+    }
+    // A cookie is attached by the browser to any request to this origin, so a
+    // state-changing request authenticated only by it must also carry a
+    // header a cross-site page cannot add (SameSite=Strict is the first line;
+    // this is the second).
+    if who.kind == PrincipalKind::User
+        && ctx.cookie_auth
+        && WRITE_METHODS.contains(&ctx.method.as_str())
+        && !ctx.requested_with
+    {
+        return Decision::Forbidden("Missing X-Requested-With header".to_string());
     }
     who.ip = client_ip_from(
         ctx.peer,
@@ -794,7 +846,10 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{authorize, client_ip_from, Principal, PrincipalKind};
+    use super::{
+        authorize, client_ip_from, effective_authorization, session_cookie_token, Principal,
+        PrincipalKind,
+    };
     use ipnet::IpNet;
     use std::net::SocketAddr;
 
@@ -934,5 +989,31 @@ mod tests {
             ),
             Some("198.51.100.8".into())
         );
+    }
+
+    #[test]
+    fn session_cookie_is_found_among_others() {
+        assert_eq!(
+            session_cookie_token("theme=dark; denial_session=abc.def.ghi; x=1"),
+            Some("abc.def.ghi")
+        );
+        assert_eq!(session_cookie_token("theme=dark"), None);
+        assert_eq!(session_cookie_token("denial_session="), None);
+        // A cookie merely ending in the name must not match.
+        assert_eq!(session_cookie_token("x_denial_session=abc"), None);
+    }
+
+    #[test]
+    fn authorization_header_beats_cookie() {
+        let (auth, from_cookie) =
+            effective_authorization(Some("Bearer explicit"), Some("denial_session=fromcookie"));
+        assert_eq!(auth.as_deref(), Some("Bearer explicit"));
+        assert!(!from_cookie);
+
+        let (auth, from_cookie) = effective_authorization(None, Some("denial_session=fromcookie"));
+        assert_eq!(auth.as_deref(), Some("Bearer fromcookie"));
+        assert!(from_cookie);
+
+        assert_eq!(effective_authorization(None, None), (None, false));
     }
 }

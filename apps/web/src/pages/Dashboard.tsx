@@ -75,7 +75,7 @@ export default function Dashboard() {
   const [knowledgeExpiry, setKnowledgeExpiry] = useState<KnowledgeExpiry | null>(null)
   const [loading, setLoading] = useState(true)
   const exportClaims = async () => {
-    const resp = await fetch(`${API_BASE}/claims/export.csv`, { headers: { Authorization: `Bearer ${localStorage.getItem('auth_token')}` } })
+    const resp = await fetch(`${API_BASE}/claims/export.csv`)
     if (!resp.ok) return
     const url = URL.createObjectURL(await resp.blob()); const a = document.createElement('a'); a.href = url; a.download = 'claims-export.csv'; a.click(); URL.revokeObjectURL(url)
   }

@@ -19,7 +19,6 @@ export default function Organizations() {
     setLoading(true)
     try {
       const resp = await fetch(`${API_BASE}/organizations`, {
-        headers: { Authorization: `Bearer ${localStorage.getItem('auth_token')}` },
       })
       const data = await resp.json()
       setOrgs(Array.isArray(data) ? data as OrganizationRecord[] : [])
@@ -40,7 +39,6 @@ export default function Organizations() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${localStorage.getItem('auth_token')}`,
         },
         body: JSON.stringify(form),
       })

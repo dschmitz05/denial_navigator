@@ -27,6 +27,7 @@ export interface ApiOperations {
   "POST /api/v1/auth/change-password": { body: { "current_password": string; "new_password": string } };
   "POST /api/v1/auth/login": { body: { "username": string; "password": string; "organization_id"?: string } };
   "POST /api/v1/auth/login/totp": { body: { "code": string } };
+  "POST /api/v1/auth/logout": Record<string, never>;
   "GET /api/v1/auth/me": Record<string, never>;
   "POST /api/v1/auth/register": { body: { "username": string; "email": string; "password": string; "full_name"?: string; "role": "system_admin" | "security_admin" | "revenue_cycle_manager" | "billing_specialist" | "coding_specialist" | "auditor" | "read_only" } };
   "POST /api/v1/auth/totp/confirm": { body: { "code": string } };

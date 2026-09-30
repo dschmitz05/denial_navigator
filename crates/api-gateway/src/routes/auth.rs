@@ -1,10 +1,13 @@
 use axum::extract::State;
+use axum::http::{header, HeaderValue};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use chrono::{DateTime, Utc};
 use denial_auth::auth::{create_token_for_organization, hash_password, verify_password};
 use denial_auth::password::check_new_password;
-use denial_auth::rbac::Principal;
+use denial_auth::rbac::{Principal, SESSION_COOKIE};
+use denial_common::config::GatewayConfig;
 use denial_common::error::AppError;
 use denial_common::totp;
 use serde::Deserialize;
@@ -12,6 +15,44 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::state::AppState;
+
+/// `Set-Cookie` value for the browser session. httpOnly keeps the JWT out of
+/// reach of page scripts; SameSite=Strict plus the `X-Requested-With` check in
+/// the access middleware covers cross-site requests. Scoped to `/api`.
+fn session_cookie(config: &GatewayConfig, token: &str) -> HeaderValue {
+    let secure = if config.session_cookie_secure() {
+        "; Secure"
+    } else {
+        ""
+    };
+    HeaderValue::from_str(&format!(
+        "{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/api; Max-Age={}{secure}",
+        config.jwt_expire_minutes * 60
+    ))
+    .expect("JWTs are ASCII cookie-safe")
+}
+
+fn clear_session_cookie(config: &GatewayConfig) -> HeaderValue {
+    let secure = if config.session_cookie_secure() {
+        "; Secure"
+    } else {
+        ""
+    };
+    HeaderValue::from_str(&format!(
+        "{SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/api; Max-Age=0{secure}"
+    ))
+    .expect("static cookie")
+}
+
+/// A full-session response: the JSON body (still carrying `access_token` for
+/// API clients and scripts) plus the browser session cookie.
+fn with_session(config: &GatewayConfig, token: &str, body: serde_json::Value) -> Response {
+    let mut response = Json(body).into_response();
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, session_cookie(config, token));
+    response
+}
 
 const LOGIN_USER_LIMIT: i64 = 6;
 const LOGIN_IP_LIMIT: i64 = 20;
@@ -93,7 +134,7 @@ pub async fn login(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Json(body): Json<LoginRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Response, AppError> {
     let ip = principal.ip.as_deref();
     let user_agent = None;
 
@@ -211,7 +252,8 @@ pub async fn login(
                 "id": row.try_get::<Uuid, _>("id").unwrap_or_default(),
                 "name": row.try_get::<String, _>("name").unwrap_or_default(),
             })).collect::<Vec<_>>(),
-        })));
+        }))
+        .into_response());
     }
     let organization_id = body
         .organization_id
@@ -285,14 +327,16 @@ pub async fn login(
             "mfa_token": mfa_token,
             "token_type": "mfa",
             "username": username,
-        })));
+        }))
+        .into_response());
     }
 
     let must_change_password: bool = user
         .try_get("must_change_password")
         .map_err(|e| AppError::Internal(e.to_string()))?;
     if must_change_password {
-        return password_change_required(&state, user_id, &username, &role, &organization_context);
+        return password_change_required(&state, user_id, &username, &role, &organization_context)
+            .map(IntoResponse::into_response);
     }
 
     let token = create_token_for_organization(
@@ -322,18 +366,22 @@ pub async fn login(
     )
     .await;
 
-    Ok(Json(serde_json::json!({
-        "access_token": token,
-        "token_type": "bearer",
-        "user": {
-            "id": user_id.to_string(),
-            "username": username,
-            "email": email,
-            "full_name": full_name,
-            "role": role,
-            "is_active": true,
-        },
-    })))
+    Ok(with_session(
+        &state.config,
+        &token,
+        serde_json::json!({
+            "access_token": token,
+            "token_type": "bearer",
+            "user": {
+                "id": user_id.to_string(),
+                "username": username,
+                "email": email,
+                "full_name": full_name,
+                "role": role,
+                "is_active": true,
+            },
+        }),
+    ))
 }
 
 pub async fn me(
@@ -532,7 +580,7 @@ pub async fn change_password(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Json(body): Json<PasswordChange>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Response, AppError> {
     check_new_password(&principal.username, &body.new_password).map_err(AppError::BadRequest)?;
     if body.new_password == body.current_password {
         return Err(AppError::BadRequest(
@@ -587,11 +635,15 @@ pub async fn change_password(
     )
     .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    Ok(Json(serde_json::json!({
-        "status": "password_changed",
-        "access_token": token,
-        "token_type": "bearer",
-    })))
+    Ok(with_session(
+        &state.config,
+        &token,
+        serde_json::json!({
+            "status": "password_changed",
+            "access_token": token,
+            "token_type": "bearer",
+        }),
+    ))
 }
 
 async fn mfa_user(
@@ -675,7 +727,7 @@ async fn complete_totp(
     principal: &Principal,
     code: &str,
     confirming: bool,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Response, AppError> {
     let user = mfa_user(state, principal).await?;
 
     let user_id: Uuid = user
@@ -807,7 +859,8 @@ async fn complete_totp(
             &username,
             &role,
             principal.organization_id.as_deref().unwrap_or_default(),
-        );
+        )
+        .map(IntoResponse::into_response);
     }
 
     let token = create_token_for_organization(
@@ -821,25 +874,29 @@ async fn complete_totp(
     )
     .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    Ok(Json(serde_json::json!({
-        "access_token": token,
-        "token_type": "bearer",
-        "user": {
-            "id": user_id.to_string(),
-            "username": username,
-            "email": email,
-            "full_name": full_name,
-            "role": role,
-            "is_active": is_active,
-        },
-    })))
+    Ok(with_session(
+        &state.config,
+        &token,
+        serde_json::json!({
+            "access_token": token,
+            "token_type": "bearer",
+            "user": {
+                "id": user_id.to_string(),
+                "username": username,
+                "email": email,
+                "full_name": full_name,
+                "role": role,
+                "is_active": is_active,
+            },
+        }),
+    ))
 }
 
 pub async fn totp_confirm(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Json(body): Json<TotpCode>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Response, AppError> {
     complete_totp(&state, &principal, &body.code, true).await
 }
 
@@ -847,14 +904,43 @@ pub async fn login_totp(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Json(body): Json<TotpCode>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Response, AppError> {
     complete_totp(&state, &principal, &body.code, false).await
+}
+
+/// End the caller's sessions. Bumping `sessions_valid_from` is the existing
+/// revocation mechanism (see migration 003): every token issued before now is
+/// refused, so a token that was copied before logout stops working too. It is
+/// per-user, not per-device - signing out on a shared terminal signs the user
+/// out everywhere. The cookie is cleared regardless.
+pub async fn logout(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> Result<Response, AppError> {
+    let user_id = principal
+        .user_id
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or(AppError::Unauthorized)?;
+
+    sqlx::query("UPDATE users SET sessions_valid_from = date_trunc('second', NOW()) WHERE id = $1")
+        .bind(user_id)
+        .execute(&state.pool)
+        .await
+        .map_err(AppError::Db)?;
+
+    let mut response = Json(serde_json::json!({ "status": "logged_out" })).into_response();
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, clear_session_cookie(&state.config));
+    Ok(response)
 }
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/login", post(login))
         .route("/me", get(me))
+        .route("/logout", post(logout))
         .route("/register", post(register))
         .route("/change-password", post(change_password))
         .route("/totp/enroll", post(totp_enroll))

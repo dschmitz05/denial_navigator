@@ -29,9 +29,8 @@ export default function Profile() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ current_password: form.current_password, new_password: form.new_password }),
       })
-      const data = await response.json() as { detail?: string; access_token?: string }
+      const data = await response.json() as { detail?: string }
       if (!response.ok) throw new Error(data.detail || `Could not change password (HTTP ${response.status})`)
-      if (data.access_token) localStorage.setItem('auth_token', data.access_token)
       setNotice({ error: false, text: 'Password changed. Any other session using the old password has been signed out.' })
       setForm(emptyForm)
     } catch (error) {

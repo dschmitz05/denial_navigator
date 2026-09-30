@@ -196,6 +196,10 @@ add("/api/v1/auth/login/totp",
             body=jbody({"code": S(description="6-digit TOTP")}, ["code"])))
 add("/api/v1/auth/me",
     get=op("The account behind the current token", "auth"))
+add("/api/v1/auth/logout",
+    post=op("End the caller's sessions", "auth",
+            description="Revokes every token issued to the caller before now "
+                        "(sign out everywhere) and clears the session cookie."))
 add("/api/v1/auth/register",
     post=op("Create a user (admin only)", "auth",
             body=jbody({"username": S(), "email": S(), "password": S(),
@@ -1003,7 +1007,10 @@ doc = {
             "browser request goes through this gateway; it enforces "
             "authentication, role-based authorisation, per-request account "
             "currency and HIPAA access auditing.\n\n"
-            "Auth: `POST /api/v1/auth/login` returns a bearer token. When TOTP "
+            "Auth: `POST /api/v1/auth/login` returns a bearer token and, for "
+            "browsers, sets it as an httpOnly `denial_session` cookie; a "
+            "cookie-authenticated write request must also send "
+            "`X-Requested-With`. When TOTP "
             "is required it returns an mfa-scope token usable only on the "
             "`/auth/totp/*`, `/auth/login/totp` and `/auth/me` paths until "
             "`POST /auth/login/totp` upgrades it. Sibling services present "

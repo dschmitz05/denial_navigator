@@ -140,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
             AUTHORIZATION,
             CONTENT_TYPE,
             HeaderName::from_static("x-request-id"),
+            HeaderName::from_static("x-requested-with"),
         ]);
 
     let app = Router::new()

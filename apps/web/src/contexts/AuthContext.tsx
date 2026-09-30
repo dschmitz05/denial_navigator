@@ -14,7 +14,6 @@ export interface AuthUser {
 
 interface SessionResponse {
   user: AuthUser
-  access_token: string
 }
 
 interface EnrollmentResponse {
@@ -65,43 +64,36 @@ function errorDetail(value: unknown, fallback: string): string {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null)
   const [loading, setLoading] = useState(true)
-  const [token, setToken] = useState<string | null>(() => localStorage.getItem('auth_token'))
-
+  // The session itself lives in an httpOnly cookie the server sets at login,
+  // so no script - including injected script - can read it. `user` is only
+  // the profile the UI renders.
   const logout = useCallback(() => {
     setUser(null)
-    setToken(null)
-    localStorage.removeItem('auth_token')
+    // Revoke server-side (bumps sessions_valid_from) and clear the cookie.
+    void fetch(`${API_BASE}/auth/logout`, { method: 'POST' }).catch(() => undefined)
   }, [])
 
-  const fetchUser = useCallback(async (jwtToken: string) => {
+  const fetchUser = useCallback(async () => {
     try {
-      const resp = await fetch(`${API_BASE}/auth/me`, {
-        headers: { Authorization: `Bearer ${jwtToken}` },
-      })
-      if (resp.ok) {
-        const data = await resp.json() as AuthUser
-        setUser(data)
-        setToken(jwtToken)
-        localStorage.setItem('auth_token', jwtToken)
-      } else {
-        logout()
-      }
+      const resp = await fetch(`${API_BASE}/auth/me`)
+      if (resp.ok) setUser(await resp.json() as AuthUser)
+      else setUser(null)
     } catch {
-      logout()
+      setUser(null)
     } finally {
       setLoading(false)
     }
-  }, [logout])
+  }, [])
 
   useEffect(() => {
-    if (token) void fetchUser(token)
-    else setLoading(false)
-  }, [fetchUser, token])
+    // A token left in localStorage by an earlier version is a credential an
+    // XSS could still read; drop it.
+    try { localStorage.removeItem('auth_token') } catch { /* not fatal */ }
+    void fetchUser()
+  }, [fetchUser])
 
   const acceptSession = (data: SessionResponse): AuthUser => {
     setUser(data.user)
-    setToken(data.access_token)
-    localStorage.setItem('auth_token', data.access_token)
     return data.user
   }
 
@@ -160,8 +152,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     })
     const data = await resp.json().catch(() => ({}))
     if (!resp.ok) throw new Error(errorDetail(data, 'Could not change the password'))
-    if (typeof data.access_token !== 'string') throw new Error('The password-change response is missing its session')
-    await fetchUser(data.access_token)
+    await fetchUser()
   }
 
   const startEnrollment = async (mfaToken: string): Promise<EnrollmentResponse> => {
