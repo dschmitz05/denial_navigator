@@ -113,7 +113,16 @@ pub async fn get_claim(
             .map_err(AppError::Db)?;
 
     let analyses =
-        sqlx::query("SELECT * FROM ai_analyses WHERE claim_id = $1 ORDER BY created_at DESC")
+        // Named columns: `raw_prompt`/`raw_response` can be large and are
+        // never shown on the claim page.
+        sqlx::query(
+            "SELECT id, playbook_id, denial_id, claim_id, model_name, prompt_tokens, \
+             completion_tokens, total_tokens, system_prompt_template, provider_name, \
+             provider_version, prompt_template_version, explanation, denial_category, \
+             root_cause_summary, fallback_reason, required_action, action_plan, steps, \
+             citations, needs_appeal, draft_appeal_letter, confidence_score, created_at, \
+             updated_at FROM ai_analyses WHERE claim_id = $1 ORDER BY created_at DESC",
+        )
             .bind(claim_id)
             .fetch_all(&state.pool)
             .await

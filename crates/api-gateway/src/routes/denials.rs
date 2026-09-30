@@ -99,7 +99,7 @@ pub async fn list_denials(
          JOIN claims c ON c.id = d.claim_id \
          LEFT JOIN carc_codes cc ON cc.code = d.carc_code \
          LEFT JOIN rarc_codes rc ON rc.code = d.rarc_code \
-         LEFT JOIN LATERAL (SELECT * FROM ai_analyses a WHERE a.denial_id = d.id ORDER BY a.created_at DESC LIMIT 1) aa ON TRUE \
+         LEFT JOIN LATERAL (SELECT a.explanation, a.denial_category, a.needs_appeal FROM ai_analyses a WHERE a.denial_id = d.id ORDER BY a.created_at DESC LIMIT 1) aa ON TRUE \
          LEFT JOIN appeals_queue aq ON aq.denial_id = d.id \
              AND (aq.outcome_status IS NULL OR aq.outcome_status NOT IN ('approved','overruled','resolved','denied_again','cancelled'))",
     );
@@ -689,7 +689,7 @@ pub async fn get_denial(
          JOIN claims c ON c.id = d.claim_id \
          LEFT JOIN carc_codes cc ON cc.code = d.carc_code \
          LEFT JOIN rarc_codes rc ON rc.code = d.rarc_code \
-         LEFT JOIN LATERAL (SELECT * FROM ai_analyses a WHERE a.denial_id = d.id ORDER BY a.created_at DESC LIMIT 1) aa ON TRUE \
+         LEFT JOIN LATERAL (SELECT a.id, a.explanation, a.action_plan, a.steps, a.citations, a.draft_appeal_letter, a.denial_category, a.required_action, a.needs_appeal, a.confidence_score, a.fallback_reason, a.provider_name, a.created_at FROM ai_analyses a WHERE a.denial_id = d.id ORDER BY a.created_at DESC LIMIT 1) aa ON TRUE \
          LEFT JOIN appeals_queue aq ON aq.denial_id = d.id \
              AND (aq.outcome_status IS NULL OR aq.outcome_status NOT IN ('approved','overruled','resolved','denied_again','cancelled')) \
          WHERE d.id = $1 AND c.organization_id = $2",
