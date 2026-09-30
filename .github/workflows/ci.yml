@@ -16,6 +16,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      # Restores ~/.cargo and target/ keyed on Cargo.lock, so clippy and the
+      # tests rebuild only the workspace crates that changed.
+      - uses: Swatinem/rust-cache@v2
       - run: python3 crates/api-gateway/openapi/generate.py --check
       - run: python3 scripts/check_docs_paths.py
       - run: cargo fmt --all -- --check
@@ -91,7 +94,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install cargo-audit --locked
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
       - name: cargo audit
         run: |
           # RUSTSEC-2023-0071 (rsa "Marvin Attack", no fixed upgrade exists)
@@ -108,6 +113,60 @@ jobs:
       - name: npm audit
         working-directory: apps/web
         run: npm audit --audit-level=high
+
+  # Brings up the real stack (Postgres with pgvector, the four Rust services)
+  # and runs the shell integration tests that CI otherwise never executes:
+  # tenant isolation, the recommendation job queue, and the synthetic
+  # 837/835 ingestion path. No LLM or embedding server is reachable, so the
+  # recommendation pipeline takes its deterministic fallback, which is what
+  # these tests assert on.
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      COMPOSE: docker compose -f docker-compose.rust.yml
+    steps:
+      - uses: actions/checkout@v4
+      - name: Write throwaway secrets
+        run: |
+          {
+            for key in JWT_SECRET EDIPARSER_SERVICE_API_KEY LLM_SERVICE_API_KEY \
+                       EDIPARSER_INTERNAL_API_KEY RAG_INTERNAL_API_KEY LLM_INTERNAL_API_KEY; do
+              echo "$key=$(openssl rand -hex 24)"
+            done
+            echo "TOTP_FERNET_KEY=$(openssl rand -base64 32)"
+          } > .env
+      - name: Build and start the stack
+        run: $COMPOSE up -d --build postgres ediparser rag-engine llm-service api
+      - name: Wait for the API
+        run: |
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:18000/health/ready >/dev/null 2>&1; then exit 0; fi
+            sleep 3
+          done
+          echo "API did not become ready" >&2
+          $COMPOSE ps
+          exit 1
+      - name: Clear the seeded admin's forced password change
+        # The test scripts sign in as the seeded admin; a first sign-in would
+        # otherwise return a password-change token instead of a session.
+        run: |
+          docker exec denialnav-rust-postgres psql -U denial_nav -d denial_navigator \
+            -c "UPDATE users SET must_change_password = FALSE WHERE username = 'admin'"
+      - name: Tenant isolation
+        run: ./scripts/test_organization_isolation.sh
+      - name: Recommendation job queue
+        run: ./scripts/test_recommendation_jobs.sh
+      - name: Synthetic ingestion end to end
+        env:
+          E2E_PASSWORD: admin123
+        run: ./scripts/test_synthetic_e2e.sh
+      - name: Service logs
+        if: failure()
+        run: $COMPOSE logs --no-color --tail=200
+      - name: Tear down
+        if: always()
+        run: $COMPOSE down -v
 
   secrets:
     runs-on: ubuntu-latest
