@@ -833,15 +833,33 @@ pub async fn enqueue_generation(
     }
     let denial_id = Uuid::parse_str(request.denial_id.trim())
         .map_err(|_| AppError::BadRequest("denial_id must be a UUID".into()))?;
+    let organization_id = organization_id(&principal)?;
     let requested_by = principal
         .user_id
         .as_deref()
         .and_then(|id| Uuid::parse_str(id).ok());
-    let job_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO recommendation_jobs (denial_id, requested_by, temperature) \
-         VALUES ($1, $2, $3) RETURNING id",
+
+    // Refuse a denial outside the caller's organization up front, so no job
+    // row is created for it and the caller learns nothing about its existence.
+    let owned: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM denials d JOIN claims c ON c.id = d.claim_id \
+         WHERE d.id = $1 AND c.organization_id = $2)",
     )
     .bind(denial_id)
+    .bind(organization_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(AppError::Db)?;
+    if !owned {
+        return Err(AppError::NotFound);
+    }
+
+    let job_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO recommendation_jobs (denial_id, organization_id, requested_by, temperature) \
+         VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(denial_id)
+    .bind(organization_id)
     .bind(requested_by)
     .bind(request.temperature)
     .fetch_one(&state.pool)
@@ -896,13 +914,17 @@ pub async fn enqueue_generation(
 
 pub async fn get_generation_job(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     axum::extract::Path(job_id): axum::extract::Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let organization_id = organization_id(&principal)?;
+    // Another organization's job is indistinguishable from a missing one.
     let row = sqlx::query(
         "SELECT id, denial_id, requested_by, temperature, status, attempts, result, error_message, created_at, started_at, completed_at \
-         FROM recommendation_jobs WHERE id = $1",
+         FROM recommendation_jobs WHERE id = $1 AND organization_id = $2",
     )
     .bind(job_id)
+    .bind(organization_id)
     .fetch_optional(&state.pool)
     .await
     .map_err(AppError::Db)?

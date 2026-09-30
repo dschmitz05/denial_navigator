@@ -89,6 +89,18 @@ STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bea
   --data "{\"assigned_user_id\":\"${OTHER_USER_ID}\"}" "${API_BASE_URL}/api/v1/appeals/${DEV_APPEAL_ID}/assign")"
 [[ "$STATUS" == '404' ]]
 
+# Recommendation jobs are organization-owned: another organization can neither
+# queue one for this denial (no row may be created) nor read one by its id.
+STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer ${OTHER_TOKEN}" -H 'Content-Type: application/json' \
+  --data "{\"denial_id\":\"${DEV_DENIAL_ID}\"}" "${API_BASE_URL}/api/v1/analyses/generate-jobs")"
+[[ "$STATUS" == '404' ]]
+[[ "$(psql_exec "SELECT COUNT(*) FROM recommendation_jobs WHERE denial_id = '${DEV_DENIAL_ID}'::uuid")" == '0' ]]
+DEV_JOB_ID="$(psql_exec "INSERT INTO recommendation_jobs (denial_id, organization_id, status) VALUES ('${DEV_DENIAL_ID}'::uuid, '${DEV_ORG}'::uuid, 'completed') RETURNING id")"
+STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${OTHER_TOKEN}" "${API_BASE_URL}/api/v1/analyses/generate-jobs/${DEV_JOB_ID}")"
+[[ "$STATUS" == '404' ]]
+STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${ADMIN_TOKEN}" "${API_BASE_URL}/api/v1/analyses/generate-jobs/${DEV_JOB_ID}")"
+[[ "$STATUS" == '200' ]]
+
 # A write-off request is decided only inside its own organization: the second
 # organization's administrator neither sees it nor can approve it.
 DEV_WRITE_OFF_ID="$(psql_exec "INSERT INTO write_off_requests (organization_id, denial_id, amount) VALUES ('${DEV_ORG}'::uuid, '${DEV_DENIAL_ID}'::uuid, 1.00) RETURNING id")"

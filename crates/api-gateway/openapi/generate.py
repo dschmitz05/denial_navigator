@@ -483,6 +483,7 @@ add("/api/v1/analyses/generate-jobs",
                         "temperature": N(default=0.3)}, ["denial_id"]),
             responses={"200": {"description": "Queued", "content": {
                 "application/json": {"schema": OBJ}}},
+                "404": {"$ref": "#/components/responses/NotFound"},
                 "429": {"description": "Rate limited."},
                 "401": {"$ref": "#/components/responses/Unauthorized"}}))
 add("/api/v1/analyses/generate-jobs/{job_id}",
