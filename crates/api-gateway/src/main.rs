@@ -8,12 +8,13 @@ mod state;
 use std::net::SocketAddr;
 use std::time::Instant;
 
-use axum::http::{HeaderName, HeaderValue, StatusCode};
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
+use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use state::AppState;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 async fn root() -> impl IntoResponse {
@@ -109,17 +110,37 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState::from_env().await?;
 
+    // Fail the boot on a wildcard or malformed origin rather than silently
+    // dropping it: a typo would otherwise surface only as a browser CORS error.
+    let allowed_origins = state
+        .config
+        .cors_origins
+        .iter()
+        .map(|origin| {
+            if origin == "*" {
+                anyhow::bail!("CORS_ORIGINS must list explicit origins, not '*'");
+            }
+            HeaderValue::from_str(origin)
+                .map_err(|_| anyhow::anyhow!("CORS_ORIGINS entry is not a valid origin: {origin}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    if allowed_origins.is_empty() {
+        anyhow::bail!("CORS_ORIGINS resolved to no origins");
+    }
     let cors = CorsLayer::new()
-        .allow_origin(
-            state
-                .config
-                .cors_origins
-                .iter()
-                .filter_map(|s| HeaderValue::from_str(s).ok())
-                .collect::<Vec<_>>(),
-        )
-        .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_origin(allowed_origins)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ])
+        .allow_headers([
+            AUTHORIZATION,
+            CONTENT_TYPE,
+            HeaderName::from_static("x-request-id"),
+        ]);
 
     let app = Router::new()
         .route("/", get(root))

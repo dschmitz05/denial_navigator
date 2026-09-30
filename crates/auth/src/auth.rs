@@ -61,10 +61,15 @@ pub fn create_token_for_organization(
 
 /// Decode and validate a JWT. Returns the claims on success.
 pub fn decode_token(token: &str, secret: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
+    let mut validation = Validation::new(Algorithm::HS256);
+    // The library default tolerates 60s of clock skew past `exp`; a revoked
+    // or expired session should not linger that long.
+    validation.leeway = 5;
+    validation.set_required_spec_claims(&["exp", "sub"]);
     let data = decode(
         token,
         &DecodingKey::from_secret(secret.as_bytes()),
-        &Validation::new(Algorithm::HS256),
+        &validation,
     )?;
     Ok(data.claims)
 }
