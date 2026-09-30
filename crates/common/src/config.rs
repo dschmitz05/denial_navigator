@@ -185,6 +185,13 @@ pub struct RateLimitConfig {
 }
 
 impl GatewayConfig {
+    /// Whether the session cookie should carry `Secure`: only when the app is
+    /// served over HTTPS (a `Secure` cookie is dropped by browsers on plain
+    /// http, which would break local development).
+    pub fn session_cookie_secure(&self) -> bool {
+        self.public_base_url.starts_with("https://")
+    }
+
     pub fn from_env() -> Self {
         let trusted = env_or(
             "TRUSTED_PROXY_NETWORKS",

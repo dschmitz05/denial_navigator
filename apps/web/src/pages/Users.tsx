@@ -33,7 +33,6 @@ export default function Users() {
       if (search) params.set('search', search)
       if (roleFilter) params.set('role', roleFilter)
       const resp = await fetch(`${API_BASE}/users?${params}`, {
-        headers: { Authorization: `Bearer ${localStorage.getItem('auth_token')}` },
       })
       const data = await resp.json()
       setUsers(Array.isArray(data) ? data as UserRecord[] : [])
@@ -61,7 +60,6 @@ export default function Users() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${localStorage.getItem('auth_token')}`,
         },
         body: JSON.stringify(form),
       })
@@ -83,7 +81,6 @@ export default function Users() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${localStorage.getItem('auth_token')}`,
         },
         body: JSON.stringify({ password: resetForm.password }),
       })
@@ -112,7 +109,6 @@ export default function Users() {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${localStorage.getItem('auth_token')}`,
         },
         body: JSON.stringify({ is_active: !target.is_active }),
       })
@@ -144,7 +140,7 @@ export default function Users() {
     try {
       const resp = await fetch(`${API_BASE}/users/${u.id}/totp`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('auth_token')}` },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ required }),
       })
       const data = await resp.json()
@@ -170,7 +166,6 @@ export default function Users() {
     try {
       const resp = await fetch(`${API_BASE}/users/${u.id}/totp/reset`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${localStorage.getItem('auth_token')}` },
       })
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.detail || 'Reset failed')
@@ -186,7 +181,6 @@ export default function Users() {
       const params = new URLSearchParams({ purge: 'true', confirm_username: purgeTarget.username })
       const resp = await fetch(`${API_BASE}/users/${purgeTarget.id}?${params}`, {
         method: 'DELETE',
-        headers: { Authorization: `Bearer ${localStorage.getItem('auth_token')}` },
       })
       const data = await resp.json().catch(() => ({}))
       if (!resp.ok) throw new Error(data.detail || `Delete failed (HTTP ${resp.status})`)

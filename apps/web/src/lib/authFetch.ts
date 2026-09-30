@@ -1,6 +1,6 @@
 /**
- * Attach the logged-in user's bearer token to every API request, and make
- * sure a failure response is always JSON.
+ * Mark every API request as coming from this app (the session itself is an
+ * httpOnly cookie), and make sure a failure response is always JSON.
  *
  * The audit log answers "who opened this patient's claim". It can only do that
  * if the request carries an identity: without this, every page except Users,
@@ -22,7 +22,8 @@
  * automatically, and there is no call site left to forget.
  *
  * Deliberately narrow — it only touches same-origin /api/ requests, and never
- * overwrites an Authorization header a caller set itself.
+ * overwrites headers a caller set itself (the MFA and password-change steps send
+ * their own restricted bearer token).
  */
 declare global {
   interface Window {
@@ -50,26 +51,20 @@ export function installAuthFetch(): void {
       || (url.startsWith(window.location.origin) && url.slice(window.location.origin.length).startsWith('/api/'))
     if (!isApiCall) return nativeFetch(input, init)
 
-    const token = localStorage.getItem('auth_token')
-    if (!token) {
-      return nativeFetch(input, init).then(response => (response.ok ? response : normalizeErrorResponse(response)))
-    }
-
+    // The browser attaches the httpOnly session cookie itself. The marker
+    // header is what the server requires on a cookie-authenticated write: a
+    // cross-site form cannot set it, and CORS keeps cross-origin scripts from
+    // doing so.
     const requestHeaders = input instanceof Request ? input.headers : undefined
     const headers = new Headers(init.headers || requestHeaders || {})
-    if (!headers.has('Authorization')) {
-      headers.set('Authorization', `Bearer ${token}`)
-    }
+    if (!headers.has('X-Requested-With')) headers.set('X-Requested-With', 'fetch')
 
-    // The API now REFUSES unauthenticated requests rather than serving them
-    // anonymously, so an expired token turns every page into a wall of errors.
-    // Treat a 401 as the session ending: drop the dead token and go to login.
+    // An expired or revoked session turns every page into a wall of errors.
+    // Treat a 401 as the session ending and go to login - except the probes
+    // that legitimately answer 401 while signed out.
     return nativeFetch(input, { ...init, headers }).then(async response => {
-      if (response.status === 401 && !url.includes('/auth/login')) {
-        localStorage.removeItem('auth_token')
-        if (window.location.pathname !== '/login') {
-          window.location.assign('/login')
-        }
+      if (response.status === 401 && !url.includes('/auth/login') && !url.includes('/auth/me')) {
+        if (window.location.pathname !== '/login') window.location.assign('/login')
       }
       return response.ok ? response : normalizeErrorResponse(response)
     })

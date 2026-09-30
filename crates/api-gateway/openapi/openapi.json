@@ -3,7 +3,7 @@
   "info": {
     "title": "Denial Navigator API",
     "version": "1.0.0",
-    "description": "Self-hosted denial-management API (Rust / axum rewrite). Every browser request goes through this gateway; it enforces authentication, role-based authorisation, per-request account currency and HIPAA access auditing.\n\nAuth: `POST /api/v1/auth/login` returns a bearer token. When TOTP is required it returns an mfa-scope token usable only on the `/auth/totp/*`, `/auth/login/totp` and `/auth/me` paths until `POST /auth/login/totp` upgrades it. Sibling services present `X-Service-Key` instead."
+    "description": "Self-hosted denial-management API (Rust / axum rewrite). Every browser request goes through this gateway; it enforces authentication, role-based authorisation, per-request account currency and HIPAA access auditing.\n\nAuth: `POST /api/v1/auth/login` returns a bearer token and, for browsers, sets it as an httpOnly `denial_session` cookie; a cookie-authenticated write request must also send `X-Requested-With`. When TOTP is required it returns an mfa-scope token usable only on the `/auth/totp/*`, `/auth/login/totp` and `/auth/me` paths until `POST /auth/login/totp` upgrades it. Sibling services present `X-Service-Key` instead."
   },
   "servers": [
     {
@@ -1454,6 +1454,39 @@
             }
           }
         },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "summary": "End the caller's sessions",
+        "tags": [
+          "auth"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Revokes every token issued to the caller before now (sign out everywhere) and clears the session cookie.",
         "responses": {
           "200": {
             "description": "OK",

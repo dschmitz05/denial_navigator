@@ -20,7 +20,7 @@ use axum::response::Response;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use denial_auth::rbac::{client_ip_from, resolve_from};
+use denial_auth::rbac::{client_ip_from, effective_authorization, resolve_from};
 use denial_common::config::GatewayConfig;
 
 /// Infrastructure, not PHI. Auditing these adds noise without recording a
@@ -309,11 +309,14 @@ pub async fn audit(State(state): State<AuditState>, req: Request, next: Next) ->
             .get(header::USER_AGENT)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        let authorization = req
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
+        let (authorization, _) = effective_authorization(
+            req.headers()
+                .get(header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok()),
+            req.headers()
+                .get(header::COOKIE)
+                .and_then(|v| v.to_str().ok()),
+        );
         let service_name = req
             .headers()
             .get("x-service-name")

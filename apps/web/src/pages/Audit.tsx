@@ -44,7 +44,6 @@ export default function Audit() {
       if (username) params.set('username', username)
 
       const resp = await fetch(`${API_BASE}/audit?${params}`, {
-        headers: { Authorization: `Bearer ${localStorage.getItem('auth_token')}` },
       })
       const data = await resp.json()
       setLogs(Array.isArray(data) ? data as AuditLog[] : [])
@@ -58,7 +57,6 @@ export default function Audit() {
   const loadStats = async () => {
     try {
       const resp = await fetch(`${API_BASE}/audit/stats`, {
-        headers: { Authorization: `Bearer ${localStorage.getItem('auth_token')}` },
       })
       const data = await resp.json()
       setStats(data as AuditStats)
@@ -72,7 +70,6 @@ export default function Audit() {
   // no users row to enumerate from.
   useEffect(() => {
     fetch(`${API_BASE}/audit/actors`, {
-      headers: { Authorization: `Bearer ${localStorage.getItem('auth_token')}` },
     })
       .then(r => (r.ok ? r.json() : []))
       .then((data: unknown) => setActors(Array.isArray(data) ? data as AuditActor[] : []))

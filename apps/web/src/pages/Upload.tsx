@@ -74,9 +74,6 @@ export default function Upload() {
       try {
         const resp = await fetch(`${API_BASE}/ingestion/ingest`, {
           method: 'POST',
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem('auth_token')}`,
-          },
           body: formData,
         })
         const data = await resp.json() as Record<string, unknown>
