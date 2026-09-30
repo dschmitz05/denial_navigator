@@ -478,7 +478,8 @@ add("/api/v1/analyses/status",
                "401": {"$ref": "#/components/responses/Unauthorized"}}))
 add("/api/v1/analyses/generate-jobs",
     post=op("Queue asynchronous recommendation generation", "analyses",
-            description="Returns a durable job ID; poll its status endpoint for the result.",
+            description="Returns a durable job ID; poll its status endpoint for the result. "
+                        "Jobs are retried on transient failure (up to 3 attempts).",
             body=jbody({"denial_id": S(format="uuid"),
                         "temperature": N(default=0.3)}, ["denial_id"]),
             responses={"200": {"description": "Queued", "content": {

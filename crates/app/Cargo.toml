@@ -14,3 +14,4 @@ denial_db = { workspace = true }
 denial_storage = { workspace = true }
 anyhow = { workspace = true }
 sqlx = { workspace = true }
+tokio = { workspace = true }

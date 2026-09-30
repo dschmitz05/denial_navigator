@@ -577,6 +577,7 @@ dependencies = [
  "denial_db",
  "denial_storage",
  "sqlx",
+ "tokio",
 ]
 
 [[package]]
