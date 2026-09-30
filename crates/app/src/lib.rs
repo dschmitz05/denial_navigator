@@ -36,6 +36,9 @@ pub struct AppState {
     pub ingestion_limiter: Arc<SlidingWindowLimiter>,
     pub knowledge_limiter: Arc<SlidingWindowLimiter>,
     pub analyses_limiter: Arc<SlidingWindowLimiter>,
+    /// Bounds concurrent recommendation runs (LLM + retrieval), shared by the
+    /// synchronous endpoint and the background job worker.
+    pub ai_slots: Arc<tokio::sync::Semaphore>,
     pub digest_horizon_days: u64,
     pub default_retention_days: u64,
     pub min_retention_days: u64,
@@ -87,6 +90,8 @@ impl AppState {
         let knowledge_rate_limit = env_usize("KNOWLEDGE_RATE_LIMIT", 10);
         let analyses_rate_limit = env_usize("ANALYSES_RATE_LIMIT", 20);
 
+        let ai_max_concurrency = env_usize("AI_MAX_CONCURRENCY", 2).max(1);
+
         let digest_horizon_days = env_u64("DIGEST_HORIZON_DAYS", 14);
         let default_retention_days = env_u64("DEFAULT_RETENTION_DAYS", 2190);
         let min_retention_days = env_u64("MINIMUM_RETENTION_DAYS", 365);
@@ -128,6 +133,7 @@ impl AppState {
                 Duration::from_secs(60),
                 "analyses",
             )),
+            ai_slots: Arc::new(tokio::sync::Semaphore::new(ai_max_concurrency)),
             digest_horizon_days,
             default_retention_days,
             min_retention_days,

@@ -1,4 +1,5 @@
 mod docs;
+mod job_worker;
 mod middleware;
 mod pdf;
 mod reprocessing;
@@ -109,6 +110,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let state = AppState::from_env().await?;
+    job_worker::spawn(state.clone());
 
     // Fail the boot on a wildcard or malformed origin rather than silently
     // dropping it: a typo would otherwise surface only as a browser CORS error.

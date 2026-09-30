@@ -303,7 +303,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "Returns a durable job ID; poll its status endpoint for the result.",
+        "description": "Returns a durable job ID; poll its status endpoint for the result. Jobs are retried on transient failure (up to 3 attempts).",
         "requestBody": {
           "required": true,
           "content": {

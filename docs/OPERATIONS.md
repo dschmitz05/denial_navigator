@@ -98,6 +98,26 @@ evidence. It turns *degraded* when the three most recent analyses all did, or
 when their share over 24 hours reaches `AI_DEGRADED_THRESHOLD` (default 0.2);
 AI pages then show a banner until analyses succeed again.
 
+## Recommendation jobs
+
+`POST /api/v1/analyses/generate-jobs` queues a recommendation and returns a job
+id; poll `GET /api/v1/analyses/generate-jobs/{id}`. Jobs live in Postgres and
+are run by a worker inside each gateway process, so they survive a restart and
+several gateways share one queue. A transient failure (database, model server)
+is retried after 5 s, then 30 s, up to 3 attempts; a permanent one (for example
+a denial that no longer exists) fails immediately. A job whose worker died is
+recovered after `AI_JOB_TIMEOUT_SECS` plus a minute, so after a crash expect
+pending work to resume within about six minutes.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AI_MAX_CONCURRENCY` | 2 | Recommendation runs at once per gateway process, shared by the queue and the synchronous `POST /analyses/generate`. A synchronous request that cannot get a slot within 5 s returns 429. Set it to what the model server can serve. |
+| `AI_JOB_POLL_SECS` | 2 | How often an idle worker looks for a due job. |
+| `AI_JOB_TIMEOUT_SECS` | 300 | Longest a single job may run before it counts as a failed attempt. |
+
+The limit is per gateway process, so with several replicas the model server sees
+up to replicas x `AI_MAX_CONCURRENCY` runs.
+
 ## Write-off approval
 
 Settings → Write-off approval (system or security administrators) sets the

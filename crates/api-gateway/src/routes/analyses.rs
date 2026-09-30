@@ -496,12 +496,28 @@ pub async fn generate_analysis(
         });
     }
 
+    // Share the model-server budget with the background worker. Waiting a
+    // few seconds absorbs a burst; past that, ask the caller to retry rather
+    // than queue unbounded work on the LLM.
+    let _slot = tokio::time::timeout(
+        std::time::Duration::from_secs(SYNC_SLOT_WAIT_SECS),
+        state.ai_slots.clone().acquire_owned(),
+    )
+    .await
+    .map_err(|_| AppError::RateLimited {
+        retry_after: SYNC_SLOT_WAIT_SECS,
+    })?
+    .map_err(|_| AppError::Internal("AI concurrency limiter closed".into()))?;
+
     Ok(Json(
         generate_analysis_for_request(state, request, Some(principal)).await?,
     ))
 }
 
-async fn generate_analysis_for_request(
+/// How long a synchronous request waits for a free AI slot.
+const SYNC_SLOT_WAIT_SECS: u64 = 5;
+
+pub(crate) async fn generate_analysis_for_request(
     state: AppState,
     request: GenerateAnalysisRequest,
     principal: Option<Principal>,
@@ -866,45 +882,7 @@ pub async fn enqueue_generation(
     .await
     .map_err(AppError::Db)?;
 
-    let worker_state = state.clone();
-    let worker_principal = principal.clone();
-    tokio::spawn(async move {
-        if let Err(error) = sqlx::query(
-            "UPDATE recommendation_jobs SET status = 'running', started_at = NOW(), attempts = attempts + 1 WHERE id = $1",
-        )
-        .bind(job_id)
-        .execute(&worker_state.pool)
-        .await
-        {
-            tracing::error!(%job_id, "could not start recommendation job: {error}");
-            return;
-        }
-        match generate_analysis_for_request(worker_state.clone(), request, Some(worker_principal)).await {
-            Ok(result) => {
-                if let Err(error) = sqlx::query(
-                    "UPDATE recommendation_jobs SET status = 'completed', result = $2::jsonb, completed_at = NOW() WHERE id = $1",
-                )
-                .bind(job_id)
-                .bind(result.to_string())
-                .execute(&worker_state.pool)
-                .await
-                {
-                    tracing::error!(%job_id, "could not complete recommendation job: {error}");
-                }
-            }
-            Err(error) => {
-                tracing::warn!(%job_id, "recommendation job failed: {error}");
-                let _ = sqlx::query(
-                    "UPDATE recommendation_jobs SET status = 'failed', error_message = $2, completed_at = NOW() WHERE id = $1",
-                )
-                .bind(job_id)
-                .bind(error.to_string())
-                .execute(&worker_state.pool)
-                .await;
-            }
-        }
-    });
-
+    // The background worker (see `job_worker`) claims the row.
     Ok(Json(serde_json::json!({
         "id": job_id,
         "status": "pending",
